@@ -96,7 +96,9 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 Voice notes and audio files can be transcribed to text before they reach the session, so you can talk to Claude instead of typing. Transcription runs entirely outside Claude — a local model or a hosted API — so it never consumes Claude usage; only the resulting text enters the conversation (the same cost as if you had typed it). If transcription is disabled or fails, the message falls back to a placeholder plus the `attachment_file_id`.
 
-Configure via environment variables in `~/.claude/channels/telegram/.env`. `TELEGRAM_TRANSCRIBE` selects the backend:
+The guided way to set this up is `/telegram:configure transcribe`, which asks which backend you want, collects the API key or installs the local engine, and writes `.env` for you. The daemon reads these settings live on each voice message, so changes apply immediately — no restart.
+
+Under the hood it's environment variables in `~/.claude/channels/telegram/.env`. `TELEGRAM_TRANSCRIBE` selects the backend:
 
 | Value | Backend | Setup |
 | --- | --- | --- |
