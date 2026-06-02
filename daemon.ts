@@ -7,7 +7,7 @@ import {
   statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, extname, sep } from 'node:path'
+import { join, extname, basename, sep } from 'node:path'
 import { execFile, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import net from 'node:net'
@@ -677,6 +677,100 @@ function startPaneWatcher(paneId: string): void {
   paneWatcher.start()
 }
 
+// ---- File download + transcription ----
+
+// Download a Telegram file to the local inbox, returning its path.
+async function downloadTelegramFile(file_id: string): Promise<string> {
+  const file = await bot.api.getFile(file_id)
+  if (!file.file_path) throw new Error('Telegram returned no file_path')
+  const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
+  const res = await fetch(url)
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
+  const buf = Buffer.from(await res.arrayBuffer())
+  const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'
+  const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
+  const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
+  const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
+  mkdirSync(INBOX_DIR, { recursive: true })
+  writeFileSync(path, buf)
+  return path
+}
+
+// Voice transcription runs entirely outside Claude — a local faster-whisper
+// model or a hosted Whisper API — so it never consumes Claude usage; only the
+// resulting text reaches the session. Backend is chosen at install time via
+// TELEGRAM_TRANSCRIBE (off | local | groq | openai); see ACCESS.md.
+type TranscribeProvider = 'off' | 'local' | 'groq' | 'openai'
+const TRANSCRIBE = (process.env.TELEGRAM_TRANSCRIBE ?? 'off').toLowerCase() as TranscribeProvider
+const TRANSCRIBE_MODEL = process.env.TELEGRAM_TRANSCRIBE_MODEL ?? ''
+
+// Returns the transcript, or null if disabled/unconfigured/failed (caller falls
+// back to a placeholder so a bad transcription never drops the message).
+async function transcribe(audioPath: string): Promise<string | null> {
+  try {
+    switch (TRANSCRIBE) {
+      case 'groq':
+        return await transcribeHttp(audioPath,
+          'https://api.groq.com/openai/v1/audio/transcriptions',
+          process.env.GROQ_API_KEY, TRANSCRIBE_MODEL || 'whisper-large-v3-turbo')
+      case 'openai':
+        return await transcribeHttp(audioPath,
+          'https://api.openai.com/v1/audio/transcriptions',
+          process.env.OPENAI_API_KEY, TRANSCRIBE_MODEL || 'whisper-1')
+      case 'local':
+        return await transcribeLocal(audioPath, TRANSCRIBE_MODEL || 'base')
+      default:
+        return null
+    }
+  } catch (err) {
+    process.stderr.write(`daemon: transcription (${TRANSCRIBE}) failed: ${err}\n`)
+    return null
+  }
+}
+
+// OpenAI-compatible audio transcription endpoint (covers OpenAI and Groq).
+async function transcribeHttp(
+  audioPath: string, endpoint: string, apiKey: string | undefined, model: string,
+): Promise<string | null> {
+  if (!apiKey) {
+    process.stderr.write(`daemon: transcription enabled but API key missing for ${endpoint}\n`)
+    return null
+  }
+  const form = new FormData()
+  form.append('file', new Blob([readFileSync(audioPath)]), basename(audioPath))
+  form.append('model', model)
+  form.append('response_format', 'text')
+  const res = await fetch(endpoint, { method: 'POST', headers: { Authorization: `Bearer ${apiKey}` }, body: form })
+  if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
+  return (await res.text()).trim() || null
+}
+
+// Local faster-whisper via the bundled Python helper (no API, fully private).
+async function transcribeLocal(audioPath: string, model: string): Promise<string | null> {
+  const python = process.env.TELEGRAM_WHISPER_PYTHON || 'python3'
+  const script = join(import.meta.dir, 'transcribe_local.py')
+  const { stdout } = await exec(python, [script, audioPath, model], {
+    timeout: 300_000, maxBuffer: 10 * 1024 * 1024,
+  })
+  return stdout.trim() || null
+}
+
+// Build inbound text for an audio message: transcribe when enabled, else use the
+// placeholder. Sends an immediate typing hint since transcription adds latency.
+async function audioInboundText(
+  ctx: Context, file_id: string, fallback: string,
+): Promise<{ text: string; transcribed: boolean }> {
+  if (TRANSCRIBE === 'off') return { text: fallback, transcribed: false }
+  void bot.api.sendChatAction(String(ctx.chat!.id), 'typing').catch(() => {})
+  let path: string
+  try { path = await downloadTelegramFile(file_id) }
+  catch (err) { process.stderr.write(`daemon: audio download failed: ${err}\n`); return { text: fallback, transcribed: false } }
+  const transcript = await transcribe(path)
+  if (!transcript) return { text: fallback, transcribed: false }
+  const caption = ctx.message?.caption
+  return { text: caption ? `${transcript}\n\n[caption] ${caption}` : transcript, transcribed: true }
+}
+
 // ---- Tool call handling ----
 
 async function handleCall(
@@ -743,20 +837,7 @@ async function handleCall(
         break
       }
       case 'download_attachment': {
-        const file_id = args.file_id as string
-        const file = await bot.api.getFile(file_id)
-        if (!file.file_path) throw new Error('Telegram returned no file_path')
-        const url = `https://api.telegram.org/file/bot${TOKEN}/${file.file_path}`
-        const res = await fetch(url)
-        if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
-        const buf = Buffer.from(await res.arrayBuffer())
-        const rawExt = file.file_path.includes('.') ? file.file_path.split('.').pop()! : 'bin'
-        const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
-        const uniqueId = (file.file_unique_id ?? '').replace(/[^a-zA-Z0-9_-]/g, '') || 'dl'
-        const path = join(INBOX_DIR, `${Date.now()}-${uniqueId}.${ext}`)
-        mkdirSync(INBOX_DIR, { recursive: true })
-        writeFileSync(path, buf)
-        text = path
+        text = await downloadTelegramFile(args.file_id as string)
         break
       }
       case 'edit_message': {
@@ -1010,7 +1091,7 @@ bot.on('callback_query:data', async ctx => {
   }
 })
 
-type AttachmentMeta = { kind: string; file_id: string; size?: number; mime?: string; name?: string }
+type AttachmentMeta = { kind: string; file_id: string; size?: number; mime?: string; name?: string; transcribed?: boolean }
 
 async function handleInbound(
   ctx: Context,
@@ -1073,6 +1154,7 @@ async function handleInbound(
         ...(attachment.size != null ? { attachment_size: String(attachment.size) } : {}),
         ...(attachment.mime ? { attachment_mime: attachment.mime } : {}),
         ...(attachment.name ? { attachment_name: attachment.name } : {}),
+        ...(attachment.transcribed ? { attachment_transcribed: 'true' } : {}),
       } : {}),
     },
   }
@@ -1139,16 +1221,19 @@ bot.on('message:document', async ctx => {
 
 bot.on('message:voice', async ctx => {
   const voice = ctx.message.voice
-  await handleInbound(ctx, ctx.message.caption ?? '(voice message)', undefined, {
-    kind: 'voice', file_id: voice.file_id, size: voice.file_size, mime: voice.mime_type,
+  const { text, transcribed } = await audioInboundText(ctx, voice.file_id, ctx.message.caption ?? '(voice message)')
+  await handleInbound(ctx, text, undefined, {
+    kind: 'voice', file_id: voice.file_id, size: voice.file_size, mime: voice.mime_type, transcribed,
   })
 })
 
 bot.on('message:audio', async ctx => {
   const audio = ctx.message.audio
   const name = safeName(audio.file_name)
-  await handleInbound(ctx, ctx.message.caption ?? `(audio: ${safeName(audio.title) ?? name ?? 'audio'})`, undefined, {
-    kind: 'audio', file_id: audio.file_id, size: audio.file_size, mime: audio.mime_type, name,
+  const fallback = ctx.message.caption ?? `(audio: ${safeName(audio.title) ?? name ?? 'audio'})`
+  const { text, transcribed } = await audioInboundText(ctx, audio.file_id, fallback)
+  await handleInbound(ctx, text, undefined, {
+    kind: 'audio', file_id: audio.file_id, size: audio.file_size, mime: audio.mime_type, name, transcribed,
   })
 })
 

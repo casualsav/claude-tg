@@ -5,3 +5,4 @@ node_modules/
 pending-events.jsonl
 inbox/
 *.corrupt-*
+__pycache__/

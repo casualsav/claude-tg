@@ -92,6 +92,33 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`chunkMode`** chooses the split strategy: `length` cuts exactly at the limit; `newline` prefers paragraph boundaries.
 
+## Voice transcription
+
+Voice notes and audio files can be transcribed to text before they reach the session, so you can talk to Claude instead of typing. Transcription runs entirely outside Claude — a local model or a hosted API — so it never consumes Claude usage; only the resulting text enters the conversation (the same cost as if you had typed it). If transcription is disabled or fails, the message falls back to a placeholder plus the `attachment_file_id`.
+
+Configure via environment variables in `~/.claude/channels/telegram/.env`. `TELEGRAM_TRANSCRIBE` selects the backend:
+
+| Value | Backend | Setup |
+| --- | --- | --- |
+| `off` (default) | none | Voice/audio arrive as placeholders. |
+| `local` | faster-whisper, on this machine | `pip install faster-whisper`. No API key, fully private, free. Same model weights as Groq — identical quality at the same model size; CPU is slower for large models. |
+| `groq` | Groq Whisper API | Set `GROQ_API_KEY`. Free tier, very fast, `whisper-large-v3-turbo`. |
+| `openai` | OpenAI Whisper API | Set `OPENAI_API_KEY`. `whisper-1`, ~$0.006/min. |
+
+```
+# ~/.claude/channels/telegram/.env
+TELEGRAM_TRANSCRIBE=local
+TELEGRAM_TRANSCRIBE_MODEL=large-v3-turbo   # optional; defaults per backend
+```
+
+Optional keys:
+
+- **`TELEGRAM_TRANSCRIBE_MODEL`** — model override. Defaults: `base` (local), `whisper-large-v3-turbo` (groq), `whisper-1` (openai).
+- **`TELEGRAM_WHISPER_PYTHON`** — Python interpreter for the local backend (default `python3`).
+- **`TELEGRAM_WHISPER_DEVICE`** / **`TELEGRAM_WHISPER_COMPUTE`** — local device (`cpu`/`cuda`/`auto`) and compute type (`int8`, `float16`, …).
+
+When a message was transcribed, the inbound `<channel>` tag carries `attachment_transcribed="true"` and the transcript is in the message body.
+
 ## Skill reference
 
 | Command | Effect |
