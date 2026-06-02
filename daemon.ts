@@ -859,7 +859,8 @@ bot.command('help', async ctx => {
     `Messages you send here route to a paired Claude Code session.\n\n` +
     `/start — pairing instructions\n/status — check your pairing state\n` +
     `/mode — interactive mode switcher\n` +
-    `/plan, /auto, /default, /acceptedits, /yolo — quick mode switch\n\n` +
+    `/plan, /auto, /default, /acceptedits, /yolo — quick mode switch\n` +
+    `/stop — interrupt the current task (Esc)\n\n` +
     `Any other /slash commands are relayed directly to Claude Code.`
   )
 })
@@ -899,6 +900,19 @@ bot.command('auto', ctx => handleModeCommand(ctx, 'auto'))
 bot.command('default', ctx => handleModeCommand(ctx, 'default'))
 bot.command('acceptedits', ctx => handleModeCommand(ctx, 'acceptEdits'))
 bot.command('yolo', ctx => handleModeCommand(ctx, 'bypassPermissions'))
+
+// Interrupt the current turn by sending Esc to the pane (same as pressing Esc
+// in the TUI). withInjection pauses the watcher and re-baselines afterward so
+// the resulting pane change isn't mistaken for a new prompt/event.
+bot.command('stop', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) {
+    await ctx.reply('No active Claude Code session with tmux.')
+    return
+  }
+  const ok = await paneWatcher.withInjection(() => sendKeys(activePaneId!, ['Escape']))
+  await ctx.reply(ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.')
+})
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 bot.on('callback_query:data', async ctx => {
@@ -1327,6 +1341,7 @@ void (async () => {
               { command: 'default', description: 'Switch to default mode' },
               { command: 'acceptedits', description: 'Switch to accept-edits mode' },
               { command: 'yolo', description: 'Switch to bypass-permissions mode' },
+              { command: 'stop', description: 'Interrupt the current task (Esc)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
