@@ -155,6 +155,7 @@ formatted. Bot commands:
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
 | `/stop` | Interrupt the current task (sends Esc) |
 | `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
+| `/model` | Show the current model (or `/model <name>` to switch) |
 
 Any other `/slash` command is relayed straight to Claude Code. Photos and
 documents you send are made available to Claude to read.

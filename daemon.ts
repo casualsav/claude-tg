@@ -438,6 +438,42 @@ function detectCurrentMode(paneText: string): CcMode {
   return 'default'
 }
 
+// Pull the active model out of a /model picker capture. Prefers an explicit
+// "current/active model" marker, then a "(current)" suffix, then the cursor-
+// highlighted row (the picker opens with the cursor on the model in use).
+function parseCurrentModel(pickerText: string): string | null {
+  const clean = (s: string) =>
+    s.replace(/^[│>\s]+/, '').replace(/[│\s]+$/, '')
+     .replace(/^\d+[.)]\s*/, '').replace(/^[✔✓☑●◉❯►▶]\s*/, '')
+     .replace(/\s*\((?:current|active|in use|recommended)\)\s*$/i, '').trim()
+  const lines = pickerText.split('\n').map(l => stripAnsi(l))
+  for (const l of lines) {
+    const m = l.match(/(?:current|active)\s*model\s*[:\-]?\s*(.+)/i)
+    if (m) { const v = clean(m[1]); if (v) return v }
+    const c = l.match(/(.+?)\s*\((?:current|active|in use)\)/i)
+    if (c) { const v = clean(c[1]); if (v) return v }
+  }
+  for (const l of lines) {
+    const m = l.match(/^[\s│]*[❯►▶]\s*(.+)$/)
+    if (m) { const v = clean(m[1]); if (v) return v }
+  }
+  return null
+}
+
+// Read the active model by briefly opening the /model picker, reading the marked
+// entry, then dismissing it with Esc. withInjection pauses the watcher (so the
+// picker is never relayed as buttons) and re-baselines it on exit.
+async function readCurrentModel(paneId: string, watcher: PaneWatcher): Promise<string | null> {
+  return watcher.withInjection(async () => {
+    if (!(await sendKeys(paneId, ['/model', 'Enter']))) return null
+    await waitForSettle(paneId, 200, 4000)
+    const text = await capturePane(paneId)
+    await sendKeys(paneId, ['Escape'])
+    await waitForSettle(paneId, 200, 3000)
+    return parseCurrentModel(text)
+  })
+}
+
 // True while Claude Code is mid-turn. The TUI shows a spinner + "esc to
 // interrupt" footer while working and clears it when the turn ends, so the
 // footer is the ground truth. Markers are intentionally broad — detection only
@@ -1026,7 +1062,8 @@ bot.command('help', async ctx => {
     `/mode — interactive mode switcher\n` +
     `/plan, /auto, /default, /acceptedits, /bypass — quick mode switch\n` +
     `/stop — interrupt the current task (Esc)\n` +
-    `/reply <response> — type a response into the session (e.g. a /login code)\n\n` +
+    `/reply <response> — type a response into the session (e.g. a /login code)\n` +
+    `/model — show the current model (or /model <name> to switch)\n\n` +
     `Any other /slash commands are relayed directly to Claude Code.`
   )
 })
@@ -1085,6 +1122,29 @@ bot.command('reply', async ctx => {
   }
   const ok = await injectText(activePaneId, paneWatcher, text)
   await ctx.reply(ok ? '✅ Sent to the session.' : 'Could not reach the session pane.')
+})
+
+// /model with no args reports the active model rather than relaying (which would
+// pop the picker on Telegram as buttons); /model <name> still relays to switch.
+bot.command('model', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) {
+    await ctx.reply('No active Claude Code session with tmux.')
+    return
+  }
+  const arg = (ctx.match ?? '').toString().trim()
+  if (arg) {
+    const chat_id = String(ctx.chat!.id)
+    void relaySlashCommand(activePaneId, paneWatcher, `/model ${arg}`, chat_id, ctx.message!.message_id)
+    return
+  }
+  const model = await readCurrentModel(activePaneId, paneWatcher)
+  await ctx.reply(
+    model
+      ? `🧠 Current model: <b>${escapeHtml(model)}</b>`
+      : 'Could not determine the current model. Use /model &lt;name&gt; to switch.',
+    { parse_mode: 'HTML' },
+  )
 })
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
@@ -1607,6 +1667,7 @@ void (async () => {
               { command: 'bypass', description: 'Switch to bypass-permissions mode' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'reply', description: 'Type a response into the session (e.g. a /login code)' },
+              { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
