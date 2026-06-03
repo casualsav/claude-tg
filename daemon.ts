@@ -564,7 +564,7 @@ function onPaneEvent(text: string): void {
 
   const prompt = detectUserPrompt(text)
   if (!prompt) return
-  const h = hashText(prompt.question + '|' + prompt.options.join('|'))
+  const h = hashText(prompt.question + '|' + prompt.options.map(o => o.label).join('|'))
   if (h === lastRelayedPromptHash) return
   lastRelayedPromptHash = h
   void relayPromptToTelegram(prompt)
