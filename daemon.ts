@@ -1042,11 +1042,11 @@ bot.command('status', async ctx => {
   }
   for (const [code, p] of Object.entries(access.pending)) {
     if (p.senderId === senderId) {
-      await ctx.reply(`Pending pairing — run in Claude Code:\n\n/telegram:access pair ${code}`)
+      await ctx.reply(`🔗 Pending pairing — run in Claude Code:\n\n/telegram:access pair ${code}`)
       return
     }
   }
-  await ctx.reply(`Not paired. Send me a message to get a pairing code.`)
+  await ctx.reply(`🔗 Not paired. Send me a message to get a pairing code.`)
 })
 
 bot.command('mode', async ctx => {
@@ -1259,7 +1259,7 @@ async function handleInbound(
   if (result.action === 'drop') return
   if (result.action === 'pair') {
     const lead = result.isResend ? 'Still pending' : 'Pairing required'
-    await ctx.reply(`${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
+    await ctx.reply(`🔗 ${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
     return
   }
 
@@ -1351,7 +1351,7 @@ bot.on('message:text', async ctx => {
     if (result.action !== 'deliver') {
       if (result.action === 'pair') {
         const lead = result.isResend ? 'Still pending' : 'Pairing required'
-        await ctx.reply(`${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
+        await ctx.reply(`🔗 ${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
       }
       return
     }
