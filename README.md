@@ -170,6 +170,21 @@ The bot token and transcription settings live in
 `~/.claude/channels/telegram/.env` (kept `chmod 600`), managed by
 `/telegram:configure`.
 
+## Upgrading
+
+The daemon is long-lived and deliberately survives Claude sessions, so installing
+new plugin code doesn't replace the *running* process on its own. To avoid stale
+behavior after an upgrade, the shim fingerprints the plugin's source on connect:
+if the running daemon started on different code, the shim restarts it
+automatically (it `SIGTERM`s the old daemon and respawns from the new code on the
+next connect). **So a normal upgrade — update the plugin, start a session — just
+works; no manual daemon kill needed.**
+
+The one exception is a **bot-token** change: the token lives in `.env`, not in the
+code, so it doesn't move the fingerprint. Apply a token change with the restart
+documented in `/telegram:configure` (restart the session, or
+`kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`).
+
 ## Security
 
 - Secrets (`.env`) are written `0600` and never echoed back in full.
@@ -188,6 +203,7 @@ The bot token and transcription settings live in
 | `daemon.ts` | Long-lived Telegram bot + access gate + session control |
 | `common.ts` | Shared wire protocol and state paths |
 | `markdown.ts` | Markdown→Telegram-HTML converter + chunk-safe splitter |
+| `prompt.ts` | Pane-scrape detection of interactive prompts → Telegram buttons |
 | `server.ts` | Legacy all-in-one (kept for compatibility) |
 | `transcribe_local.py` | Local faster-whisper transcription helper |
 | `skills/` | `/telegram:configure` and `/telegram:access` skills |

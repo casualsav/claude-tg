@@ -6,10 +6,27 @@ import { z } from 'zod'
 import { randomBytes } from 'node:crypto'
 import { execFileSync } from 'node:child_process'
 import { spawn } from 'node:child_process'
-import { openSync, closeSync, statSync, renameSync, mkdirSync } from 'node:fs'
+import { openSync, closeSync, statSync, renameSync, mkdirSync, readFileSync } from 'node:fs'
 import net from 'node:net'
 import { join } from 'node:path'
-import { frame, makeLineReader, STATE_DIR, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim } from './common.ts'
+import { frame, makeLineReader, computeCodeFingerprint, STATE_DIR, SOCKET_PATH, DAEMON_PID_FILE, type ShimToDaemon, type DaemonToShim } from './common.ts'
+
+// Our view of the on-disk code. If a connected daemon reports a different
+// fingerprint, it's running pre-upgrade code and we replace it (once).
+const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
+let daemonReplaceTried = false
+
+// SIGTERM the running daemon by its pid file. It shuts down gracefully (releases
+// the socket), then our reconnect spawns a fresh daemon from the current code.
+function replaceStaleDaemon(): void {
+  try {
+    const pid = parseInt(readFileSync(DAEMON_PID_FILE, 'utf8'), 10)
+    if (pid > 1 && pid !== process.pid) {
+      process.kill(pid, 'SIGTERM')
+      process.stderr.write(`shim: daemon was running stale code — restarting it (pid=${pid})\n`)
+    }
+  } catch {}
+}
 
 // Resolve the stable tmux pane id for this session (opus-direct Block A).
 function resolvePaneId(): string | null {
@@ -124,6 +141,13 @@ function tryConnect(): Promise<boolean> {
 function handleDaemonMsg(msg: DaemonToShim): void {
   switch (msg.t) {
     case 'hello':
+      // Stale daemon (pre-upgrade code, or one too old to report a fingerprint)?
+      // Replace it once; the socket close triggers a reconnect that respawns it.
+      if (!daemonReplaceTried && msg.version !== CODE_FINGERPRINT && CODE_FINGERPRINT !== '') {
+        daemonReplaceTried = true
+        replaceStaleDaemon()
+        sock?.destroy()
+      }
       break   // subscribe sent on connect already
     case 'detached':
       process.stderr.write('shim: detached by newer subscriber\n')

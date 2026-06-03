@@ -12,11 +12,15 @@ import { execFile, execFileSync } from 'node:child_process'
 import { promisify } from 'node:util'
 import net from 'node:net'
 import {
-  frame, makeLineReader,
+  frame, makeLineReader, computeCodeFingerprint,
   STATE_DIR, ACCESS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   type ShimToDaemon, type DaemonToShim, type InboundParams,
 } from './common.ts'
+
+// Code fingerprint captured at startup; sent to shims so they can detect and
+// replace a daemon left running stale code after a plugin upgrade.
+const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml } from './markdown.ts'
 import { detectUserPrompt, stripAnsi, type PromptInfo } from './prompt.ts'
 
@@ -1237,7 +1241,7 @@ bot.catch(err => {
 
 function handleShimConnection(socket: net.Socket): void {
   const write = (msg: DaemonToShim): void => { socket.write(frame(msg)) }
-  write({ t: 'hello' })
+  write({ t: 'hello', version: CODE_FINGERPRINT })
 
   const reader = makeLineReader<ShimToDaemon>(
     async msg => {

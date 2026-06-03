@@ -1,4 +1,5 @@
-import { chmodSync, readFileSync } from 'node:fs'
+import { chmodSync, readFileSync, readdirSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { Buffer } from 'node:buffer'
@@ -49,6 +50,24 @@ export function makeLineReader<T = unknown>(
   }
 }
 
+// Fingerprint the plugin's source so the shim can tell whether a long-lived
+// daemon is running stale code (i.e. the plugin was upgraded under it) and
+// transparently restart it. Hashes every .ts file in the plugin dir, so any
+// code change to the daemon or a module it imports changes the fingerprint.
+// Returns '' if the dir can't be read — callers treat that as "don't restart".
+export function computeCodeFingerprint(dir: string): string {
+  try {
+    const files = readdirSync(dir).filter(f => f.endsWith('.ts')).sort()
+    const h = createHash('sha256')
+    for (const f of files) {
+      h.update(f); h.update('\0'); h.update(readFileSync(join(dir, f)))
+    }
+    return h.digest('hex').slice(0, 16)
+  } catch {
+    return ''
+  }
+}
+
 // Wire protocol types (opus-direct).
 export type ShimToDaemon =
   | { t: 'subscribe'; paneId: string | null }
@@ -57,7 +76,7 @@ export type ShimToDaemon =
       request_id: string; tool_name: string; description: string; input_preview: string } }
 
 export type DaemonToShim =
-  | { t: 'hello' }
+  | { t: 'hello'; version?: string }   // version = daemon's code fingerprint
   | { t: 'detached' }                    // a newer shim subscribed; stop expecting events
   | { t: 'inbound'; params: InboundParams }
   | { t: 'permission'; params: { request_id: string; behavior: 'allow' | 'deny' } }
