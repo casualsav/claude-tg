@@ -74,6 +74,47 @@ This is a Claude Code plugin. Add it and install:
 repo. The `@better-claude-plugins` suffix is the marketplace name from
 `.claude-plugin/marketplace.json` and is independent of the repo name.)
 
+## Launch
+
+Channels are a research-preview feature, and only channels from the official
+`claude-plugins-official` marketplace are on Claude Code's approved allowlist. A
+custom channel like this one is blocked until you load it explicitly — otherwise
+you'll see `plugin:telegram@better-claude-plugins • not on the approved channels
+allowlist`. Launch Claude Code with the development flag (requires Claude Code
+v2.1.80+):
+
+```bash
+claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins
+```
+
+That loads and activates the channel for the session (after a one-time
+confirmation prompt). To also skip per-tool permission prompts, add
+`--dangerously-skip-permissions`:
+
+```bash
+claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions
+```
+
+Since you'll run this every session, add an alias. Either drop it in your shell
+rc by hand:
+
+```bash
+alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions'
+```
+
+…or run the bundled one-time setup script, which appends that alias to your
+`~/.zshrc` or `~/.bashrc` (idempotently):
+
+```bash
+bash scripts/setup-alias.sh
+```
+
+Then reload your shell (or `source` the rc) and launch with `claude-tg`.
+
+> Note: `/plugin install` can't add the alias for you — plugins are copied to a
+> cache and don't run host-shell install scripts. The setup script above is the
+> closest one-step equivalent.
+
 ## Setup
 
 All setup happens from your Claude Code session via the bundled skills.

@@ -20,20 +20,29 @@ In the clean container:
 git clone -b <branch> https://github.com/casualsav/better-claude-telegram
 ```
 
-Then, in a Claude Code session in that container:
+Then, in a Claude Code session in that container, register and install:
 
 ```
 # 2. Register the local clone as a marketplace and install the plugin
 /plugin marketplace add ./better-claude-telegram
 /plugin install telegram@better-claude-plugins
+```
 
+Now **relaunch** Claude Code with the development-channel flag — a custom channel
+isn't on the approved allowlist, so a plain restart won't load it (requires
+Claude Code v2.1.80+):
+
+```bash
+claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins
+```
+
+Back in the session, configure the channel (use the **test** bot token):
+
+```
 # 3. Configure a fresh channel (test token, then pick a transcription backend)
 /telegram:configure <TEST_bot_token>
 /telegram:configure transcribe
 ```
-
-Restart the Claude Code session so the plugin loads (its MCP server and the
-`/telegram:*` skills).
 
 ## What to verify
 
