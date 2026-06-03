@@ -3,7 +3,7 @@ import { Bot, GrammyError, InlineKeyboard, InputFile, type Context } from 'gramm
 import type { ReactionTypeEmoji } from 'grammy/types'
 import { randomBytes, createHash } from 'node:crypto'
 import {
-  readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync,
+  readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, rmSync,
   statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
@@ -628,7 +628,21 @@ const REPLY_FOOTER = `💬 <b>Reply to this message</b>, or use <code>/reply (re
 // those already arrive through the MCP reply tool.
 const AUTH_URL_RE = /https?:\/\/[^\s│"')]*(?:oauth|authorize)[^\s│"')]*/i
 
+const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
+
 function onPaneEvent(text: string): void {
+  // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
+  // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
+  // against the exact rendering. Off by default; no effect on normal operation.
+  if (DEBUG_PANE) {
+    try {
+      appendFileSync(
+        '/tmp/tg-pane-debug.log',
+        `\n===== ${new Date().toISOString()} detected=${JSON.stringify(detectUserPrompt(text))} =====\n${text}\n`,
+      )
+    } catch {}
+  }
+
   // Opportunistically update the known ring from passive observation.
   updateKnownRing(detectCurrentMode(text))
 
