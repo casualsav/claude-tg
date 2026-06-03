@@ -515,36 +515,27 @@ async function waitForSettle(paneId: string, pollMs: number, maxMs: number): Pro
   }
 }
 
-// Ring of known-available modes, built up as they're observed.
-// Starts with the 3 always-present modes; 'auto' and 'bypassPermissions'
-// are added the first time they're detected as the current mode.
-let knownRing: CcMode[] = ['default', 'acceptEdits', 'plan']
-
-function updateKnownRing(mode: CcMode): void {
-  if (!knownRing.includes(mode)) knownRing.push(mode)
-}
-
-// Returns the mode reached, or null if target is not in the known ring
-// (in which case ZERO keystrokes are sent — no state mutation on failure).
+// Cycle the permission mode to `target` by pressing Shift+Tab and re-reading the
+// footer after each press, stopping the moment the target mode is observed. This
+// makes no assumption about the cycle's order or where it starts — it walks the
+// real cycle — so it stays correct when bypass/auto modes are present or absent.
+// Returns the mode reached, or null if the target isn't in this session's cycle
+// (we loop all the way back to the starting mode without finding it, leaving the
+// mode unchanged).
 async function switchToMode(paneId: string, target: CcMode, watcher: PaneWatcher): Promise<CcMode | null> {
   return watcher.withInjection(async () => {
-    const text = await capturePane(paneId)
-    const current = detectCurrentMode(text)
-    updateKnownRing(current)
+    const start = detectCurrentMode(await capturePane(paneId))
+    if (start === target) return start
 
-    if (current === target) return current
-    if (!knownRing.includes(target)) return null   // unreachable — send zero keys
-
-    const ci = knownRing.indexOf(current)
-    const ti = knownRing.indexOf(target)
-    const count = ((ti - ci) + knownRing.length) % knownRing.length
-
-    for (let i = 0; i < count; i++) {
+    let current = start
+    for (let i = 0; i < 6; i++) {   // CC exposes at most a handful of modes — cap at one full loop
       await sendKeys(paneId, ['BTab'])
       await waitForSettle(paneId, 300, 5000)
+      current = detectCurrentMode(await capturePane(paneId))
+      if (current === target) return current
+      if (current === start) break   // cycled all the way back — target isn't reachable here
     }
-
-    return detectCurrentMode(await capturePane(paneId))
+    return null
   })
 }
 
@@ -642,9 +633,6 @@ function onPaneEvent(text: string): void {
       )
     } catch {}
   }
-
-  // Opportunistically update the known ring from passive observation.
-  updateKnownRing(detectCurrentMode(text))
 
   // Keep the Telegram "typing…" indicator alive while Claude is working.
   typingPresence.update(detectWorking(text))
@@ -1197,7 +1185,6 @@ bot.on('callback_query:data', async ctx => {
     })
     const newModeText = await capturePane(activePaneId)
     const newMode = detectCurrentMode(newModeText)
-    updateKnownRing(newMode)
     const keyboard = new InlineKeyboard().text(modeLabel(newMode), 'mode:cycle')
     await ctx.editMessageText('Choose mode:', { reply_markup: keyboard }).catch(() => {})
     return
