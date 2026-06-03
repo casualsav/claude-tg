@@ -22,6 +22,7 @@ import { randomBytes } from 'crypto'
 import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync, statSync, renameSync, realpathSync, chmodSync } from 'fs'
 import { homedir } from 'os'
 import { join, extname, sep } from 'path'
+import { mdToTelegramHtml, chunkHtml } from './markdown.ts'
 
 const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
@@ -114,6 +115,8 @@ type Access = {
   textChunkLimit?: number
   /** Split on paragraph boundaries instead of hard char count. */
   chunkMode?: 'length' | 'newline'
+  /** Auto-render standard Markdown in replies to native Telegram formatting. Default: true. */
+  renderMarkdown?: boolean
 }
 
 function defaultAccess(): Access {
@@ -158,6 +161,7 @@ function readAccessFile(): Access {
       replyToMode: parsed.replyToMode,
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
+      renderMarkdown: parsed.renderMarkdown,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -464,8 +468,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           format: {
             type: 'string',
-            enum: ['text', 'markdownv2'],
-            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+            enum: ['markdown', 'text', 'markdownv2'],
+            description: "Rendering. Default 'markdown': standard Markdown (**bold**, `code`, ```fences```, lists, [links](url)) renders natively — just write normal Markdown, no escaping. 'text' sends literally. 'markdownv2' is raw pre-escaped MarkdownV2 (legacy).",
           },
         },
         required: ['chat_id', 'text'],
@@ -506,8 +510,8 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           text: { type: 'string' },
           format: {
             type: 'string',
-            enum: ['text', 'markdownv2'],
-            description: "Rendering mode. 'markdownv2' enables Telegram formatting (bold, italic, code, links). Caller must escape special chars per MarkdownV2 rules. Default: 'text' (plain, no escaping needed).",
+            enum: ['markdown', 'text', 'markdownv2'],
+            description: "Rendering. Default 'markdown' renders standard Markdown natively; 'text' sends literally; 'markdownv2' is raw pre-escaped MarkdownV2 (legacy).",
           },
         },
         required: ['chat_id', 'message_id', 'text'],
@@ -525,8 +529,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const text = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
-        const format = (args.format as string | undefined) ?? 'text'
-        const parseMode = format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const format = args.format as string | undefined
 
         assertAllowedChat(chat_id)
 
@@ -542,7 +545,11 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(text, limit, mode)
+        // `text` forces plain; `markdownv2` is legacy raw passthrough; otherwise
+        // standard Markdown auto-renders to HTML unless disabled in config.
+        const render = format !== 'text' && format !== 'markdownv2' && access.renderMarkdown !== false
+        const parseMode = render ? 'HTML' as const : format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, mode)
         const sentIds: number[] = []
 
         try {
@@ -614,12 +621,17 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       case 'edit_message': {
         assertAllowedChat(args.chat_id as string)
-        const editFormat = (args.format as string | undefined) ?? 'text'
-        const editParseMode = editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const editFormat = args.format as string | undefined
+        const editRender = editFormat !== 'text' && editFormat !== 'markdownv2' && loadAccess().renderMarkdown !== false
+        const editParseMode = editRender ? 'HTML' as const : editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        // An edit targets one message; if rendered HTML overflows, keep the first chunk.
+        const editText = editRender
+          ? chunkHtml(mdToTelegramHtml(args.text as string), MAX_CHUNK_LIMIT)[0]
+          : args.text as string
         const edited = await bot.api.editMessageText(
           args.chat_id as string,
           Number(args.message_id),
-          args.text as string,
+          editText,
           ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
         )
         const id = typeof edited === 'object' ? edited.message_id : args.message_id

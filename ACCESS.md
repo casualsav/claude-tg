@@ -92,6 +92,8 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`chunkMode`** chooses the split strategy: `length` cuts exactly at the limit; `newline` prefers paragraph boundaries.
 
+**`renderMarkdown`** (default `true`) renders the standard Markdown in Claude's replies as native Telegram formatting — bold, italic, inline/block code, links, headings, lists, blockquotes. Claude just writes normal Markdown; no escaping needed. Set `false` to deliver replies as plain text. Read live, so changes apply on the next message.
+
 ## Voice transcription
 
 Voice notes and audio files can be transcribed to text before they reach the session, so you can talk to Claude instead of typing. Transcription runs entirely outside Claude — a local model or a hosted API — so it never consumes Claude usage; only the resulting text enters the conversation (the same cost as if you had typed it). If transcription is disabled or fails, the message falls back to a placeholder plus the `attachment_file_id`.
@@ -133,7 +135,7 @@ When a message was transcribed, the inbound `<channel>` tag carries `attachment_
 | `/telegram:access policy allowlist` | Set `dmPolicy`. Values: `pairing`, `allowlist`, `disabled`. |
 | `/telegram:access group add -1001234567890` | Enable a group. Flags: `--no-mention` (also requires disabling privacy mode), `--allow id1,id2`. |
 | `/telegram:access group rm -1001234567890` | Disable a group. |
-| `/telegram:access set ackReaction 👀` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `mentionPatterns`. |
+| `/telegram:access set ackReaction 👀` | Set a config key: `ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `renderMarkdown`, `mentionPatterns`. |
 
 ## Config file
 
@@ -171,6 +173,9 @@ When a message was transcribed, the inbound `<channel>` tag carries `attachment_
   "textChunkLimit": 4096,
 
   // length = cut at limit. newline = prefer paragraph boundaries.
-  "chunkMode": "newline"
+  "chunkMode": "newline",
+
+  // Render Claude's Markdown as native Telegram formatting. false = plain text.
+  "renderMarkdown": true
 }
 ```

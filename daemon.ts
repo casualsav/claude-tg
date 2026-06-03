@@ -17,6 +17,7 @@ import {
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   type ShimToDaemon, type DaemonToShim, type InboundParams,
 } from './common.ts'
+import { mdToTelegramHtml, chunkHtml } from './markdown.ts'
 
 const exec = promisify(execFile)
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -57,6 +58,7 @@ type Access = {
   replyToMode?: 'off' | 'first' | 'all'
   textChunkLimit?: number
   chunkMode?: 'length' | 'newline'
+  renderMarkdown?: boolean
 }
 
 function defaultAccess(): Access {
@@ -80,6 +82,7 @@ function readAccessFile(): Access {
       replyToMode: parsed.replyToMode,
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
+      renderMarkdown: parsed.renderMarkdown,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -822,7 +825,7 @@ async function handleCall(
         const msgText = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
-        const parseMode = (args.format as string | undefined) === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const format = args.format as string | undefined
 
         assertAllowedChat(chat_id)
         for (const f of files) {
@@ -835,7 +838,11 @@ async function handleCall(
         const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
         const mode = access.chunkMode ?? 'length'
         const replyMode = access.replyToMode ?? 'first'
-        const chunks = chunk(msgText, limit, mode)
+        // Rendering: `text` forces plain; `markdownv2` is the legacy raw-passthrough;
+        // otherwise standard Markdown auto-renders to HTML unless disabled in config.
+        const render = format !== 'text' && format !== 'markdownv2' && access.renderMarkdown !== false
+        const parseMode = render ? 'HTML' as const : format === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const chunks = render ? chunkHtml(mdToTelegramHtml(msgText), limit) : chunk(msgText, limit, mode)
         const sentIds: number[] = []
 
         for (let i = 0; i < chunks.length; i++) {
@@ -877,11 +884,17 @@ async function handleCall(
       }
       case 'edit_message': {
         assertAllowedChat(args.chat_id as string)
-        const editParseMode = (args.format as string | undefined) === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        const editFormat = args.format as string | undefined
+        const editRender = editFormat !== 'text' && editFormat !== 'markdownv2' && loadAccess().renderMarkdown !== false
+        const editParseMode = editRender ? 'HTML' as const : editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
+        // An edit targets one message; if rendered HTML overflows, keep the first chunk.
+        const editText = editRender
+          ? chunkHtml(mdToTelegramHtml(args.text as string), MAX_CHUNK_LIMIT)[0]
+          : args.text as string
         const edited = await bot.api.editMessageText(
           args.chat_id as string,
           Number(args.message_id),
-          args.text as string,
+          editText,
           ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
         )
         const msgId = typeof edited === 'object' ? edited.message_id : args.message_id
