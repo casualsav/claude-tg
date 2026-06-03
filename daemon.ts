@@ -1012,7 +1012,7 @@ async function handleModeCommand(
 bot.command('start', async ctx => {
   if (!dmCommandGate(ctx)) return
   await ctx.reply(
-    `This bot bridges Telegram to a Claude Code session.\n\n` +
+    `🔗 This bot bridges Telegram to a Claude Code session.\n\n` +
     `To pair:\n1. DM me anything — you'll get a 6-char code\n` +
     `2. In Claude Code: /telegram:access pair <code>\n\nAfter that, DMs here reach that session.`
   )
