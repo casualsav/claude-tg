@@ -988,6 +988,15 @@ async function handleCall(
 
 // ---- Slash command relay ----
 
+// Type a slash command into the pane and wait for it to settle. Reaction-free
+// core, shared by relaySlashCommand and the session-reset commands.
+async function injectSlash(paneId: string, watcher: PaneWatcher, command: string): Promise<void> {
+  await watcher.withInjection(async () => {
+    await sendKeys(paneId, [command, 'Enter'])
+    await waitForSettle(paneId, 300, 30_000)
+  })
+}
+
 async function relaySlashCommand(
   paneId: string,
   watcher: PaneWatcher,
@@ -995,10 +1004,7 @@ async function relaySlashCommand(
   chat_id: string,
   message_id: number,
 ): Promise<void> {
-  await watcher.withInjection(async () => {
-    await sendKeys(paneId, [command, 'Enter'])
-    await waitForSettle(paneId, 300, 30_000)
-  })
+  await injectSlash(paneId, watcher, command)
   void bot.api.setMessageReaction(chat_id, message_id, [
     { type: 'emoji', emoji: '👍' },
   ]).catch(() => {})
@@ -1043,6 +1049,27 @@ async function handleModeCommand(
   if (msgId) {
     void bot.api.setMessageReaction(chat_id, msgId, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
   }
+}
+
+// ---- Session-reset command helper ----
+
+// /new and /clear both reset the conversation. Relay the command with no 👍 (the
+// confirmation below is the acknowledgement), then report the model the fresh
+// session is on.
+async function handleResetCommand(ctx: Context, command: string): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) {
+    await ctx.reply('No active Claude Code session with tmux.')
+    return
+  }
+  await injectSlash(activePaneId, paneWatcher, command)
+  const model = await readCurrentModel(activePaneId, paneWatcher)
+  await ctx.reply(
+    model
+      ? `🆕 New session started · model: <b>${escapeHtml(model)}</b>`
+      : '🆕 New session started.',
+    { parse_mode: 'HTML' },
+  )
 }
 
 // ---- Telegram bot handlers ----
@@ -1148,6 +1175,11 @@ bot.command('model', async ctx => {
     { parse_mode: 'HTML' },
   )
 })
+
+// /new and /clear reset the session; both confirm with "🆕 New session started"
+// plus the active model instead of a 👍 (handled in handleResetCommand).
+bot.command('new', ctx => handleResetCommand(ctx, '/new'))
+bot.command('clear', ctx => handleResetCommand(ctx, '/clear'))
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
