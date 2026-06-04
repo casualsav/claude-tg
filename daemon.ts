@@ -771,8 +771,22 @@ const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
 let lastActedResetKey = ''
 let lastActedResetAt = 0
 // Per limit type ('session'/'weekly'/…): the highest warning threshold (75/95)
-// already sent for the current reset period, so 76/77/… don't re-notify.
-const usageWarnState = new Map<string, { resetKey: string; threshold: number }>()
+// already sent for the current reset period (`resetKey`), plus when it was sent
+// (`at`) so a width-clipped repaint of the same banner can't re-fire it within a
+// few hours, so 76/77/… and re-renders don't re-notify.
+const usageWarnState = new Map<string, { resetKey: string; threshold: number; at: number }>()
+// Backstop re-fire lockout: a genuine reset is ≥5h away (session) or days (weekly),
+// so once a threshold is sent for a type, ignore the same-or-lower threshold for this
+// long even if the reset descriptor looks different (a truncated/wrapped banner frame).
+const WARN_RELOCK_MS = 90 * 60_000
+
+// Normalize a reset descriptor (e.g. "Jun 7, 4pm (UTC)") to a width-stable dedup key.
+// Terminal truncation/wrapping clips the trailing "(UTC) · …", so key on the date/time
+// core before the timezone paren — otherwise a clipped repaint reads as a new reset
+// period and re-fires the heads-up.
+function normResetKey(descr: string): string {
+  return descr.toLowerCase().replace(/\s*\(.*$/, '').replace(/[….\s]+$/, '').replace(/\s+/g, ' ').trim()
+}
 
 // Persist the hit + warning dedup across daemon restarts. In-memory state was the
 // cause of repeated 75% alerts during development (each restart re-armed them).
@@ -782,8 +796,12 @@ try {
   if (typeof s.lastActedResetKey === 'string') lastActedResetKey = s.lastActedResetKey
   if (typeof s.lastActedResetAt === 'number') lastActedResetAt = s.lastActedResetAt
   for (const [k, v] of Object.entries(s.warn ?? {})) {
-    if (v && typeof (v as { resetKey?: unknown }).resetKey === 'string' && typeof (v as { threshold?: unknown }).threshold === 'number') {
-      usageWarnState.set(k, v as { resetKey: string; threshold: number })
+    const e = v as { resetKey?: unknown; threshold?: unknown; at?: unknown }
+    if (e && typeof e.resetKey === 'string' && typeof e.threshold === 'number') {
+      // Normalize on load too (not just on save) — idempotent, and it heals a raw key
+      // written by an older daemon or a manual edit, so a leftover "Jun 7, 4pm (UTC)"
+      // can't read as a new period against the normalized live banner and re-fire.
+      usageWarnState.set(k, { resetKey: normResetKey(e.resetKey), threshold: e.threshold, at: typeof e.at === 'number' ? e.at : 0 })
     }
   }
 } catch {}
@@ -859,13 +877,23 @@ function handleUsageLimit(text: string): void {
   const pct = parseInt(wm[1], 10)
   if (pct < 75 || pct >= 100) return   // <75 not notable; 100 is a hit (handled above)
   const type = wm[2].toLowerCase()
-  const resetKey = wm[3].trim()
+  const resetKey = normResetKey(wm[3])
   const threshold = pct >= 95 ? 95 : 75
   const prev = usageWarnState.get(type)
   const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
-  if (threshold <= firedThisPeriod) { usageWarnState.set(type, { resetKey, threshold: firedThisPeriod }); saveUsageNotifState(); return }
-  usageWarnState.set(type, { resetKey, threshold })
+  // Suppress when this period already saw ≥ this threshold, OR (backstop) we sent the
+  // same-or-higher threshold for this type within the lockout — the latter absorbs a
+  // truncated/wrapped banner frame whose clipped reset text reads as a new period.
+  const lockedOut = !!prev && threshold <= prev.threshold && Date.now() - prev.at < WARN_RELOCK_MS
+  if (threshold <= firedThisPeriod || lockedOut) {
+    if (DEBUG_PANE) process.stderr.write(`daemon: usage warn suppressed type=${type} pct=${pct} key="${resetKey}" prev=${JSON.stringify(prev)}\n`)
+    if (prev) usageWarnState.set(type, { resetKey, threshold: Math.max(prev.threshold, threshold), at: prev.at })
+    saveUsageNotifState()
+    return
+  }
+  usageWarnState.set(type, { resetKey, threshold, at: Date.now() })
   saveUsageNotifState()
+  process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
   const emoji = threshold >= 95 ? '🚨' : '⚠️'
