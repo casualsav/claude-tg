@@ -22,7 +22,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectUserPrompt, stripAnsi, type PromptInfo, type PromptOption } from './prompt.ts'
+import { detectUserPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption } from './prompt.ts'
 
 const exec = promisify(execFile)
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -638,6 +638,18 @@ let lastRelayedPromptHash = ''
 type PendingMultiSelect = { paneId: string; options: PromptOption[]; selected: Set<number> }
 const pendingMultiSelect = new Map<string, PendingMultiSelect>()
 
+// Prompts that carry a "Type something" free-text option, keyed by the relayed
+// Telegram message `${chatId}:${messageId}`. Tapping its ✏️ button looks the prompt
+// up here to spawn a force-reply; `downCount` is how many Down presses reach the
+// free-text option (it sits just past the real options) and `tabbed` selects the
+// post-entry behaviour (advance-and-continue vs. resolve).
+type FreeTextPrompt = { paneId: string; downCount: number; tabbed: boolean; question: string }
+const freeTextPrompts = new Map<string, FreeTextPrompt>()
+
+// Force-reply messages awaiting the user's free-text answer, keyed by the
+// force-reply message id; a reply to one is typed into the pane's free-text field.
+const freeTextReplyTargets = new Map<string, Omit<FreeTextPrompt, 'question'>>()
+
 // Auth/login URLs surfaced from the pane (e.g. /login's OAuth link), so the user
 // can open them in a browser and reply with the code. `lastRelayedAuthUrl` dedups
 // the same link across watcher ticks; `authUrlMessageIds` (`${chatId}:${msgId}`)
@@ -749,22 +761,31 @@ function onPaneEvent(text: string): void {
 
   const prompt = detectUserPrompt(text)
   if (!prompt) return
-  const h = hashText(prompt.question + '|' + prompt.options.map(o => o.label).join('|'))
+  const h = promptHash(prompt)
   if (h === lastRelayedPromptHash) return
   lastRelayedPromptHash = h
   void relayPromptToTelegram(prompt)
+}
+
+// Identity of a prompt for double-relay suppression: its question plus the option
+// labels. Each tab of a multi-question prompt is a distinct question, so advancing
+// tabs yields a new hash and relays the next question.
+function promptHash(prompt: PromptInfo): string {
+  return hashText(prompt.question + '|' + prompt.options.map(o => o.label).join('|'))
 }
 
 // Render a prompt as Telegram HTML: bold question, then each numbered option with
 // its description (if any) as a blockquote beneath it.
 function renderPromptHtml(prompt: PromptInfo): string {
   const lines = [`❓ <b>${escapeHtml(prompt.question)}</b>`]
-  if (prompt.multiSelect) lines.push('<i>Pick one or more, then tap ✅ Submit.</i>')
+  if (prompt.tabbed) lines.push('<i>One of several questions — answer this one to move to the next.</i>')
+  else if (prompt.multiSelect) lines.push('<i>Pick one or more, then tap ✅ Submit.</i>')
   lines.push('')
   prompt.options.forEach((opt, i) => {
     lines.push(`<b>${i + 1}.</b> ${escapeHtml(opt.label)}`)
     if (opt.description) lines.push(`<blockquote>${escapeHtml(opt.description)}</blockquote>`)
   })
+  if (prompt.freeText) lines.push('', '✏️ <i>…or tap “Type something” to write your own answer.</i>')
   return lines.join('\n')
 }
 
@@ -796,18 +817,33 @@ function multiSelectKeyboard(options: PromptOption[], selected: Set<number>): In
   return kb
 }
 
+// Numbered-option keyboard for a single-answer prompt (3 per row). `prefix` is the
+// callback namespace — `prompt` for an ordinary single-select (digit-driven) or
+// `mq` for a multi-question tab (arrow-driven). A ✏️ Type-something button is
+// appended when the prompt offers free text.
+function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  prompt.options.forEach((_, i) => {
+    kb.text(String(i + 1), `${prefix}:${i + 1}`)
+    if ((i + 1) % 3 === 0) kb.row()
+  })
+  if (prompt.freeText) kb.row().text('✏️ Type something', 'ftext')
+  return kb
+}
+
 async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
   const access = loadAccess()
   const targets = access.allowFrom
-  if (targets.length === 0) return
+  if (targets.length === 0 || !activePaneId) return
 
   const text = renderPromptHtml(prompt)
 
   for (const chat_id of targets) {
     try {
-      if (prompt.multiSelect && activePaneId) {
+      let sent
+      if (prompt.multiSelect) {
         const selected = new Set<number>()
-        const sent = await bot.api.sendMessage(chat_id, text, {
+        sent = await bot.api.sendMessage(chat_id, text, {
           parse_mode: 'HTML',
           reply_markup: multiSelectKeyboard(prompt.options, selected),
         })
@@ -815,16 +851,63 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
           paneId: activePaneId, options: prompt.options, selected,
         })
       } else {
-        const keyboard = new InlineKeyboard()
-        prompt.options.forEach((_, i) => {
-          keyboard.text(String(i + 1), `prompt:${i + 1}`)
-          if ((i + 1) % 3 === 0) keyboard.row()
+        sent = await bot.api.sendMessage(chat_id, text, {
+          parse_mode: 'HTML',
+          reply_markup: singleAnswerKeyboard(prompt, prompt.tabbed ? 'mq' : 'prompt'),
         })
-        await bot.api.sendMessage(chat_id, text, { parse_mode: 'HTML', reply_markup: keyboard })
+      }
+      // Remember the prompt so a ✏️ tap knows how to reach its free-text field: the
+      // option sits `options.length` Down presses past the first one.
+      if (prompt.freeText) {
+        freeTextPrompts.set(`${chat_id}:${sent.message_id}`, {
+          paneId: activePaneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
+        })
       }
     } catch (e) {
       process.stderr.write(`daemon: prompt relay to ${chat_id} failed: ${e}\n`)
     }
+  }
+}
+
+// Parse the multi-question review/submit tab into the chosen answers. Each is a
+// "● <question>" line followed by a "→ <answer>" line.
+function parseReviewAnswers(paneText: string): { question: string; answer: string }[] {
+  const lines = stripAnsi(paneText).split('\n').map(l => l.trim())
+  const out: { question: string; answer: string }[] = []
+  for (let i = 0; i < lines.length; i++) {
+    const q = lines[i].match(/^●\s+(.+)$/)
+    if (q) {
+      const a = lines[i + 1]?.match(/^→\s+(.+)$/)
+      if (a) out.push({ question: q[1].trim(), answer: a[1].trim() })
+    }
+  }
+  return out
+}
+
+// After answering a tab of a multi-question prompt, the form auto-advances. The
+// watcher is paused (and re-baselined) across the injection, so it won't surface
+// the new screen — we read it here and either relay the next question or, once the
+// review/submit tab is reached, press Enter to submit and report the answers.
+async function handleTabbedAdvance(chat_id: string): Promise<void> {
+  if (!activePaneId || !paneWatcher) return
+  const text = await capturePane(activePaneId)
+  if (isSubmitScreen(text)) {
+    const answers = parseReviewAnswers(text)
+    await paneWatcher.withInjection(async () => {
+      await sendKeys(activePaneId!, ['Enter'])
+      await waitForSettle(activePaneId!, 300, 5000)
+    })
+    lastRelayedPromptHash = ''
+    const summary = answers.length
+      ? '\n\n' + answers.map(a => `• ${escapeHtml(a.question)} → <b>${escapeHtml(a.answer)}</b>`).join('\n')
+      : ''
+    await bot.api.sendMessage(chat_id, `✅ <b>Answers submitted.</b>${summary}`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+  const next = detectUserPrompt(text)
+  if (next?.tabbed) {
+    lastRelayedPromptHash = promptHash(next)
+    await relayPromptToTelegram(next)
   }
 }
 
@@ -1636,6 +1719,58 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Multi-question (tabbed) answer buttons. Unlike a single-select, digit keys
+  // don't apply here — we move the cursor down to the option and press Enter, which
+  // selects it and advances to the next tab. handleTabbedAdvance then relays the
+  // next question or submits.
+  const mqMatch = /^mq:(\d+)$/.exec(data)
+  if (mqMatch) {
+    const senderId = String(ctx.from.id)
+    if (!loadAccess().allowFrom.includes(senderId)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    const num = Number(mqMatch[1])
+    await ctx.answerCallbackQuery({ text: `Selected ${num}` }).catch(() => {})
+    await paneWatcher.withInjection(async () => {
+      await sendKeys(activePaneId!, [...Array(num - 1).fill('Down'), 'Enter'])
+      await waitForSettle(activePaneId!, 300, 5000)
+    })
+    await ctx.editMessageReplyMarkup().catch(() => {})
+    await handleTabbedAdvance(String(ctx.chat?.id))
+    return
+  }
+
+  // ✏️ Type-something button → open a force-reply so the user can write a free-text
+  // answer (driven into the pane by the message:text handler).
+  if (data === 'ftext') {
+    const senderId = String(ctx.from.id)
+    if (!loadAccess().allowFrom.includes(senderId)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const fp = freeTextPrompts.get(`${ctx.chat?.id}:${ctx.callbackQuery.message?.message_id}`)
+    if (!fp) {
+      await ctx.answerCallbackQuery({ text: 'This prompt is no longer active.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const sent = await ctx.reply(`✏️ Reply with your answer for:\n<b>${escapeHtml(fp.question)}</b>`, {
+      parse_mode: 'HTML',
+      reply_markup: { force_reply: true, input_field_placeholder: 'Your answer' },
+    }).catch(() => null)
+    if (sent) {
+      freeTextReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, {
+        paneId: fp.paneId, downCount: fp.downCount, tabbed: fp.tabbed,
+      })
+    }
+    return
+  }
+
   // Multi-select prompt buttons (toggle an option, or submit the selection)
   const mselMatch = /^msel:(\d+|submit)$/.exec(data)
   if (mselMatch) {
@@ -1816,9 +1951,42 @@ bot.on('message:text', async ctx => {
     case BTN_NEW:   await confirmNewSession(ctx); return
   }
 
+  // Reply to a ✏️ Type-something force-reply → type the answer into the prompt's
+  // free-text field: move the cursor down to the "Type something" option, type the
+  // text, and Enter. On a multi-question prompt this advances to the next tab, so
+  // hand off to handleTabbedAdvance; otherwise the single question resolves.
+  const replyTo = ctx.message.reply_to_message
+  if (replyTo) {
+    const ft = freeTextReplyTargets.get(`${ctx.chat?.id}:${replyTo.message_id}`)
+    if (ft) {
+      freeTextReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
+      if (!dmCommandGate(ctx)) return
+      if (!activePaneId || !paneWatcher) {
+        await ctx.reply('No active Claude Code session with tmux.')
+        return
+      }
+      // The cursor must settle on the "Type something" option before the text is
+      // typed — otherwise the field isn't focused and the answer resolves empty
+      // (to "__other__"). Settle again after typing so Enter commits the full text.
+      await paneWatcher.withInjection(async () => {
+        if (ft.downCount > 0) {
+          await sendKeys(activePaneId!, Array(ft.downCount).fill('Down'))
+          await waitForSettle(activePaneId!, 150, 2000)
+        }
+        await sendKeysLiteral(activePaneId!, text)
+        await waitForSettle(activePaneId!, 150, 2000)
+        await sendKeys(activePaneId!, ['Enter'])
+        await waitForSettle(activePaneId!, 300, 5000)
+      })
+      lastRelayedPromptHash = ''
+      if (ft.tabbed) await handleTabbedAdvance(String(ctx.chat?.id))
+      else await ctx.reply('✅ Sent your answer.')
+      return
+    }
+  }
+
   // Reply to a relayed sign-in link → inject the code into the pane (the login
   // input field), not the agent's inbound queue.
-  const replyTo = ctx.message.reply_to_message
   if (replyTo && authUrlMessageIds.has(`${ctx.chat?.id}:${replyTo.message_id}`)) {
     if (!dmCommandGate(ctx)) return
     if (!activePaneId || !paneWatcher) {

@@ -15,7 +15,19 @@
 // An option carries its short label plus the indented description AskUserQuestion
 // renders beneath it (when present).
 export type PromptOption = { label: string; description?: string }
-export type PromptInfo = { question: string; options: PromptOption[]; multiSelect: boolean }
+// `options` holds only the *real* answer options. AskUserQuestion auto-appends two
+// meta-options — "Type something" (free text) and "Chat about this" — which we
+// strip out: the free-text one is surfaced via `freeText` and driven separately,
+// "Chat about this" is dropped. `tabbed` marks a multi-question prompt, which
+// renders one question per tab and is driven by arrow-key navigation rather than
+// digit selection (see the daemon's drive logic).
+export type PromptInfo = {
+  question: string
+  options: PromptOption[]
+  multiSelect: boolean
+  tabbed: boolean
+  freeText: boolean
+}
 
 export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[mGKHFJABCDsuhl]/g, '').replace(/\x1b\([AB]/g, '')
@@ -35,6 +47,15 @@ const SELECT_HINT = /enter to select|↑\/↓|\bto navigate\b/i
 const MULTI_HINT = /space to (?:select|toggle|check)/i
 // Checkbox glyphs in the option block — a second tell for multi-select.
 const CHECKBOX_GLYPH = /[☐☑▢▣◻◼⬜✅]/
+// Footer wording unique to a multi-question (tabbed) AskUserQuestion: the user
+// moves between question tabs with Tab/arrow keys, so the hint reads "Tab/Arrow
+// keys to navigate". A single-question prompt's hint reads "↑/↓ to navigate".
+const TABBED_HINT = /tab\/arrow/i
+// The two meta-options AskUserQuestion auto-appends below the real choices: a
+// free-text entry and a "chat instead" escape hatch. Matched on their exact
+// labels (a trailing period is rendered on the free-text one).
+const FREE_TEXT_LABEL = /^type something\.?$/i
+const CHAT_LABEL = /^chat about this\.?$/i
 // An option's wrapped description: deeper indentation than the option line itself,
 // tolerating one leading box border. The normal in-box prefix is "│ " (one space),
 // so a description needs ≥2 spaces after the optional border to qualify.
@@ -99,7 +120,19 @@ function parseOptions(region: string[], re: RegExp): PromptOption[] | null {
   return options.length >= 2 ? options : null
 }
 
+// The final tab of a multi-question prompt: a read-only review of the chosen
+// answers with "Submit answers" / "Cancel" options. It's not a question to relay —
+// the daemon recognises it to auto-submit once every question is answered — and its
+// "Ready to submit your answers?" line appears nowhere else.
+export function isSubmitScreen(paneText: string): boolean {
+  return /ready to submit your answers/i.test(stripAnsi(paneText))
+}
+
 export function detectUserPrompt(paneText: string): PromptInfo | null {
+  // The review/submit tab carries the same select-menu footer as a question, but
+  // it's driven programmatically, not relayed — keep it out of detection entirely.
+  if (isSubmitScreen(paneText)) return null
+
   const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
 
   // Find the live select-menu footer: the lowest line carrying the hint, which
@@ -130,12 +163,20 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // Parse the block from the topmost option down to the footer, preferring numbered
   // options (AskUserQuestion) and falling back to ink markers.
   const region = lines.slice(topOpt, footerIdx)
-  const options = parseOptions(region, NUMBERED_RE) ?? parseOptions(region, INK_RE)
-  if (!options) return null
+  const parsed = parseOptions(region, NUMBERED_RE) ?? parseOptions(region, INK_RE)
+  if (!parsed) return null
+
+  // Split off the auto-appended meta-options. They always trail the real choices,
+  // so the real options keep their natural 1..k numbering (and "Type something"
+  // sits at position k+1, which the daemon reaches with k Down presses).
+  const freeText = parsed.some(o => FREE_TEXT_LABEL.test(o.label))
+  const options = parsed.filter(o => !FREE_TEXT_LABEL.test(o.label) && !CHAT_LABEL.test(o.label))
+  if (options.length === 0 && !freeText) return null
 
   const question = findQuestionAbove(lines, topOpt - 1)
   if (!question) return null
 
   const multiSelect = MULTI_HINT.test(lines[footerIdx]) || region.some(l => CHECKBOX_GLYPH.test(l))
-  return { question, options, multiSelect }
+  const tabbed = TABBED_HINT.test(lines[footerIdx])
+  return { question, options, multiSelect, tabbed, freeText }
 }
