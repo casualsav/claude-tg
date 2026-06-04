@@ -1611,6 +1611,57 @@ bot.command('tail', async ctx => {
   for (const c of chunks) await bot.api.sendMessage(String(ctx.chat!.id), c, { parse_mode: 'HTML' }).catch(() => {})
 })
 
+// Extract Claude's recent reply blocks from pane scrollback — an assistant line
+// "● <text>" plus its indented wrapped continuation — preserving line structure so
+// they render like the terminal in a <pre>. Skips tool-result (⎿) lines and
+// "● Called <tool>" invocation headers, so /terminal reads as what Claude *said*,
+// not the raw terminal. Returns the last `maxBlocks` blocks (each multi-line),
+// oldest first.
+function recentAssistantBlocks(raw: string, maxBlocks: number): string[] {
+  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  const blocks: string[] = []
+  let cur: string[] | null = null
+  const flush = () => {
+    if (!cur) return
+    if (!/^●\s*Called\b/i.test(cur[0])) blocks.push(cur.join('\n'))
+    cur = null
+  }
+  for (const l of lines) {
+    const m = l.match(/^\s*●\s+(.+)$/)
+    if (m) { flush(); cur = [`● ${m[1].trim()}`] }
+    else if (cur) {
+      if (/^\s{2,}\S/.test(l) && !/^\s*⎿/.test(l)) cur.push(`  ${l.trim()}`)
+      else flush()
+    }
+  }
+  flush()
+  return blocks.slice(-maxBlocks)
+}
+
+// /terminal [N] — a clean digest of Claude's last N replies (default 6), parsed
+// from the scrollback and shown in the same monospace <pre> as /tail. Complements
+// /tail (raw terminal): this is "what did Claude say while I was away," without the
+// box-drawing/tool/spinner noise.
+bot.command('terminal', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
+  const n = Number.isFinite(arg) ? Math.max(1, Math.min(arg, 30)) : 6
+  let raw: string
+  try {
+    raw = (await exec('tmux', ['capture-pane', '-p', '-t', activePaneId, '-S', '-600', '-J'], { timeout: 3000 })).stdout
+  } catch {
+    await ctx.reply('Could not read the session pane.')
+    return
+  }
+  const blocks = recentAssistantBlocks(raw, n)
+  if (blocks.length === 0) { await ctx.reply('Nothing recent to show.'); return }
+  const body = blocks.join('\n\n')
+  const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+  const chunks = chunkHtml(`🔄 <b>Claude's last ${blocks.length} message(s)</b>\n<pre>${escapeHtml(body)}</pre>`, limit)
+  for (const c of chunks) await bot.api.sendMessage(String(ctx.chat!.id), c, { parse_mode: 'HTML' }).catch(() => {})
+})
+
 // ---- Usage-limit reset reminder ----
 // A daemon-side timer that pings the user when their usage limit resets. Works even
 // while Claude is frozen at the limit, since the daemon is a separate process. The
@@ -2389,6 +2440,7 @@ void (async () => {
               { command: 'session', description: 'Show cwd, branch, mode, and model' },
               { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
               { command: 'tail', description: 'Show recent terminal activity (/tail [N] lines)' },
+              { command: 'terminal', description: "Digest of Claude's recent replies (/terminal [N])" },
               { command: 'resetin', description: 'Ping me when my usage limit resets (/resetin 2h51m)' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
