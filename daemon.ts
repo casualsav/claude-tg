@@ -750,10 +750,16 @@ const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 // must not trigger the limit-reached relay / auto-schedule / auto-continue.
 const USAGE_LIMIT_RE = /(?:hit your|used 100% of your) [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
 const RESET_TIME_RE = /\bresets\s+(\d{1,2}):(\d{2})\s*([ap])m\s*\(utc\)/i
+// Sub-100% advisory banner, e.g. "used 76% of your weekly limit · resets Jun 7, 4pm
+// (UTC) · try /mod…". Captures: percent, limit type (session/weekly/…), reset descr.
+const USAGE_WARN_RE = /used (\d+)% of your ([\w-]+) limit\b.{0,12}resets\s+([^·\n]+?)\s*(?:·|$)/i
 const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
 const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
 let lastActedResetKey = ''
 let lastActedResetAt = 0
+// Per limit type ('session'/'weekly'/…): the highest warning threshold (75/95)
+// already sent for the current reset period, so 76/77/… don't re-notify.
+const usageWarnState = new Map<string, { resetKey: string; threshold: number }>()
 
 // The next future UTC instant matching "resets HH:MMam (UTC)" (ms), or null.
 function parseResetTime(line: string): number | null {
@@ -783,33 +789,55 @@ function handleUsageLimit(text: string): void {
   // Scan only the bottom region (the live status area), and only free-standing lines.
   const bottom: number[] = []
   for (let i = lines.length - 1; i >= 0 && bottom.length < 14; i--) if (lines[i].trim()) bottom.push(i)
-  const limitIdx = bottom.find(i => !inBlock[i] && USAGE_LIMIT_RE.test(lines[i]))
-  if (limitIdx === undefined) return
-  const limitLine = lines[limitIdx].trim()
+  // ── Limit HIT: relay + auto-schedule + auto-continue ─────────────────────────
+  const hitIdx = bottom.find(i => !inBlock[i] && USAGE_LIMIT_RE.test(lines[i]))
+  if (hitIdx !== undefined) {
+    const limitLine = lines[hitIdx].trim()
+    const tm = limitLine.match(RESET_TIME_RE)
+    const key = tm ? `${tm[1]}:${tm[2]}${tm[3].toLowerCase()}` : limitLine
+    const now = Date.now()
+    if (key === lastActedResetKey && now - lastActedResetAt < RESET_RELOCK_MS) return
+    lastActedResetKey = key
+    lastActedResetAt = now
 
-  const tm = limitLine.match(RESET_TIME_RE)
-  const key = tm ? `${tm[1]}:${tm[2]}${tm[3].toLowerCase()}` : limitLine
-  const now = Date.now()
-  if (key === lastActedResetKey && now - lastActedResetAt < RESET_RELOCK_MS) return
-  lastActedResetKey = key
-  lastActedResetAt = now
+    try {
+      let prev = ''
+      try { if (statSync(USAGE_CAPTURE_FILE).size < 256 * 1024) prev = readFileSync(USAGE_CAPTURE_FILE, 'utf8') } catch {}
+      writeFileSync(USAGE_CAPTURE_FILE, `${prev}\n===== ${new Date().toISOString()} =====\n${stripAnsi(text)}\n`, { mode: 0o600 })
+    } catch {}
 
-  try {
-    let prev = ''
-    try { if (statSync(USAGE_CAPTURE_FILE).size < 256 * 1024) prev = readFileSync(USAGE_CAPTURE_FILE, 'utf8') } catch {}
-    writeFileSync(USAGE_CAPTURE_FILE, `${prev}\n===== ${new Date().toISOString()} =====\n${stripAnsi(text)}\n`, { mode: 0o600 })
-  } catch {}
+    const chats = loadAccess().allowFrom
+    if (chats.length === 0) return
+    const fireAt = parseResetTime(limitLine)
+    const note = fireAt
+      ? `\n\n⏰ I'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
+      : ''
+    for (const chat_id of chats) {
+      void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}${note}`, { parse_mode: 'HTML' }).catch(() => {})
+    }
+    if (fireAt) scheduleReset(fireAt, chats)
+    return
+  }
 
+  // ── Usage WARNING: one heads-up per threshold (75/95) per reset period ───────
+  const warnIdx = bottom.find(i => !inBlock[i] && USAGE_WARN_RE.test(lines[i]))
+  if (warnIdx === undefined) return
+  const wm = lines[warnIdx].match(USAGE_WARN_RE)!
+  const pct = parseInt(wm[1], 10)
+  if (pct < 75 || pct >= 100) return   // <75 not notable; 100 is a hit (handled above)
+  const type = wm[2].toLowerCase()
+  const resetKey = wm[3].trim()
+  const threshold = pct >= 95 ? 95 : 75
+  const prev = usageWarnState.get(type)
+  const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
+  if (threshold <= firedThisPeriod) { usageWarnState.set(type, { resetKey, threshold: firedThisPeriod }); return }
+  usageWarnState.set(type, { resetKey, threshold })
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
-  const fireAt = parseResetTime(limitLine)
-  const note = fireAt
-    ? `\n\n⏰ I'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
-    : ''
+  const emoji = threshold >= 95 ? '🚨' : '⚠️'
   for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}${note}`, { parse_mode: 'HTML' }).catch(() => {})
+    void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
   }
-  if (fireAt) scheduleReset(fireAt, chats)
 }
 
 function onPaneEvent(text: string): void {
