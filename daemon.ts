@@ -719,22 +719,22 @@ const AUTH_URL_RE = /https?:\/\/[^\s│"')]*(?:oauth|authorize)[^\s│"')]*/i
 
 const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 
-// Detect Claude Code's usage-limit screen and act on it. The current screen is a
-// one-line status just above the input box — "You've hit your session limit •
-// resets 10:20am (UTC)" — paired with a "/upgrade to increase your usage limit."
-// line (it used to be a numbered Wait/Upgrade picker). When we see it we log it,
-// relay it to Telegram (Claude can't, being rate-limited), and auto-schedule the
-// reset reminder from the embedded time so the user needn't run /resetin by hand.
+// Detect Claude Code's usage-limit screen and act on it. The live screen shows a
+// status line just above the input — the persistent "You've used N% of your session
+// limit · resets H:MMpm (UTC) · /upgrade" throttle banner, and/or a one-time "You've
+// hit your … limit · resets …" note (separator is a middle-dot ·). When we see it we
+// log it, relay it to Telegram (Claude can't, being rate-limited), and auto-schedule
+// the reset reminder from the embedded time so the user needn't run /resetin.
 //
 // False-positive guards — this very chat can contain the trigger text, so:
-//  - bottom-anchored: only the live status zone (last ~12 non-blank lines) counts,
-//    so scrolled-up transcript quotes don't trip it;
-//  - both the limit line AND the "/upgrade…" line must be present;
+//  - free-standing only: the banner line must NOT sit inside an assistant ● block
+//    (our own quotes of it live inside ● messages — those are skipped);
+//  - bottom-anchored: only the live status zone (last ~14 non-blank lines) counts;
 //  - a same-reset-time lockout (~12h): genuine limit windows are ~5h, so the same
-//    reset clock-time can't legitimately recur that fast — this kills re-fires from
-//    repaints, daemon restarts, or a stray quote that does reach the live zone.
-const USAGE_LIMIT_RE = /hit your [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
-const UPGRADE_LINE_RE = /\/upgrade to increase your usage limit/i
+//    reset clock-time can't legitimately recur that fast — kills repaint re-fires.
+// Matches either the one-time "hit your … limit" note or the persistent
+// "used N% of your … limit" throttle banner, each carrying "resets … (UTC)".
+const USAGE_LIMIT_RE = /(?:hit your|used \d+% of your) [\w-]+ limit\b.{0,12}resets\b.{0,40}\(utc\)/i
 const RESET_TIME_RE = /\bresets\s+(\d{1,2}):(\d{2})\s*([ap])m\s*\(utc\)/i
 const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
 const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
@@ -754,9 +754,24 @@ function parseResetTime(line: string): number | null {
 }
 
 function handleUsageLimit(text: string): void {
-  const tail = stripAnsi(text).split('\n').map(l => l.trim()).filter(Boolean).slice(-12)
-  const limitLine = tail.find(l => USAGE_LIMIT_RE.test(l))
-  if (!limitLine || !tail.some(l => UPGRADE_LINE_RE.test(l))) return
+  // Mark lines inside an assistant block ("● …" + its indented continuation), so we
+  // ignore the banner text when WE quote it in a message — only a real, free-standing
+  // status line counts. (A transcript quote of the banner lives inside a ● block.)
+  const lines = stripAnsi(text).split('\n').map(l => l.replace(/\s+$/, ''))
+  const inBlock: boolean[] = []
+  let block = false
+  for (const l of lines) {
+    if (/^\s*●\s+/.test(l)) { block = true; inBlock.push(true); continue }
+    if (block && /^\s{2,}\S/.test(l)) { inBlock.push(true); continue }   // wrapped continuation
+    if (block && l.trim()) block = false                                  // a flush line ends the block
+    inBlock.push(false)
+  }
+  // Scan only the bottom region (the live status area), and only free-standing lines.
+  const bottom: number[] = []
+  for (let i = lines.length - 1; i >= 0 && bottom.length < 14; i--) if (lines[i].trim()) bottom.push(i)
+  const limitIdx = bottom.find(i => !inBlock[i] && USAGE_LIMIT_RE.test(lines[i]))
+  if (limitIdx === undefined) return
+  const limitLine = lines[limitIdx].trim()
 
   const tm = limitLine.match(RESET_TIME_RE)
   const key = tm ? `${tm[1]}:${tm[2]}${tm[3].toLowerCase()}` : limitLine
