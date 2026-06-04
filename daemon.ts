@@ -1638,7 +1638,7 @@ function recentAssistantBlocks(raw: string, maxBlocks: number): string[] {
   return blocks.slice(-maxBlocks)
 }
 
-// /terminal [N] — a clean digest of Claude's last N replies (default 6), parsed
+// /terminal [N] — a clean digest of Claude's last N replies (default 40), parsed
 // from the scrollback and shown in the same monospace <pre> as /tail. Complements
 // /tail (raw terminal): this is "what did Claude say while I was away," without the
 // box-drawing/tool/spinner noise.
@@ -1646,10 +1646,10 @@ bot.command('terminal', async ctx => {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
-  const n = Number.isFinite(arg) ? Math.max(1, Math.min(arg, 30)) : 6
+  const n = Number.isFinite(arg) ? Math.max(1, Math.min(arg, 100)) : 40
   let raw: string
   try {
-    raw = (await exec('tmux', ['capture-pane', '-p', '-t', activePaneId, '-S', '-600', '-J'], { timeout: 3000 })).stdout
+    raw = (await exec('tmux', ['capture-pane', '-p', '-t', activePaneId, '-S', '-2000', '-J'], { timeout: 3000 })).stdout
   } catch {
     await ctx.reply('Could not read the session pane.')
     return
