@@ -698,7 +698,29 @@ const AUTH_URL_RE = /https?:\/\/[^\s│"')]*(?:oauth|authorize)[^\s│"')]*/i
 
 const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 
+// Best-effort auto-capture of the usage-limit screen for later analysis (so we can
+// build auto-detection without racing a screenshot). The limit screen offers
+// numbered "Wait …" / "Upgrade …" choices — a structure that doesn't appear in
+// ordinary output or prose — so matching an option line of that shape catches it
+// without false-firing. Saves the frame (deduped) to a capped log file.
+const USAGE_LIMIT_RE = /^\s*(?:│\s*)?(?:[❯►▶]\s*)?\d+[.)]\s*(?:wait\b|upgrade\b)/im
+const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
+let lastUsageCaptureHash = ''
+function maybeCaptureUsageLimit(text: string): void {
+  const clean = stripAnsi(text)
+  if (!USAGE_LIMIT_RE.test(clean)) return
+  const h = hashText(clean)
+  if (h === lastUsageCaptureHash) return
+  lastUsageCaptureHash = h
+  try {
+    let prev = ''
+    try { if (statSync(USAGE_CAPTURE_FILE).size < 256 * 1024) prev = readFileSync(USAGE_CAPTURE_FILE, 'utf8') } catch {}
+    writeFileSync(USAGE_CAPTURE_FILE, `${prev}\n===== ${new Date().toISOString()} =====\n${clean}\n`, { mode: 0o600 })
+  } catch {}
+}
+
 function onPaneEvent(text: string): void {
+  maybeCaptureUsageLimit(text)
   // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
   // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
   // against the exact rendering. Off by default; no effect on normal operation.
@@ -1447,6 +1469,77 @@ bot.command('tail', async ctx => {
   for (const c of chunks) await bot.api.sendMessage(String(ctx.chat!.id), c, { parse_mode: 'HTML' }).catch(() => {})
 })
 
+// ---- Usage-limit reset reminder ----
+// A daemon-side timer that pings the user when their usage limit resets. Works even
+// while Claude is frozen at the limit, since the daemon is a separate process. The
+// schedule is persisted so it survives a daemon restart (re-armed on startup).
+const SCHEDULED_RESET_FILE = join(STATE_DIR, 'scheduled-reset.json')
+let resetTimer: ReturnType<typeof setTimeout> | null = null
+
+// Parse a duration like "2h51m", "2h", "90m" → milliseconds (null if unparseable).
+function parseDuration(s: string): number | null {
+  const m = s.trim().toLowerCase().match(/^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?$/)
+  if (!m || (!m[1] && !m[2])) return null
+  const ms = (parseInt(m[1] ?? '0', 10) * 60 + parseInt(m[2] ?? '0', 10)) * 60_000
+  return ms > 0 ? ms : null
+}
+
+function fireResetNotification(chats: string[]): void {
+  const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
+  for (const chat_id of chats) {
+    void bot.api.sendMessage(chat_id, '🕛 Usage limit reset — continue?', { reply_markup: keyboard }).catch(() => {})
+  }
+  try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+}
+
+function scheduleReset(fireAt: number, chats: string[]): void {
+  if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
+  try { writeFileSync(SCHEDULED_RESET_FILE, JSON.stringify({ fireAt, chats }), { mode: 0o600 }) } catch {}
+  const delay = fireAt - Date.now()
+  if (delay <= 0) { fireResetNotification(chats); return }
+  resetTimer = setTimeout(() => { resetTimer = null; fireResetNotification(chats) }, delay)
+}
+
+// Re-arm a persisted reminder on daemon startup (or fire it if it just came due).
+function loadScheduledReset(): void {
+  let data: { fireAt: number; chats: string[] }
+  try { data = JSON.parse(readFileSync(SCHEDULED_RESET_FILE, 'utf8')) } catch { return }
+  if (!data?.fireAt || !Array.isArray(data.chats)) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }
+  if (data.fireAt < Date.now() - 10 * 60_000) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }  // missed long ago
+  scheduleReset(data.fireAt, data.chats)
+}
+
+// /resetin <dur> schedules the reset ping; bare /resetin shows it; /resetin off cancels.
+bot.command('resetin', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  const chat_id = String(ctx.chat!.id)
+  if (!arg) {
+    let info = 'No reset reminder set.'
+    try {
+      const data = JSON.parse(readFileSync(SCHEDULED_RESET_FILE, 'utf8'))
+      const mins = Math.max(0, Math.round((data.fireAt - Date.now()) / 60_000))
+      info = `⏰ Reset reminder set for ~${Math.floor(mins / 60)}h ${mins % 60}m from now.`
+    } catch {}
+    await ctx.reply(`${info}\nUse <code>/resetin 2h51m</code> to set, or <code>/resetin off</code> to cancel.`, { parse_mode: 'HTML' })
+    return
+  }
+  if (arg === 'off' || arg === 'cancel') {
+    if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
+    try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+    await ctx.reply('🚫 Reset reminder cancelled.')
+    return
+  }
+  const ms = parseDuration(arg)
+  if (ms == null) {
+    await ctx.reply('Usage: <code>/resetin 2h51m</code> (or 90m, 2h). <code>/resetin off</code> to cancel.', { parse_mode: 'HTML' })
+    return
+  }
+  scheduleReset(Date.now() + ms, [chat_id])
+  const mins = Math.round(ms / 60_000)
+  await ctx.reply(`⏰ Got it — I'll ping you when your usage limit resets, in ~${Math.floor(mins / 60)}h ${mins % 60}m.`)
+})
+
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
 // the resulting pane change isn't mistaken for a new prompt/event.
@@ -1455,6 +1548,22 @@ bot.command('stop', doStop)
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+
+  // "Continue" button on the usage-limit reset ping → type "continue" into the session.
+  if (data === 'usage:continue') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Continuing…' }).catch(() => {})
+    const ok = await injectText(activePaneId, paneWatcher, 'continue')
+    await ctx.editMessageText(ok ? '🕛 Usage limit reset — ▶️ continuing…' : '🕛 Usage limit reset (couldn\'t reach the session).').catch(() => {})
+    return
+  }
 
   // Mode cycle button
   if (data === 'mode:cycle') {
@@ -1959,6 +2068,9 @@ await new Promise<void>((resolve, reject) => {
   })
 })
 
+// Re-arm any persisted usage-limit reset reminder across the restart.
+loadScheduledReset()
+
 // ---- Bot startup loop (retry with backoff, daemon persists forever) ----
 
 void (async () => {
@@ -1990,6 +2102,7 @@ void (async () => {
               { command: 'session', description: 'Show cwd, branch, mode, and model' },
               { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
               { command: 'tail', description: 'Show recent terminal activity (/tail [N] lines)' },
+              { command: 'resetin', description: 'Ping me when my usage limit resets (/resetin 2h51m)' },
               { command: 'new', description: 'Start a new session (shows the model)' },
             ],
             { scope: { type: 'all_private_chats' } },
