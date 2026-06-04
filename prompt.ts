@@ -27,6 +27,7 @@ export type PromptInfo = {
   multiSelect: boolean
   tabbed: boolean
   freeText: boolean
+  chat: boolean
 }
 
 export function stripAnsi(s: string): string {
@@ -170,6 +171,7 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // so the real options keep their natural 1..k numbering (and "Type something"
   // sits at position k+1, which the daemon reaches with k Down presses).
   const freeText = parsed.some(o => FREE_TEXT_LABEL.test(o.label))
+  const chat = parsed.some(o => CHAT_LABEL.test(o.label))
   const options = parsed.filter(o => !FREE_TEXT_LABEL.test(o.label) && !CHAT_LABEL.test(o.label))
   if (options.length === 0 && !freeText) return null
 
@@ -178,5 +180,5 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
 
   const multiSelect = MULTI_HINT.test(lines[footerIdx]) || region.some(l => CHECKBOX_GLYPH.test(l))
   const tabbed = TABBED_HINT.test(lines[footerIdx])
-  return { question, options, multiSelect, tabbed, freeText }
+  return { question, options, multiSelect, tabbed, freeText, chat }
 }

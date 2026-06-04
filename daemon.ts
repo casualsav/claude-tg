@@ -650,6 +650,13 @@ const freeTextPrompts = new Map<string, FreeTextPrompt>()
 // force-reply message id; a reply to one is typed into the pane's free-text field.
 const freeTextReplyTargets = new Map<string, Omit<FreeTextPrompt, 'question'>>()
 
+// Prompts that offer a "Chat about this" escape hatch, keyed by the relayed
+// Telegram message `${chatId}:${messageId}`. Tapping its 💬 button selects that
+// option (declining the question so the user can reply conversationally);
+// `downCount` is the Down presses to reach it — one past "Type something".
+type ChatPrompt = { paneId: string; downCount: number; tabbed: boolean }
+const chatPrompts = new Map<string, ChatPrompt>()
+
 // Auth/login URLs surfaced from the pane (e.g. /login's OAuth link), so the user
 // can open them in a browser and reply with the code. `lastRelayedAuthUrl` dedups
 // the same link across watcher ticks; `authUrlMessageIds` (`${chatId}:${msgId}`)
@@ -828,6 +835,7 @@ function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): Inli
     if ((i + 1) % 3 === 0) kb.row()
   })
   if (prompt.freeText) kb.row().text('✏️ Type something', 'ftext')
+  if (prompt.chat) kb.row().text('💬 Chat about this', 'chat')
   return kb
 }
 
@@ -857,10 +865,16 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
         })
       }
       // Remember the prompt so a ✏️ tap knows how to reach its free-text field: the
-      // option sits `options.length` Down presses past the first one.
+      // option sits `options.length` Down presses past the first one. "Chat about
+      // this" sits one further down again.
       if (prompt.freeText) {
         freeTextPrompts.set(`${chat_id}:${sent.message_id}`, {
           paneId: activePaneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
+        })
+      }
+      if (prompt.chat) {
+        chatPrompts.set(`${chat_id}:${sent.message_id}`, {
+          paneId: activePaneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed,
         })
       }
     } catch (e) {
@@ -1768,6 +1782,31 @@ bot.on('callback_query:data', async ctx => {
         paneId: fp.paneId, downCount: fp.downCount, tabbed: fp.tabbed,
       })
     }
+    return
+  }
+
+  // 💬 Chat-about-this button → select the "Chat about this" option, which
+  // dismisses the question ("declined") and drops Claude to a normal input. The
+  // user's next message then routes into the session like any other.
+  if (data === 'chat') {
+    const senderId = String(ctx.from.id)
+    if (!loadAccess().allowFrom.includes(senderId)) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const cp = chatPrompts.get(`${ctx.chat?.id}:${ctx.callbackQuery.message?.message_id}`)
+    if (!cp || !activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'This prompt is no longer active.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Dismissing — go ahead and type.' }).catch(() => {})
+    await paneWatcher.withInjection(async () => {
+      await sendKeys(activePaneId!, [...Array(cp.downCount).fill('Down'), 'Enter'])
+      await waitForSettle(activePaneId!, 300, 5000)
+    })
+    lastRelayedPromptHash = ''
+    await ctx.editMessageReplyMarkup().catch(() => {})
+    await ctx.reply('💬 Dismissed the question — send your message and I\'ll pass it to the session.').catch(() => {})
     return
   }
 
