@@ -2092,11 +2092,20 @@ async function confirmNewSession(ctx: Context): Promise<void> {
 // Each gates and checks for an active pane itself, so it's safe to call from a
 // /command handler or from a control-bar button tap.
 
-async function doStop(ctx: Context): Promise<void> {
+// Show a Yes/No confirmation before interrupting — the Esc is sent on the Yes tap (see the
+// stopconfirm handler). Shared by /stop and the 🛑 Stop button.
+async function confirmStop(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const keyboard = new InlineKeyboard().text('🛑 Yes, stop', 'stopconfirm:yes').text('❌ No', 'stopconfirm:no')
+  await ctx.reply('🛑 Interrupt the current task?\n\nConfirm:', { reply_markup: keyboard })
+}
+
+// The actual interrupt — Esc into the pane. Returns the status line for the caller to show.
+async function performStop(): Promise<string> {
+  if (!activePaneId || !paneWatcher) return 'No active Claude Code session with tmux.'
   const ok = await paneWatcher.withInjection(() => sendKeys(activePaneId!, ['Escape']))
-  await ctx.reply(ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.')
+  return ok ? '🛑 Sent interrupt (Esc) to Claude Code.' : 'Could not reach the session pane.'
 }
 
 // Mode picker — a button per mode (current marked ●) plus a quick-switch tip. Shared by /mode
@@ -2689,7 +2698,7 @@ bot.command('session', async ctx => {
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
 // in the TUI). withInjection pauses the watcher and re-baselines afterward so
 // the resulting pane change isn't mistaken for a new prompt/event.
-bot.command('stop', doStop)
+bot.command('stop', confirmStop)
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 bot.on('callback_query:data', async ctx => {
@@ -2808,6 +2817,23 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText('🆕 Starting a new session…').catch(() => {})
     const result = await performReset('/new')
     await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // Stop confirmation (Yes/No under the "Interrupt the current task?" prompt)
+  const stopMatch = /^stopconfirm:(yes|no)$/.exec(data)
+  if (stopMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (stopMatch[1] === 'no') {
+      await ctx.answerCallbackQuery({ text: 'Cancelled' }).catch(() => {})
+      await ctx.editMessageText('🛑 Stop — cancelled').catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Interrupting…' }).catch(() => {})
+    await ctx.editMessageText(await performStop()).catch(() => {})
     return
   }
 
@@ -3165,7 +3191,7 @@ bot.on('message:text', async ctx => {
     case BTN_MODEL:    await doModelPicker(ctx); return
     case BTN_SESSIONS: await doSessionList(ctx); return
     case BTN_COST:     await doReadout(ctx, 'cost'); return
-    case BTN_STOP:     await doStop(ctx); return
+    case BTN_STOP:     await confirmStop(ctx); return
     case BTN_NEW:      await confirmNewSession(ctx); return
   }
 
