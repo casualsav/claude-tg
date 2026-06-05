@@ -2564,8 +2564,8 @@ function lastModelInTranscript(file: string): string | null {
   return null
 }
 function prettyModel(id: string | null): string | null {
-  const m = id?.match(/(opus|sonnet|haiku)-(\d+)-(\d+)/i)
-  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}` : id
+  const m = id?.match(/(opus|sonnet|haiku)/i)
+  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
 }
 
 // Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
