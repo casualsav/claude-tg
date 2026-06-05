@@ -2583,7 +2583,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
       model = (file && prettyModel(lastModelInTranscript(file))) || model
     } catch {}
   }
-  return `🗂️ <b>${escapeHtml(cur.label)}</b> • ${escapeHtml(model ?? '—')} • ${escapeHtml(mode)} mode`
+  return `🗂️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
 }
 
 let pinUpdating = false
