@@ -84,23 +84,34 @@ Have them DM the bot — it should respond. (No ID given in Step 1? They DM the 
 it replies with a pairing code; approve with `/telegram:access pair <code>`, then lock
 with `/telegram:access policy allowlist`.)
 
-## 5. Run a session off-MCP
+## 5. Run a session off-MCP — the daemon finds it
 Launch the work session **plugin-less** in a tmux pane:
 ```sh
 claude --strict-mcp-config --mcp-config '{"mcpServers":{}}'
 ```
-Point the daemon at that pane: set `TELEGRAM_FORCE_PANE=<pane id>` in the `.env`
-(`tmux display-message -p '#{pane_id}'` from inside the pane) and restart the daemon
-(`kill "$(cat ~/.claude/channels/telegram/daemon.pid)"`, it respawns).
+That's it — the daemon **auto-discovers** the plugin-less pane and binds to it automatically
+(no `TELEGRAM_FORCE_PANE`, no restart). If there are several plugin-less panes it asks which to
+use; to pin a specific one, set `TELEGRAM_FORCE_PANE=<pane id>` in the `.env` to override.
 
-> **This pinning is the one rough edge.** Planned auto-discovery will let the daemon find
-> the plugin-less pane itself, dropping `TELEGRAM_FORCE_PANE` and this restart.
+Permission prompts are relayed to Telegram with **Yes / allow-all / No** buttons, so you can
+approve permission-gated work remotely — or add `--dangerously-skip-permissions` to not be
+asked at all.
 
 ## 6. Verify end to end
 From Telegram, message the session → you get its reply (read from the transcript), no MCP
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 
-## Current limitations
-- **Permission relay** isn't wired for off-MCP yet — run plugin-less sessions with
-  `--dangerously-skip-permissions`, or use the normal (MCP) plugin for permission-gated work.
-- **`TELEGRAM_FORCE_PANE` pinning** is manual until auto-discovery lands (Step 5).
+## What you get, from Telegram
+- Two-way chat with the session; send/receive files; inbound voice notes transcribed.
+- **Permission prompts** relayed with tap-to-approve buttons.
+- **Live activity mirror** — one self-updating message of what Claude is doing; on long tasks
+  the agent can drive a **progress bar** (`tg progress`).
+- **/session** (list · `/session N` switch · `/session name N <label>`), **/mode** & **/model**
+  pickers, **/cost**, **/context**, **/stop**, **/new**, **/terminal**.
+- **Auto-continue** when a usage limit resets (self-verifies + retries).
+
+## Notes
+- The daemon runs **standalone** (relaunched by the SessionStart hook), so it survives closing
+  sessions and reboots — no MCP session needed to keep it alive.
+- `TELEGRAM_FORCE_PANE=<pane>` in the `.env` overrides auto-discovery when you want a specific
+  pane.

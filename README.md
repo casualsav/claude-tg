@@ -17,6 +17,25 @@ people you approve can reach your session.
 
 ---
 
+## Install
+
+**Let Claude do it.** Clone this repo, open a Claude Code session in it, and say
+*"set up the Telegram bridge."* The repo's [`CLAUDE.md`](./CLAUDE.md) tells Claude to follow
+[`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) — it interviews you for the bot token, your
+Telegram ID, and a few options, writes the config, installs the plugin + a self-healing
+daemon hook, and gets you to a working session. The only things it can't do itself are
+getting the bot token from [@BotFather](https://t.me/BotFather) and the single Claude Code
+restart.
+
+```sh
+git clone https://github.com/casualsav/better-claude-telegram
+cd better-claude-telegram && claude   # then: "set up the Telegram bridge"
+```
+
+Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists every step.
+
+---
+
 ## Features
 
 - **Two-way messaging** — your Telegram messages reach Claude; Claude replies
