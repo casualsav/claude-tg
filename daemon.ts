@@ -502,7 +502,9 @@ class PaneWatcher {
 
 function detectCurrentMode(paneText: string): CcMode {
   const lines = paneText.split('\n').map(l => stripAnsi(l))
-  const footer = lines.slice(-5).join(' ').toLowerCase()
+  // Drop the "✗ Auto-update failed…" footer line first — its "Auto" otherwise matches the
+  // auto-mode test, making every mode read as 'auto' (broke the /mode picker's live update).
+  const footer = lines.slice(-5).filter(l => !/auto-update/i.test(l)).join(' ').toLowerCase()
   if (/bypass|dangerously.?skip|yolo/i.test(footer)) return 'bypassPermissions'
   if (/\bplan\s*(mode)?\b/i.test(footer)) return 'plan'
   if (/\bauto\b/i.test(footer)) return 'auto'
@@ -2061,7 +2063,7 @@ async function doStop(ctx: Context): Promise<void> {
 // Mode picker — a button per mode (current marked ●) plus a quick-switch tip. Shared by /mode
 // and the 🔄 Mode button; the mode:set:<mode> callback applies a tapped choice.
 const MODES: CcMode[] = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']
-const MODE_TIP = '💡 Tip: /default, /acceptedits, /plan, /auto, /bypass to switch fast.'
+const MODE_TIP = '💡 Tip: use /default, /acceptedits, /plan, /auto, /bypass for fast switching.'
 
 function modePickerKeyboard(current: CcMode): InlineKeyboard {
   const kb = new InlineKeyboard()
@@ -2483,7 +2485,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery().catch(() => {})
     const reached = await switchToMode(activePaneId, target, paneWatcher)
     if (reached === null) {
-      await ctx.answerCallbackQuery({ text: `Could not switch to ${modeLabel(target)}.` }).catch(() => {})
+      await ctx.editMessageText(`Could not switch to ${modeLabel(target)} — try again.`).catch(() => {})
       return
     }
     await ctx.editMessageText(`🎚 <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
