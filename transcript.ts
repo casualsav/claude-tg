@@ -121,3 +121,28 @@ export function latestFinalReply(file: string): { uuid: string; text: string } |
   }
   return null
 }
+
+// Every completed turn's conclusion (the last assistant `text` block before the next user
+// message) that appears AFTER the entry with `afterUuid` — used to replay what a session
+// said while it was unfocused. Oldest first. If `afterUuid` is gone (compaction/rotation)
+// we return just the latest, so a lost cursor never dumps the whole backlog.
+export function finalRepliesAfter(file: string, afterUuid: string): { uuid: string; text: string }[] {
+  let lines: string[]
+  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
+  const entries: Entry[] = []
+  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
+
+  const at = afterUuid ? entries.findIndex(e => e.uuid === afterUuid) : -1
+  if (afterUuid && at < 0) { const latest = latestFinalReply(file); return latest ? [latest] : [] }
+
+  const out: { uuid: string; text: string }[] = []
+  let pending: { uuid: string; text: string } | null = null
+  const flush = () => { if (pending) { out.push(pending); pending = null } }
+  for (let i = at + 1; i < entries.length; i++) {
+    const e = entries[i]
+    if (e.type === 'user' && textOf(e.message?.content).trim()) { flush(); continue }  // turn boundary
+    if (e.type === 'assistant') { const t = textOf(e.message?.content).trim(); if (t) pending = { uuid: e.uuid ?? '', text: t } }
+  }
+  flush()
+  return out
+}

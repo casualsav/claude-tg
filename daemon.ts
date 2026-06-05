@@ -23,7 +23,7 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, currentTurnActivity, type Activity } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, currentTurnActivity, type Activity } from './transcript.ts'
 
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
 // the daemon reads its reply from the session transcript and relays it — lets a session
@@ -874,6 +874,10 @@ async function sendAgentText(chats: string[], text: string): Promise<void> {
 const RELAY_POLL_MS = 1500
 let lastRelayedUuid = ''
 let relayCursorPrimed = false
+// Last uuid relayed per transcript file, so switching back to a session can replay what it
+// said while unfocused. In-memory: a fresh daemon has no cursors, so it never replays a
+// backlog on the first focus of a session (or after a restart).
+const lastRelayedByFile = new Map<string, string>()
 let relayIdleStreak = 0
 let relayLoopGen = 0   // bump to retire the running loop when focus moves
 
@@ -1058,6 +1062,7 @@ async function relayLoopTick(gen: number): Promise<void> {
     const reply = file ? latestFinalReply(file) : null
     if (relayCursorPrimed && reply && reply.uuid && reply.uuid !== lastRelayedUuid) {
       lastRelayedUuid = reply.uuid   // advance before the await so a fast next tick can't double-send
+      if (file) lastRelayedByFile.set(file, reply.uuid)
       const chats = loadAccess().allowFrom
       process.stderr.write(`daemon: transcript-outbound relaying ${reply.text.length} chars (uuid ${reply.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
       await sendAgentText(chats, reply.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
@@ -1073,7 +1078,22 @@ async function primeRelayCursor(): Promise<void> {
   try {
     const cwd = activePaneId ? await paneCwd(activePaneId) : null
     const file = cwd ? resolveTranscript(cwd) : null
-    lastRelayedUuid = (file ? latestFinalReply(file)?.uuid : '') ?? ''
+    const latest = file ? latestFinalReply(file) : null
+    // If we relayed from this session before and it has spoken since (switched away and
+    // back), replay the messages we missed before resuming live relay.
+    const prev = file ? lastRelayedByFile.get(file) : undefined
+    // prev === '' is a real baseline ("seen nothing yet"), so test against undefined, not falsy.
+    if (file && prev !== undefined && latest && prev !== latest.uuid) {
+      const unread = finalRepliesAfter(file, prev)
+      const chats = loadAccess().allowFrom
+      if (unread.length) {
+        const header = `📨 <i>${unread.length} message${unread.length > 1 ? 's' : ''} from this session while you were away:</i>`
+        for (const chat of chats) await bot.api.sendMessage(chat, header, { parse_mode: 'HTML' }).catch(() => {})
+        for (const r of unread) await sendAgentText(chats, r.text).catch(() => {})
+      }
+    }
+    lastRelayedUuid = latest?.uuid ?? ''
+    if (file) lastRelayedByFile.set(file, lastRelayedUuid)
   } catch { lastRelayedUuid = '' }
   relayCursorPrimed = true
 }
@@ -1192,11 +1212,16 @@ function focusOffMcpPane(paneId: string): void {
 
 // Announce a newly discovered sibling pane with a one-tap switch button — never steals focus.
 async function announceNewSession(paneId: string): Promise<void> {
-  const label = await paneLabel(paneId)
   const n = await sessionNumber(paneId)
-  const kb = new InlineKeyboard().text(`▶️ Switch to ${label}`, `adoptpane:${paneId}`)
-  notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b>${n ? ` (session ${n})` : ''}`,
-    { reply_markup: kb, parse_mode: 'HTML' })
+  const cwd = await paneCwd(paneId)
+  // Snapshot a read baseline at announcement: the user has "seen up to now" (nothing yet),
+  // so anything this session says before they first switch to it relays as unread on switch.
+  const tfile = cwd ? resolveTranscript(cwd) : null
+  if (tfile && !lastRelayedByFile.has(tfile)) lastRelayedByFile.set(tfile, latestFinalReply(tfile)?.uuid ?? '')
+  const who = `Session ${n ?? '?'}`
+  const where = cwd ? ` (<code>${escapeHtml(cwd)}</code>)` : ''
+  const kb = new InlineKeyboard().text(`♻️ Switch to ${who}`, `adoptpane:${paneId}`)
+  notifyChats(`🆕 New Claude session: <b>${who}</b>${where}`, { reply_markup: kb, parse_mode: 'HTML' })
 }
 
 // Keep the pane registry in sync. Adopts a pane only when nothing is driving; any additional
@@ -2177,12 +2202,15 @@ function stripCommonIndent(lines: string[]): string {
 // it for mobile. Falls back to the raw block if the shape isn't recognized.
 function extractContextReadout(raw: string): string | null {
   const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, '').replace('⎿', ' '))
-  let start = -1
-  for (let i = lines.length - 1; i >= 0; i--) if (/❯\s*\/context\b/.test(lines[i])) { start = i; break }
+  // Anchor on the "Context Usage" header itself, not the `❯ /context` echo: on short
+  // terminals the output block and the command echo land in either order, so reading
+  // "everything after the prompt" can miss the block entirely. Fall back to the echo.
+  let start = lines.findLastIndex(l => /Context Usage/i.test(l))
+  if (start < 0) { const p = lines.findLastIndex(l => /❯\s*\/context\b/.test(l)); start = p < 0 ? -1 : p + 1 }
   if (start < 0) return null
   const body: string[] = []
-  for (let i = start + 1; i < lines.length; i++) {
-    if (/^─{10,}/.test(lines[i].trim()) || /Press up to edit queued/i.test(lines[i])) break
+  for (let i = start; i < lines.length; i++) {
+    if (/^─{10,}/.test(lines[i].trim()) || /Press up to edit queued/i.test(lines[i]) || /^❯\s*\//.test(lines[i].trim())) break
     body.push(lines[i])
   }
   return compactContext(body) ?? (stripCommonIndent(body) || null)
@@ -2244,18 +2272,52 @@ async function doReadout(ctx: Context, kind: 'cost' | 'context'): Promise<void> 
   await runReadout(String(ctx.chat!.id), kind)
 }
 
-// Inject the command, capture + relay its real output (chunked), and dismiss the /cost modal.
+async function windowHeightOf(paneId: string): Promise<number | null> {
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{window_height}'], { timeout: 2000 })
+    const n = parseInt(stdout.trim(), 10)
+    return Number.isFinite(n) ? n : null
+  } catch { return null }
+}
+async function resizeWindowOf(paneId: string, rows: number): Promise<boolean> {
+  try {
+    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{window_id}'], { timeout: 2000 })
+    const win = stdout.trim()
+    if (!win) return false
+    await exec('tmux', ['resize-window', '-t', win, '-y', String(rows)], { timeout: 2000 })
+    return true
+  } catch { return false }
+}
+
+// Inject the command, capture + relay its real output (chunked), then return to the prompt.
 async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<void> {
   const paneId = activePaneId, watcher = paneWatcher
   if (!paneId || !watcher) return
   const raw = await watcher.withInjection(async () => {
-    await sendKeysLiteral(paneId, `/${kind}`)
+    if (kind === 'cost') {
+      // /cost is a modal that can run taller than the pane, so a short terminal clips it
+      // mid-content. Grow the window first so the whole modal renders in one frame, capture,
+      // then restore — the user drives from Telegram, so the brief resize is unseen.
+      const h = await windowHeightOf(paneId)
+      const grew = h !== null && h < 80 && await resizeWindowOf(paneId, 80)
+      try {
+        await sendKeysLiteral(paneId, '/cost')
+        await sendKeys(paneId, ['Enter'])
+        await waitForSettle(paneId, 500, 6000)
+        const buf = await capturePane(paneId)
+        await sendKeys(paneId, ['Escape'])            // close the modal → back to the terminal
+        await waitForSettle(paneId, 200, 2000)
+        return buf
+      } finally {
+        if (grew && h !== null) await resizeWindowOf(paneId, h)
+      }
+    }
+    await sendKeysLiteral(paneId, '/context')
     await sendKeys(paneId, ['Enter'])
     await waitForSettle(paneId, 400, 6000)
-    const buf = kind === 'context'
-      ? await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-150', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
-      : await capturePane(paneId)
-    if (kind === 'cost') { await sendKeys(paneId, ['Escape']); await waitForSettle(paneId, 200, 2000) }  // close the modal
+    const buf = await exec('tmux', ['capture-pane', '-p', '-t', paneId, '-S', '-150', '-J'], { timeout: 3000 }).then(r => r.stdout).catch(() => '')
+    await sendKeys(paneId, ['Escape'])                // clear the input line → back to the terminal
+    await waitForSettle(paneId, 200, 2000)
     return buf
   })
   const out = kind === 'cost' ? extractCostReadout(raw) : extractContextReadout(raw)
@@ -2327,7 +2389,18 @@ bot.command('status', async ctx => {
   await ctx.reply(`🔗 Not paired. Send me a message to get a pairing code.`)
 })
 
-bot.command('mode', doModePicker)
+// /mode with no arg pops the picker; /mode <name> jumps straight to that mode.
+const MODE_ALIASES: Record<string, CcMode> = {
+  default: 'default', normal: 'default',
+  acceptedits: 'acceptEdits', accept: 'acceptEdits', edits: 'acceptEdits',
+  plan: 'plan', auto: 'auto',
+  bypass: 'bypassPermissions', bypasspermissions: 'bypassPermissions', yolo: 'bypassPermissions',
+}
+bot.command('mode', ctx => {
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase().replace(/[-_\s]/g, '')
+  const target = arg && MODE_ALIASES[arg]
+  return target ? handleModeCommand(ctx, target) : doModePicker(ctx)
+})
 
 bot.command('plan', ctx => handleModeCommand(ctx, 'plan'))
 bot.command('auto', ctx => handleModeCommand(ctx, 'auto'))
@@ -2361,6 +2434,13 @@ bot.command('model', async ctx => {
 // alias for /new (kept for muscle memory; deliberately left out of the menu).
 bot.command('new', confirmNewSession)
 bot.command('clear', confirmNewSession)
+
+// /compact relays straight to the session — compact the conversation to free context.
+bot.command('compact', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  void relaySlashCommand(activePaneId, paneWatcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id)
+})
 
 // /menu shows the docked control bar; /menu off hides it.
 bot.command('menu', async ctx => {
@@ -3445,14 +3525,18 @@ function handleShimConnection(socket: net.Socket): void {
         case 'subscribe': {
           const sessionId = msg.paneId ?? `no-tmux-${++noTmuxSeq}`
           let label = msg.paneId ?? 'no-tmux'
+          let cwdPath = ''
           if (msg.paneId) {
             try {
               const { stdout } = await exec('tmux', ['display-message', '-p', '-t', msg.paneId, '#{pane_current_path}'], { timeout: 2000 })
-              const cwd = stdout.trim()
-              if (cwd) label = cwd.split('/').filter(Boolean).pop() ?? label
+              cwdPath = stdout.trim()
+              if (cwdPath) label = cwdPath.split('/').filter(Boolean).pop() ?? label
             } catch {}
           }
           sessions.set(sessionId, { socket, write, paneId: msg.paneId, label, subscribedAt: Date.now() })
+          const announce = (idx: number) => notifyChats(
+            `🆕 New Claude session: <b>Session ${idx}</b>${cwdPath ? ` (<code>${escapeHtml(cwdPath)}</code>)` : ''}`,
+            { reply_markup: new InlineKeyboard().text(`♻️ Switch to Session ${idx}`, `switchsession:${idx}`), parse_mode: 'HTML' })
 
           // Focus it only when nothing valid holds focus (the first/only session, or
           // a reconnect of the focused pane). Otherwise announce — never steal focus.
@@ -3461,16 +3545,12 @@ function handleShimConnection(socket: net.Socket): void {
           if (FORCE_PANE) {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
           } else if (adoptionHolds) {
-            const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
-            notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b> (session ${idx})`,
-              { reply_markup: new InlineKeyboard().text(`▶️ Switch to ${label}`, `switchsession:${idx}`), parse_mode: 'HTML' })
+            announce(orderedSessions().findIndex(o => o.id === sessionId) + 1)
           } else if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
             setFocus(sessionId)
             replayBuffer()
           } else {
-            const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
-            notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b> (session ${idx})`,
-              { reply_markup: new InlineKeyboard().text(`▶️ Switch to ${label}`, `switchsession:${idx}`), parse_mode: 'HTML' })
+            announce(orderedSessions().findIndex(o => o.id === sessionId) + 1)
           }
           break
         }
@@ -3632,6 +3712,7 @@ void (async () => {
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'mode', description: 'Interactive mode switcher' },
               { command: 'sessions', description: 'List sessions (/sessions # switch, /sessions name # label)' },
+              { command: 'compact', description: 'Compact the conversation to free up context' },
               { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
