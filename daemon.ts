@@ -932,21 +932,26 @@ async function relayLoopTick(gen: number): Promise<void> {
     const cwd = await paneCwd(paneId)
     const file = cwd ? resolveTranscript(cwd) : null
     const reply = file ? latestFinalReply(file) : null
-    if (reply && reply.uuid) {
-      if (!relayCursorPrimed) {
-        // First settle after (re)start: adopt the tail as the cursor without relaying it,
-        // so we never replay what was already on screen before we started watching.
-        lastRelayedUuid = reply.uuid
-        relayCursorPrimed = true
-      } else if (reply.uuid !== lastRelayedUuid) {
-        lastRelayedUuid = reply.uuid   // advance before the await so a fast next tick can't double-send
-        const chats = loadAccess().allowFrom
-        process.stderr.write(`daemon: transcript-outbound relaying ${reply.text.length} chars (uuid ${reply.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
-        await sendAgentText(chats, reply.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
-      }
+    if (relayCursorPrimed && reply && reply.uuid && reply.uuid !== lastRelayedUuid) {
+      lastRelayedUuid = reply.uuid   // advance before the await so a fast next tick can't double-send
+      const chats = loadAccess().allowFrom
+      process.stderr.write(`daemon: transcript-outbound relaying ${reply.text.length} chars (uuid ${reply.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
+      await sendAgentText(chats, reply.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
     }
   }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
+}
+
+// Prime the cursor to the transcript tail that exists right now, so only NEW replies relay.
+// Done immediately on (re)start — not on the first idle — so a reply produced after a mid
+// -turn restart still gets a fresh uuid and relays (the earlier idle-priming swallowed it).
+async function primeRelayCursor(): Promise<void> {
+  try {
+    const cwd = activePaneId ? await paneCwd(activePaneId) : null
+    const file = cwd ? resolveTranscript(cwd) : null
+    lastRelayedUuid = (file ? latestFinalReply(file)?.uuid : '') ?? ''
+  } catch { lastRelayedUuid = '' }
+  relayCursorPrimed = true
 }
 
 // (Re)start the relay loop for the focused pane, retiring any prior loop and re-priming the
@@ -956,7 +961,9 @@ function startRelayLoop(): void {
   const gen = ++relayLoopGen
   relayCursorPrimed = false
   relayIdleStreak = 0
-  setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
+  void primeRelayCursor().finally(() => {
+    if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
+  })
 }
 
 // ---- Off-MCP pane auto-discovery ----
@@ -1464,6 +1471,7 @@ async function relayPermissionToTelegram(perm: PermissionPrompt): Promise<void> 
   const kb = new InlineKeyboard()
   for (const opt of perm.options) kb.text(permButtonLabel(opt), `pperm:${opt.n}`).row()
 
+  process.stderr.write(`daemon: relaying permission prompt (${perm.options.length} opts) “${perm.question}” to ${targets.join(',')}\n`)
   for (const chat_id of targets) {
     try {
       await bot.api.sendMessage(chat_id, body, { parse_mode: 'HTML', reply_markup: kb })
