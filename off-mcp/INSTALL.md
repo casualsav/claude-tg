@@ -14,6 +14,10 @@ the single restart in Step 3 brings everything up already configured.
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - **Platform:** Linux or macOS. On Windows, run inside [WSL2](https://learn.microsoft.com/windows/wsl/)
   (native Windows has no `tmux`).
+- **Sanity-check the checkout first:** from the repo root run `bun test`. It runs the
+  parser/formatter unit suite (Markdown→HTML, transcript reading, prompt detection) — no
+  token, network, or running daemon needed — and should report all green in well under a
+  second. If Bun is missing or a test fails here, fix that before touching the user's config.
 
 ## 0.5. Pre-flight: remove the old costly MCP version (if present)
 This bridge is the off-MCP successor to the upstream **`telegram@claude-plugins-official`**

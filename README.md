@@ -56,6 +56,18 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
 - **Voice & audio transcription** — inbound voice/audio notes can be transcribed
   to text before they reach Claude, via a local Whisper model or a hosted API
   (Groq / OpenAI). Runs entirely outside Claude, so it never consumes usage.
+- **Multiple sessions** — run several Claude Code sessions and switch between them
+  from Telegram (`/sessions`). Start a new one in any folder with the **➕ New
+  session** button (This folder / Home / Specify a path).
+- **Unread replay** — switch back to a session and the messages it produced while
+  unfocused replay automatically; you also get a **💬 ping** (with a one-tap switch
+  button) the moment an unfocused session speaks.
+- **Pinned control bar** — a pinned status message shows the active session · model ·
+  mode, with 🗂️ Sessions / 🧠 Model / 🧭 Mode quick buttons.
+- **Live activity mirror** — a single self-updating message shows what Claude is doing
+  in real time (💻 terminal, 📋 todo, 📖 read, ✏️ edit, 🔍 search, 🤖 agent…), read
+  straight from the transcript so it costs zero usage. On by default; long tasks can
+  drive a progress bar. Opt out with `terminalMirror: "off"`.
 
 ## How it works
 
@@ -183,13 +195,21 @@ formatted. Bot commands:
 
 | Command | What it does |
 | --- | --- |
-| `/start` | Pairing instructions |
+| `/start` | Welcome + full feature guide (and pairing steps if not paired) |
 | `/status` | Check your pairing state |
-| `/mode` | Interactive permission-mode switcher |
+| `/sessions` | List & switch sessions (`/sessions #` switch · `/sessions name # <label>` rename) |
+| `/mode` | Interactive permission-mode switcher (`/mode <name>` jumps straight to one) |
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
-| `/stop` | Interrupt the current task (sends Esc) |
-| `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 | `/model` | Show the current model (or `/model <name>` to switch) |
+| `/stop` | Interrupt the current task (sends Esc) |
+| `/new` | Start a fresh conversation in the session |
+| `/compact` | Compact the conversation to free up context |
+| `/cost` | Usage & cost breakdown |
+| `/context` | Token-context usage |
+| `/terminal [N]` | Show recent terminal activity (N lines) |
+| `/autocontinue` | Auto-send "continue" when the usage limit resets (on/off) |
+| `/dock` | Show the docked control-bar keyboard (`/dock off` to hide) |
+| `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 
 Any other `/slash` command is relayed straight to Claude Code. Photos and
 documents you send are made available to Claude to read.
@@ -203,8 +223,9 @@ to feed it back into the session.
 Access policy and delivery/UX settings live in
 `~/.claude/channels/telegram/access.json`, managed by `/telegram:access` and
 re-read live on each message. Keys include `dmPolicy`, allowlists, group policy,
-`ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, and
-`renderMarkdown`. Full reference: [`ACCESS.md`](./ACCESS.md).
+`ackReaction`, `replyToMode`, `textChunkLimit`, `chunkMode`, `renderMarkdown`, and
+`terminalMirror` (the live activity feed — `"tools"` by default, `"digest"`, or
+`"off"`). Full reference: [`ACCESS.md`](./ACCESS.md).
 
 The bot token and transcription settings live in
 `~/.claude/channels/telegram/.env` (kept `chmod 600`), managed by
@@ -262,6 +283,8 @@ reinstall. Restart Claude Code to apply.
 | `common.ts` | Shared wire protocol and state paths |
 | `markdown.ts` | Markdown→Telegram-HTML converter + chunk-safe splitter |
 | `prompt.ts` | Pane-scrape detection of interactive prompts → Telegram buttons |
+| `transcript.ts` | Off-MCP outbound: read replies + live activity from CC's transcript JSONL |
+| `*.test.ts` | `bun test` unit suite for the parsers/formatters (markdown, transcript, prompt) |
 | `server.ts` | Legacy all-in-one (kept for compatibility) |
 | `transcribe_local.py` | Local faster-whisper transcription helper |
 | `skills/` | `/telegram:configure` and `/telegram:access` skills |
