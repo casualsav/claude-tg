@@ -96,6 +96,8 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`terminalMirror`** (default `"tools"`) controls the live activity mirror — one self-updating message of what Claude is doing. `"tools"` shows the tool feed (💻 terminal, 📋 todo, 📖 read, ✏️ edit…) read straight from the transcript (zero usage); `"digest"` shows Claude's recent `●` narration blocks scraped from the pane; `"off"` disables it.
 
+**`sessionPin`** (default `true`) controls the pinned status message — a self-updating pin showing the active session · model · mode with quick buttons. Toggle from Telegram with `/pin on` | `off`.
+
 ## Voice transcription
 
 Voice notes and audio files can be transcribed to text before they reach the session, so you can talk to Claude instead of typing. Transcription runs entirely outside Claude — a local model or a hosted API — so it never consumes Claude usage; only the resulting text enters the conversation (the same cost as if you had typed it). If transcription is disabled or fails, the message falls back to a placeholder plus the `attachment_file_id`.

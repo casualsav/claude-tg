@@ -209,6 +209,7 @@ formatted. Bot commands:
 | `/terminal [N]` | Show recent terminal activity (N lines) |
 | `/autocontinue` | Auto-send "continue" when the usage limit resets (on/off) |
 | `/dock` | Show the docked control-bar keyboard (`/dock off` to hide) |
+| `/pin` | Toggle the pinned status message (`/pin on` \| `off`) |
 | `/reply <response>` | Type a response into the session, then Enter (e.g. a `/login` code) |
 
 Any other `/slash` command is relayed straight to Claude Code. Photos and

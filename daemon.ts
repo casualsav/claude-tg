@@ -76,6 +76,7 @@ type Access = {
   renderMarkdown?: boolean
   autoContinue?: boolean
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
+  sessionPin?: boolean
 }
 
 function defaultAccess(): Access {
@@ -102,6 +103,7 @@ function readAccessFile(): Access {
       renderMarkdown: parsed.renderMarkdown,
       autoContinue: parsed.autoContinue,
       terminalMirror: parsed.terminalMirror,
+      sessionPin: parsed.sessionPin,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -2349,7 +2351,7 @@ function startHelpText(paired: boolean): string {
     `<code>/new</code> — start a fresh conversation\n` +
     `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
 
-    `📌 <b>Pinned bar</b> — your session · model · mode, with 🗂️ 🧠 🧭 quick buttons.\n` +
+    `📌 <b>Pinned bar</b> — your session · model · mode, with 🗂️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle).\n` +
     `🔁 Any other <code>/command</code> is relayed straight to Claude Code.`
 
   if (paired) return guide
@@ -2565,6 +2567,33 @@ function loadScheduledReset(): void {
 }
 
 
+// /pin on|off toggles the pinned status message (default on); bare /pin shows the
+// current state. Off unpins + removes any existing pin; on recreates it.
+bot.command('pin', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg && arg !== 'on' && arg !== 'off') {
+    await ctx.reply('Usage: <code>/pin on</code> | <code>off</code>', { parse_mode: 'HTML' })
+    return
+  }
+  if (arg) {
+    const access = loadAccess()
+    access.sessionPin = arg === 'on'
+    saveAccess(access)
+    if (arg === 'off') await removeSessionPins()
+    else await updateSessionPin()
+  }
+  const on = loadAccess().sessionPin !== false
+  await ctx.reply(
+    `📌 Pinned status message is <b>${on ? 'ON' : 'OFF'}</b>.\n` +
+    (on
+      ? 'It stays pinned up top with the active session · model · mode and quick buttons.'
+      : 'No pinned status message is shown.') +
+    '\nToggle with <code>/pin on</code> | <code>off</code>.',
+    { parse_mode: 'HTML' },
+  )
+})
+
 // /autocontinue on|off toggles whether the reset reminder auto-types "continue"
 // (default on); bare /autocontinue shows the current state.
 bot.command('autocontinue', async ctx => {
@@ -2642,6 +2671,15 @@ function persistSessionPins(): void {
   try { writeFileSync(SESSION_PIN_FILE, JSON.stringify(Object.fromEntries(sessionPins)), { mode: 0o600 }) } catch {}
 }
 
+// Unpin + delete every pinned status message (used by /pin off).
+async function removeSessionPins(): Promise<void> {
+  for (const [chat, mid] of sessionPins) {
+    await bot.api.unpinChatMessage(chat, mid).catch(() => {})
+    await bot.api.deleteMessage(chat, mid).catch(() => {})
+  }
+  sessionPins.clear(); persistSessionPins()
+}
+
 // The model the focused session last used, read from its transcript (non-intrusive, per
 // session) — falls back to lastKnownModel. The transcript stores raw ids like
 // "claude-opus-4-8"; prettyModel turns that into "Opus 4.8".
@@ -2688,6 +2726,7 @@ function pinKeyboard(): InlineKeyboard {
 
 let pinUpdating = false
 async function updateSessionPin(): Promise<void> {
+  if (loadAccess().sessionPin === false) return // disabled via /pin off
   if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
   pinUpdating = true
   try {
@@ -3782,6 +3821,7 @@ void (async () => {
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
+              { command: 'pin', description: 'Toggle the pinned status message (on/off)' },
               { command: 'status', description: 'Check your pairing status' },
               { command: 'new', description: 'Start a new session' },
             ],
