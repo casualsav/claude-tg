@@ -2699,11 +2699,11 @@ async function doSessionList(ctx: Context): Promise<void> {
   const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>`)
   await ctx.reply(
     `🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\n` +
-    `Tap a number below, or <code>/session #</code> to switch · <code>/session name # label</code> to rename.`,
+    `Tap a number below, or <code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename.`,
     { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
 }
 
-bot.command('session', async ctx => {
+bot.command(['sessions', 'session'], async ctx => {   // /sessions is canonical; /session is the alias
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
   const rows = await sessionRows()
@@ -3631,7 +3631,7 @@ void (async () => {
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'mode', description: 'Interactive mode switcher' },
-              { command: 'session', description: 'List sessions (/session # switch, /session name # label)' },
+              { command: 'sessions', description: 'List sessions (/sessions # switch, /sessions name # label)' },
               { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
