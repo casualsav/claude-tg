@@ -1331,7 +1331,9 @@ function renderPromptHtml(prompt: PromptInfo): string {
     lines.push(`<b>${i + 1}.</b> ${escapeHtml(opt.label)}`)
     if (opt.description) lines.push(`<blockquote>${escapeHtml(opt.description)}</blockquote>`)
   })
-  if (prompt.freeText) lines.push('', '✏️ <i>…or tap “Type something” to write your own answer.</i>')
+  // The "Type something" button only rides on the single-select keyboard; multi-select
+  // shows checkboxes + Submit (no free-text button), so don't advertise it there.
+  if (prompt.freeText && !prompt.multiSelect) lines.push('', '✏️ <i>…or tap “Type something” to write your own answer.</i>')
   return lines.join('\n')
 }
 
