@@ -703,6 +703,7 @@ function setFocus(sessionId: string | null): void {
   lastRelayedPermissionHash = ''
   lastRelayedAuthUrl = ''
   if (activePaneId) { startPaneWatcher(activePaneId); startRelayLoop() }
+  void updateSessionPin()
 }
 
 // Remove a session; refocus the next one (if any) if it was the focused one.
@@ -1184,6 +1185,7 @@ function focusOffMcpPane(paneId: string): void {
   lastRelayedAuthUrl = ''
   startPaneWatcher(paneId)
   startRelayLoop()
+  void updateSessionPin()
 }
 
 // Announce a newly discovered sibling pane with a one-tap switch button — never steals focus.
@@ -1211,6 +1213,7 @@ async function discoverPanes(): Promise<void> {
     if (p === activePaneId) { offMcpPanes.add(p); continue }
     if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void announceNewSession(p) }
   }
+  void updateSessionPin()
 }
 
 // Deliver an inbound Telegram message to the focused session. Claude Code only lets
@@ -1735,6 +1738,7 @@ function startPaneWatcher(paneId: string): void {
         offMcpPanes.delete(paneId)
         // Adopted off-MCP pane: clear the binding so the rescan re-adopts a fresh one.
         if (adoptedPaneId === paneId) { adoptedPaneId = null; currentSessionId = null }
+        void updateSessionPin()
       }
     },
   )
@@ -2056,6 +2060,7 @@ async function handleModeCommand(
   if (msgId) {
     void bot.api.setMessageReaction(chat_id, msgId, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
   }
+  void updateSessionPin()
 }
 
 // ---- Session-reset command helper ----
@@ -2532,6 +2537,56 @@ async function sessionNumber(key: string): Promise<number | null> {
   return i >= 0 ? i + 1 : null
 }
 
+// ---- Pinned "current session" indicator ----
+// A single pinned message per chat that names the focused session + its mode, so multi-session
+// users can see where they are at a glance. It only exists while ≥2 sessions are live: it's
+// pinned the moment a second session appears, edited on every switch/mode change, and unpinned
+// when things collapse back to one. Persisted so a daemon restart edits it instead of re-pinning.
+const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
+const sessionPins = new Map<string, number>()
+try { for (const [c, m] of Object.entries(JSON.parse(readFileSync(SESSION_PIN_FILE, 'utf8')) as Record<string, number>)) sessionPins.set(c, m) } catch {}
+function persistSessionPins(): void {
+  try { writeFileSync(SESSION_PIN_FILE, JSON.stringify(Object.fromEntries(sessionPins)), { mode: 0o600 }) } catch {}
+}
+
+// The at-a-glance status line for the focused session: 📍 Session N — name · 🧭 Mode.
+async function sessionPinText(rows: SessionRow[]): Promise<string> {
+  const cur = rows.find(r => r.current)
+  if (!cur) return '📍 <b>No active session</b>'
+  const n = rows.indexOf(cur) + 1
+  let mode = ''
+  if (activePaneId) {
+    try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = ` · 🧭 ${modeLabel(detectCurrentMode(cap))}` } catch {}
+  }
+  return `📍 <b>Session ${n}</b> — ${escapeHtml(cur.label)}${mode}`
+}
+
+let pinUpdating = false
+async function updateSessionPin(): Promise<void> {
+  if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
+  pinUpdating = true
+  try {
+    const rows = await sessionRows()
+    const multi = rows.length >= 2
+    const text = multi ? await sessionPinText(rows) : ''
+    for (const chat of loadAccess().allowFrom) {
+      const existing = sessionPins.get(chat)
+      if (multi) {
+        if (existing) { await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML' }).catch(() => {}); continue }
+        try {
+          const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' })
+          await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
+          sessionPins.set(chat, m.message_id); persistSessionPins()
+        } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
+      } else if (existing) {
+        await bot.api.unpinChatMessage(chat, existing).catch(() => {})
+        await bot.api.deleteMessage(chat, existing).catch(() => {})
+        sessionPins.delete(chat); persistSessionPins()
+      }
+    }
+  } finally { pinUpdating = false }
+}
+
 // Switch focus to session #n (1-based over sessionRows). Returns the HTML confirmation, or
 // an HTML error if the number is out of range / the target can't be focused.
 async function switchSessionTo(n: number): Promise<string> {
@@ -2647,6 +2702,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText(`🧭 <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
       parse_mode: 'HTML', reply_markup: modePickerKeyboard(reached),
     }).catch(() => {})
+    void updateSessionPin()
     return
   }
 
