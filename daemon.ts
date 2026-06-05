@@ -878,6 +878,10 @@ let relayCursorPrimed = false
 // said while unfocused. In-memory: a fresh daemon has no cursors, so it never replays a
 // backlog on the first focus of a session (or after a restart).
 const lastRelayedByFile = new Map<string, string>()
+// Cross-session unread pings: the latest uuid we've pinged about per file, and the live
+// ping message ids (file → chat → messageId) so a follow-up edits in place and a read clears.
+const unreadNotified = new Map<string, string>()
+const unreadNotifMsgs = new Map<string, Map<string, number>>()
 let relayIdleStreak = 0
 let relayLoopGen = 0   // bump to retire the running loop when focus moves
 
@@ -1087,7 +1091,7 @@ async function primeRelayCursor(): Promise<void> {
       const unread = finalRepliesAfter(file, prev)
       const chats = loadAccess().allowFrom
       if (unread.length) {
-        const header = `📨 <i>${unread.length} message${unread.length > 1 ? 's' : ''} from this session while you were away:</i>`
+        const header = `💬 <i>${unread.length} message${unread.length > 1 ? 's' : ''} from this session while you were away:</i>`
         for (const chat of chats) await bot.api.sendMessage(chat, header, { parse_mode: 'HTML' }).catch(() => {})
         for (const r of unread) await sendAgentText(chats, r.text).catch(() => {})
       }
@@ -2685,16 +2689,25 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   return `🗂️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
 }
 
+// Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
+function pinKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('🗂️ Sessions', 'pin:sessions')
+    .text('🧠 Model', 'pin:model')
+    .text('🧭 Mode', 'pin:mode')
+}
+
 let pinUpdating = false
 async function updateSessionPin(): Promise<void> {
   if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
   pinUpdating = true
   try {
     const text = await sessionPinText(await sessionRows())
+    const reply_markup = pinKeyboard()
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
       if (existing) {
-        await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML' }).catch(() => {})
+        await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML', reply_markup }).catch(() => {})
         // If the user unpinned it, re-pin on the next update (e.g. a session switch) so it returns.
         const info = await bot.api.getChat(chat).catch(() => null)
         if (info?.pinned_message?.message_id !== existing) {
@@ -2703,12 +2716,50 @@ async function updateSessionPin(): Promise<void> {
         continue
       }
       try {
-        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' })
+        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup })
         await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
         sessionPins.set(chat, m.message_id); persistSessionPins()
       } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
     }
   } finally { pinUpdating = false }
+}
+
+// Ping when an *unfocused* off-MCP session speaks: "💬 N messages from Session N while you
+// were away" + a switch button. One ping per session, edited in place as the count grows,
+// and deleted once you switch in (the read baseline catches up). Skips sessions with no read
+// baseline yet (not announced) so it never pings a backlog.
+async function checkCrossSessionUnread(): Promise<void> {
+  if (!TRANSCRIPT_OUTBOUND) return
+  for (const pane of offMcpPanes) {
+    if (pane === activePaneId) continue
+    const cwd = await paneCwd(pane)
+    const file = cwd ? resolveTranscript(cwd) : null
+    if (!file) continue
+    const latest = latestFinalReply(file)
+    const baseline = lastRelayedByFile.get(file)
+    if (!latest || baseline === undefined || latest.uuid === baseline) {
+      // Caught up (or never baselined) — clear the ping so a future message re-pings fresh.
+      const msgs = unreadNotifMsgs.get(file)
+      if (msgs) { for (const [chat, mid] of msgs) await bot.api.deleteMessage(chat, mid).catch(() => {}); unreadNotifMsgs.delete(file) }
+      unreadNotified.delete(file)
+      continue
+    }
+    if (unreadNotified.get(file) === latest.uuid) continue   // already pinged for this state
+    unreadNotified.set(file, latest.uuid)
+    const n = await sessionNumber(pane)
+    const count = finalRepliesAfter(file, baseline).length
+    const text = `💬 ${count} message${count > 1 ? 's' : ''} from <b>Session ${n ?? '?'}</b> while you were away`
+    const kb = new InlineKeyboard().text(`♻️ Switch to Session ${n ?? '?'}`, `adoptpane:${pane}`)
+    let msgs = unreadNotifMsgs.get(file)
+    for (const chat of loadAccess().allowFrom) {
+      const mid = msgs?.get(chat)
+      if (mid) { await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {}) }
+      else {
+        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup: kb }).catch(() => null)
+        if (m) { if (!msgs) { msgs = new Map(); unreadNotifMsgs.set(file, msgs) } msgs.set(chat, m.message_id) }
+      }
+    }
+  }
 }
 
 // When the focused session dies and exactly one remains, move focus to it automatically.
@@ -2720,17 +2771,23 @@ async function refocusSoleSession(): Promise<void> {
   else if (only.paneId && await paneAlive(only.paneId)) focusOffMcpPane(only.paneId)
 }
 
+// "✅ Switched to Session N (/path)" — the cwd reads clearer than the bare folder name.
+async function switchedMsg(n: number | null, paneId: string | null): Promise<string> {
+  const path = paneId ? await paneCwd(paneId) : null
+  return `✅ Switched to <b>Session ${n ?? '?'}</b>${path ? ` (<code>${escapeHtml(path)}</code>)` : ''}`
+}
+
 // Switch focus to session #n (1-based over sessionRows). Returns the HTML confirmation, or
 // an HTML error if the number is out of range / the target can't be focused.
 async function switchSessionTo(n: number): Promise<string> {
   const rows = await sessionRows()
   if (n < 1 || n > rows.length) return `No session #${n}. See /session.`
   const row = rows[n - 1]
-  if (row.current) return `Already on <b>${escapeHtml(row.label)}</b>.`
-  if (row.shim) { setFocus(row.key); return `✅ Switched to <b>${escapeHtml(row.label)}</b> (session ${n})` }
+  if (row.current) return `Already on <b>Session ${n}</b>.`
+  if (row.shim) { setFocus(row.key); return switchedMsg(n, row.paneId) }
   if (!row.paneId || !(await paneAlive(row.paneId))) return 'That session’s pane is gone.'
   focusOffMcpPane(row.paneId)
-  return `✅ Switched to <b>${escapeHtml(row.label)}</b> (session ${n})`
+  return switchedMsg(n, row.paneId)
 }
 
 // One tappable button per session for the /session listing — ★ marks the active one,
@@ -2824,6 +2881,19 @@ bot.command('stop', confirmStop)
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
+
+  // Pinned-message quick actions → the same pickers as /sessions, /model, /mode.
+  if (data === 'pin:sessions' || data === 'pin:model' || data === 'pin:mode') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (data === 'pin:sessions') await doSessionList(ctx)
+    else if (data === 'pin:model') await doModelPicker(ctx)
+    else await doModePicker(ctx)
+    return
+  }
 
   // "Continue" button on the usage-limit reset ping → type "continue" into the session.
   if (data === 'usage:continue') {
@@ -3032,8 +3102,7 @@ bot.on('callback_query:data', async ctx => {
     focusOffMcpPane(paneId)
     await ctx.answerCallbackQuery({ text: 'Switched.' }).catch(() => {})
     await ctx.editMessageReplyMarkup({}).catch(() => {})
-    const n = await sessionNumber(paneId)
-    await ctx.reply(`✅ Switched to <b>${escapeHtml(await paneLabel(paneId))}</b>${n ? ` (session ${n})` : ''}`, { parse_mode: 'HTML' }).catch(() => {})
+    await ctx.reply(await switchedMsg(await sessionNumber(paneId), paneId), { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -3691,6 +3760,7 @@ if (FORCE_PANE) {
   // are announced with a switch button rather than stealing focus.
   void discoverPanes()
   setInterval(() => void discoverPanes(), 30_000)
+  setInterval(() => void checkCrossSessionUnread(), 4_000)   // ping unread in unfocused sessions
 }
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
