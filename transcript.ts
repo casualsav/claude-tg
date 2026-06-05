@@ -66,6 +66,42 @@ export function finalReplyForInjected(file: string, injectedText: string): strin
   return last
 }
 
+// One tool call's name + a short representative detail, for the tool-feed mirror mode.
+export type Activity = { tool: string; detail: string }
+
+function toolDetail(input: unknown): string {
+  if (!input || typeof input !== 'object') return ''
+  const o = input as Record<string, unknown>
+  const pick = o.command ?? o.file_path ?? o.path ?? o.pattern ?? o.url ?? o.query ?? o.description ?? o.prompt
+  const s = (typeof pick === 'string' ? pick : '').replace(/\s+/g, ' ').trim()
+  return s.length > 56 ? s.slice(0, 55) + '…' : s
+}
+
+// Tool calls made in the current (latest) turn — every assistant `tool_use` block after the
+// last real user message (tool_result entries skipped, so a turn spans its tool calls), each
+// summarised to name + a short detail. Oldest first.
+export function currentTurnActivity(file: string): Activity[] {
+  let lines: string[]
+  try { lines = readFileSync(file, 'utf8').split('\n') } catch { return [] }
+  const entries: Entry[] = []
+  for (const l of lines) { if (l.trim()) try { entries.push(JSON.parse(l)) } catch {} }
+
+  let anchor = -1
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (entries[i].type === 'user' && textOf(entries[i].message?.content).trim()) { anchor = i; break }
+  }
+  const acts: Activity[] = []
+  for (let i = anchor + 1; i < entries.length; i++) {
+    if (entries[i].type !== 'assistant') continue
+    const content = entries[i].message?.content
+    if (!Array.isArray(content)) continue
+    for (const b of content as any[]) {
+      if (b?.type === 'tool_use' && typeof b.name === 'string') acts.push({ tool: b.name, detail: toolDetail(b.input) })
+    }
+  }
+  return acts
+}
+
 // The most recent assistant `text` block in the transcript, with its entry uuid — the
 // conclusion of the latest completed turn when read at idle. Unlike finalReplyForInjected
 // this needs no anchor, so it relays proactive messages (status pings, a "done" after a

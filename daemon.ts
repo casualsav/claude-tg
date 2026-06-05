@@ -23,7 +23,7 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, currentTurnActivity, type Activity } from './transcript.ts'
 
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
 // the daemon reads its reply from the session transcript and relays it — lets a session
@@ -76,6 +76,7 @@ type Access = {
   renderMarkdown?: boolean
   notifyIdle?: boolean
   autoContinue?: boolean
+  terminalMirror?: 'tools' | 'digest' | 'off' | boolean
 }
 
 function defaultAccess(): Access {
@@ -102,6 +103,7 @@ function readAccessFile(): Access {
       renderMarkdown: parsed.renderMarkdown,
       notifyIdle: parsed.notifyIdle,
       autoContinue: parsed.autoContinue,
+      terminalMirror: parsed.terminalMirror,
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
@@ -921,6 +923,119 @@ let relayCursorPrimed = false
 let relayIdleStreak = 0
 let relayLoopGen = 0   // bump to retire the running loop when focus moves
 
+// ---- Live activity mirror ----
+// One self-editing Telegram message per work burst showing what Claude is doing, so the user
+// can watch without the terminal. Two modes (access.terminalMirror, default 'tools'):
+//   'tools'  — a compact list of the turn's recent tool calls (🔧 name + detail).
+//   'digest' — Claude's recent "● …" blocks (narration + tool headers), the simplified
+//              formatting the original /terminal used, as a plain message (the blocks are prose).
+//   'off'/false — disabled.
+// Refreshed while working, frozen when it settles; throttled + only edited on change for
+// Telegram's edit limits. No mirror opens for a sub-tick (tool-less) turn.
+const MIRROR_THROTTLE_MS = 3000
+const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
+const MIRROR_TOOLS = 5         // tools mode: max tool rows shown (kept short to spare chat room)
+const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
+let mirrorLastText = ''
+let mirrorLastEditAt = 0
+
+function mirrorMode(): 'tools' | 'digest' | 'off' {
+  const v = loadAccess().terminalMirror
+  if (v === false || v === 'off') return 'off'
+  return v === 'digest' ? 'digest' : 'tools'
+}
+
+// Claude's recent "● <text>" blocks from the pane — each leading bullet plus its indented
+// wrapped continuation — skipping ⎿ tool-output lines and box chrome. A clean digest of what
+// Claude said/did, far more readable than the raw terminal. Oldest first, last `max` kept.
+function recentAssistantBlocks(raw: string, max: number): string[] {
+  const lines = raw.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
+  const blocks: string[] = []
+  let cur: string[] | null = null
+  const flush = () => { if (cur) { blocks.push(cur.join('\n')); cur = null } }
+  for (const l of lines) {
+    const m = l.match(/^\s*●\s+(.+)$/)
+    if (m) { flush(); cur = [`● ${m[1].trim()}`] }
+    else if (cur) {
+      if (/^\s{2,}\S/.test(l) && !/^\s*⎿/.test(l)) cur.push(`  ${l.trim()}`)
+      else flush()
+    }
+  }
+  flush()
+  return blocks.slice(-max)
+}
+
+// Pane capture with a little scrollback, so the digest has recent blocks even as they scroll.
+async function mirrorCapture(): Promise<string> {
+  if (!activePaneId) return ''
+  try { return (await exec('tmux', ['capture-pane', '-p', '-t', activePaneId, '-S', '-120', '-J'], { timeout: 3000 })).stdout }
+  catch { return '' }
+}
+
+function renderDigestMirror(raw: string, done: boolean): string {
+  const header = done ? '🖥️ <b>Session</b> · idle' : '🖥️ <b>Session</b> · live'
+  const blocks = recentAssistantBlocks(raw, MIRROR_BLOCKS)
+  if (blocks.length === 0) return header
+  return `${header}\n\n${escapeHtml(blocks.join('\n').slice(0, 3500))}`
+}
+
+function renderToolsMirror(acts: Activity[], done: boolean): string {
+  const shown = acts.slice(-MIRROR_TOOLS)
+  const more = acts.length - shown.length
+  const lines = [done ? `✅ <b>Done</b> · ${acts.length} step${acts.length === 1 ? '' : 's'}` : '⚙️ <b>Working…</b>']
+  if (more > 0) lines.push(`<i>…+${more} earlier</i>`)
+  for (const a of shown) {
+    const d = a.detail ? ` <code>${escapeHtml(a.detail)}</code>` : ''
+    lines.push(`🔧 ${escapeHtml(a.tool)}${d}`)
+  }
+  return lines.join('\n')
+}
+
+// The mirror text for the active mode, or null when there's nothing to show yet.
+async function buildMirrorText(done: boolean): Promise<string | null> {
+  if (mirrorMode() === 'digest') {
+    const raw = await mirrorCapture()
+    return raw ? renderDigestMirror(raw, done) : null
+  }
+  const cwd = activePaneId ? await paneCwd(activePaneId) : null
+  const file = cwd ? resolveTranscript(cwd) : null
+  const acts = file ? currentTurnActivity(file) : []
+  return acts.length ? renderToolsMirror(acts, done) : null
+}
+
+// While working, post/refresh the mirror; freeze it when the turn settles.
+async function updateTerminalMirror(idle: boolean): Promise<void> {
+  if (mirrorMode() === 'off') { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
+  if (idle) { await finalizeTerminalMirror(); return }
+
+  const text = await buildMirrorText(false)
+  if (!text) return
+  const now = Date.now()
+  if (mirrorMsgIds.size === 0) {
+    mirrorLastText = text; mirrorLastEditAt = now
+    for (const chat of loadAccess().allowFrom) {
+      try { const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' }); mirrorMsgIds.set(chat, m.message_id) }
+      catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
+    }
+  } else if (text !== mirrorLastText && now - mirrorLastEditAt >= MIRROR_THROTTLE_MS) {
+    mirrorLastText = text; mirrorLastEditAt = now
+    for (const [chat, mid] of mirrorMsgIds) {
+      await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+    }
+  }
+}
+
+// Freeze the open mirror on its final state and stop tracking it, so the next work burst opens
+// a fresh message. No-op if no mirror is open.
+async function finalizeTerminalMirror(): Promise<void> {
+  if (mirrorMsgIds.size === 0) return
+  const text = (await buildMirrorText(true)) ?? '🖥️ <b>Session</b> · idle'
+  for (const [chat, mid] of mirrorMsgIds) {
+    await bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+  }
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0
+}
+
 async function relayLoopTick(gen: number): Promise<void> {
   if (gen !== relayLoopGen || !activePaneId || !TRANSCRIPT_OUTBOUND) return
   const paneId = activePaneId
@@ -928,6 +1043,10 @@ async function relayLoopTick(gen: number): Promise<void> {
   try { cap = await capturePane(paneId) } catch { /* transient capture miss — retry next tick */ }
   const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
+
+  // Live terminal mirror: a digest of Claude's recent ● blocks (captures its own scrollback).
+  await updateTerminalMirror(idle).catch(() => {})
+
   if (relayIdleStreak >= 2) {
     const cwd = await paneCwd(paneId)
     const file = cwd ? resolveTranscript(cwd) : null
@@ -961,6 +1080,7 @@ function startRelayLoop(): void {
   const gen = ++relayLoopGen
   relayCursorPrimed = false
   relayIdleStreak = 0
+  mirrorMsgIds.clear(); mirrorLastText = ''; mirrorLastEditAt = 0   // abandon any mirror from the old pane
   void primeRelayCursor().finally(() => {
     if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
   })
