@@ -961,14 +961,14 @@ function toolBadge(tool: string): [string, string] {
 
 function renderToolsMirror(acts: Activity[], done: boolean): string {
   // No "Working…" header — just the latest few tool calls scrolling by (oldest fall off as
-  // new ones arrive). A Done summary still caps the feed when the turn settles.
+  // new ones arrive). A Done summary caps the feed at the bottom when the turn settles.
   const lines: string[] = []
-  if (done) lines.push(`✅ <b>Done</b> · ${acts.length} step${acts.length === 1 ? '' : 's'}`)
   for (const a of acts.slice(-MIRROR_TOOLS)) {
     const [emoji, label] = toolBadge(a.tool)
     const d = a.detail ? `: <code>${escapeHtml(a.detail)}</code>` : ''
     lines.push(`${emoji} ${label}${d}`)
   }
+  if (done) lines.push(`✅ <b>Done</b> · ${acts.length} step${acts.length === 1 ? '' : 's'}`)
   return lines.join('\n')
 }
 
