@@ -2094,35 +2094,6 @@ async function doContext(ctx: Context): Promise<void> {
 
 // /session shows where the active session is: cwd, git branch (+dirty), mode, model.
 // cwd/branch are read deterministically from tmux + git (no pane scraping).
-async function doSession(ctx: Context): Promise<void> {
-  if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  let cwd = ''
-  try {
-    const { stdout } = await exec('tmux', ['display-message', '-p', '-t', activePaneId, '#{pane_current_path}'], { timeout: 2000 })
-    cwd = stdout.trim()
-  } catch {}
-  let branch = ''
-  if (cwd) {
-    try {
-      branch = (await exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()
-      const dirty = (await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 3000 })).stdout.trim()
-      if (dirty) branch += ' *'
-    } catch {}   // not a git repo, or git unavailable
-  }
-  const mode = detectCurrentMode(await capturePane(activePaneId))
-  // Use the cached model to stay non-invasive; only open /model (idle-guarded)
-  // if we've never read it. /model, /new, and the 🧠 button keep the cache fresh.
-  const model = lastKnownModel ?? await readCurrentModel(activePaneId, paneWatcher)
-  const lines = [
-    `📁 <b>cwd:</b> <code>${escapeHtml(cwd || 'unknown')}</code>`,
-    ...(branch ? [`🌿 <b>branch:</b> <code>${escapeHtml(branch)}</code>`] : []),
-    `🎚 <b>mode:</b> ${escapeHtml(modeLabel(mode))}`,
-    `🧠 <b>model:</b> ${model ? escapeHtml(model) : 'unknown — run /model'}`,
-  ]
-  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' })
-}
-
 // ---- Control bar (docked quick-action keyboard) ----
 // Buttons send their label as a normal message; the message:text handler matches
 // these exact labels and routes each to the action above before any other handling.
@@ -2236,10 +2207,9 @@ bot.command('menu', async ctx => {
   await ctx.reply('🎛 Control bar ready.', { reply_markup: controlKeyboard() })
 })
 
-// /cost, /context, /session relay session visibility info.
+// /cost, /context relay session visibility info. (/session is the registry — below.)
 bot.command('cost', doCost)
 bot.command('context', doContext)
-bot.command('session', doSession)
 
 // Trim a captured pane tail down to its content: strip ANSI, drop the trailing
 // input-box / footer chrome and surrounding blanks, and keep the last `maxLines`.
@@ -2375,29 +2345,73 @@ bot.command('autocontinue', async ctx => {
   )
 })
 
-// /sessions lists the connected Claude Code sessions (★ = focused); /use <n>
-// switches which one Telegram is wired to.
-bot.command('sessions', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const list = orderedSessions()
-  if (list.length === 0) { await ctx.reply('No active Claude Code sessions.'); return }
-  const lines = list.map((o, i) =>
-    `${i + 1}. ${o.id === currentSessionId ? '★ ' : ''}<b>${escapeHtml(o.s.label)}</b>  <code>${o.s.paneId ?? 'no-tmux'}</code>`)
-  await ctx.reply(`🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\nSwitch with <code>/use N</code>.`, { parse_mode: 'HTML' })
-})
+// User-set session names (paneId → label), overriding the cwd-derived default. In-memory:
+// re-derived from cwd on a daemon restart.
+const sessionNames = new Map<string, string>()
 
-bot.command('use', async ctx => {
+// A pane's display label: a user-set name, else the last path segment of its cwd, else the
+// pane id.
+async function paneLabel(paneId: string): Promise<string> {
+  const named = sessionNames.get(paneId)
+  if (named) return named
+  const cwd = await paneCwd(paneId)
+  return (cwd && cwd.split('/').filter(Boolean).pop()) || paneId
+}
+
+// The unified session list: every shim-registered session PLUS the off-MCP adopted/forced
+// pane (which lives in activePaneId, not the sessions map — without this it shows as "no
+// sessions"). `shim` marks the ones switchable via setFocus.
+type SessionRow = { key: string; paneId: string | null; label: string; current: boolean; shim: boolean }
+async function sessionRows(): Promise<SessionRow[]> {
+  const rows: SessionRow[] = []
+  const panes = new Set<string>()
+  for (const { id, s } of orderedSessions()) {
+    if (s.paneId) panes.add(s.paneId)
+    const label = (s.paneId && sessionNames.get(s.paneId)) || s.label
+    rows.push({ key: id, paneId: s.paneId, label, current: id === currentSessionId, shim: true })
+  }
+  if (activePaneId && !panes.has(activePaneId)) {
+    rows.push({ key: activePaneId, paneId: activePaneId, label: await paneLabel(activePaneId), current: currentSessionId === activePaneId, shim: false })
+  }
+  return rows
+}
+
+// /session — list the connected sessions (★ = focused). /session N switches focus;
+// /session name N <label> renames one.
+bot.command('session', async ctx => {
   if (!dmCommandGate(ctx)) return
-  const list = orderedSessions()
-  const n = parseInt((ctx.match ?? '').toString().trim(), 10)
-  if (!Number.isInteger(n) || n < 1 || n > list.length) {
-    await ctx.reply(`Usage: <code>/use N</code> (1–${list.length || 1}). See /sessions.`, { parse_mode: 'HTML' })
+  const arg = (ctx.match ?? '').toString().trim()
+  const rows = await sessionRows()
+
+  const nameMatch = arg.match(/^name\s+(\d+)\s+(.+)$/i)
+  if (nameMatch) {
+    const n = Number(nameMatch[1])
+    if (n < 1 || n > rows.length) { await ctx.reply(`No session ${n}. See /session.`); return }
+    const row = rows[n - 1]
+    if (!row.paneId) { await ctx.reply('That session has no pane to name.'); return }
+    const label = nameMatch[2].trim().slice(0, 40)
+    sessionNames.set(row.paneId, label)
+    await ctx.reply(`✅ Session ${n} renamed to <b>${escapeHtml(label)}</b>.`, { parse_mode: 'HTML' })
     return
   }
-  const target = list[n - 1]
-  if (target.id === currentSessionId) { await ctx.reply(`Already on “${target.s.label}”.`); return }
-  setFocus(target.id)
-  await ctx.reply(`✅ Switched to <b>${escapeHtml(target.s.label)}</b> (<code>${target.s.paneId ?? 'no-tmux'}</code>).`, { parse_mode: 'HTML' })
+
+  const n = parseInt(arg, 10)
+  if (arg && Number.isInteger(n)) {
+    if (n < 1 || n > rows.length) { await ctx.reply(`Usage: <code>/session N</code> (1–${rows.length || 1}).`, { parse_mode: 'HTML' }); return }
+    const row = rows[n - 1]
+    if (row.current) { await ctx.reply(`Already on “${row.label}”.`); return }
+    if (!row.shim) { await ctx.reply('That session is the active pane already.'); return }
+    setFocus(row.key)
+    await ctx.reply(`✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId ?? 'no-tmux'}</code>).`, { parse_mode: 'HTML' })
+    return
+  }
+
+  if (rows.length === 0) { await ctx.reply('No active Claude Code session.'); return }
+  const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>  <code>${r.paneId ?? 'no-tmux'}</code>`)
+  await ctx.reply(
+    `🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\n` +
+    `<code>/session N</code> to switch · <code>/session name N label</code> to rename.`,
+    { parse_mode: 'HTML' })
 })
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
@@ -2958,13 +2972,13 @@ function handleShimConnection(socket: net.Socket): void {
             process.stderr.write(`daemon: session ${sessionId} registered (focus pinned to ${FORCE_PANE})\n`)
           } else if (adoptionHolds) {
             const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
-            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /use ${idx}.`)
+            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /session ${idx}.`)
           } else if (currentSessionId === null || currentSessionId === sessionId || !sessions.has(currentSessionId)) {
             setFocus(sessionId)
             replayBuffer()
           } else {
             const idx = orderedSessions().findIndex(o => o.id === sessionId) + 1
-            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /use ${idx}.`)
+            notifyChats(`🆕 New session available — #${idx} “${label}”. Switch with /session ${idx}.`)
           }
           break
         }
@@ -3125,11 +3139,9 @@ void (async () => {
               { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
-              { command: 'session', description: 'Show cwd, branch, mode, and model' },
+              { command: 'session', description: 'List sessions (/session N switch, /session name N label)' },
               { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
-              { command: 'sessions', description: 'List connected Claude Code sessions' },
-              { command: 'use', description: 'Switch which session Telegram is wired to (/use N)' },
               { command: 'new', description: 'Start a new session' },
               { command: 'status', description: 'Check your pairing status' },
               { command: 'help', description: 'What this bot can do' },
