@@ -763,7 +763,9 @@ const freeTextReplyTargets = new Map<string, Omit<FreeTextPrompt, 'question'>>()
 // Telegram message `${chatId}:${messageId}`. Tapping its 💬 button selects that
 // option (declining the question so the user can reply conversationally);
 // `downCount` is the Down presses to reach it — one past "Type something".
-type ChatPrompt = { paneId: string; downCount: number; tabbed: boolean }
+// `useEscape` = the menu has no literal "Chat about this" option (e.g. AskUserQuestion), so the
+// 💬 button dismisses with Esc instead of navigating to and selecting that option.
+type ChatPrompt = { paneId: string; downCount: number; tabbed: boolean; useEscape: boolean }
 const chatPrompts = new Map<string, ChatPrompt>()
 
 // Auth/login URLs surfaced from the pane (e.g. /login's OAuth link), so the user
@@ -1573,7 +1575,9 @@ function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): Inli
     if ((i + 1) % 3 === 0) kb.row()
   })
   if (prompt.freeText) kb.row().text('✏️ Type something', 'ftext')
-  if (prompt.chat) kb.row().text('💬 Chat about this', 'chat')
+  // Always offer "Chat about this" — if the menu has a literal option for it we select that,
+  // otherwise we Esc-dismiss the question (see the chat handler).
+  kb.row().text('💬 Chat about this', 'chat')
   return kb
 }
 
@@ -1610,11 +1614,11 @@ async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
           paneId: activePaneId, downCount: prompt.options.length, tabbed: prompt.tabbed, question: prompt.question,
         })
       }
-      if (prompt.chat) {
-        chatPrompts.set(`${chat_id}:${sent.message_id}`, {
-          paneId: activePaneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed,
-        })
-      }
+      // Register chat-dismiss for every question. If the menu carries its own "Chat about this"
+      // option we select it (downCount past the options + free-text); otherwise we Esc-dismiss.
+      chatPrompts.set(`${chat_id}:${sent.message_id}`, prompt.chat
+        ? { paneId: activePaneId, downCount: prompt.options.length + 1, tabbed: prompt.tabbed, useEscape: false }
+        : { paneId: activePaneId, downCount: 0, tabbed: prompt.tabbed, useEscape: true })
     } catch (e) {
       process.stderr.write(`daemon: prompt relay to ${chat_id} failed: ${e}\n`)
     }
@@ -2651,7 +2655,34 @@ function sessionSwitchKeyboard(rows: SessionRow[]): InlineKeyboard {
     kb.text(`${r.current ? '★' : '▶️'} ${i + 1}`, `switchsession:${i + 1}`)
     if ((i + 1) % 4 === 0) kb.row()
   })
+  kb.row().text('➕ New session', 'newsession')
   return kb
+}
+
+// New-session creation: spawn a plugin-less claude in a fresh tmux window; discovery then
+// announces it with a ▶️ Switch button. The folder comes from a force-reply (see below).
+const newSessionReplyTargets = new Set<string>()   // `${chatId}:${messageId}` of folder prompts
+
+async function resolveNewSessionDir(input: string): Promise<string> {
+  const t = input.trim()
+  if (!t || t === '~') return homedir()
+  if (t === '.') return (activePaneId && await paneCwd(activePaneId)) || homedir()
+  if (t.startsWith('~/')) return join(homedir(), t.slice(2))
+  return t
+}
+
+async function spawnSession(dir: string): Promise<boolean> {
+  try {
+    let target: string[] = []
+    if (activePaneId) {
+      try {
+        const { stdout } = await exec('tmux', ['display-message', '-p', '-t', activePaneId, '#{session_name}'], { timeout: 2000 })
+        if (stdout.trim()) target = ['-t', stdout.trim()]   // the daemon isn't inside tmux; pick the active session
+      } catch {}
+    }
+    await exec('tmux', ['new-window', '-d', ...target, '-c', dir, 'claude --strict-mcp-config'], { timeout: 5000 })
+    return true
+  } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
 }
 
 // /session — list the connected sessions (★ = focused). /session # switches focus;
@@ -2840,6 +2871,21 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // "➕ New session" button → ask for a folder via force-reply; the reply spawns the session.
+  if (data === 'newsession') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const sent = await ctx.reply('📂 New session — reply with a folder path.\n<code>.</code> = current session’s folder · empty = home', {
+      parse_mode: 'HTML',
+      reply_markup: { force_reply: true, input_field_placeholder: 'Folder (. = current, empty = home)' },
+    }).catch(() => null)
+    if (sent) newSessionReplyTargets.add(`${ctx.chat?.id}:${sent.message_id}`)
+    return
+  }
+
   // "Switch to it" button under a new-session announcement → focus that pane by id.
   const adoptMatch = /^adoptpane:(%\d+)$/.exec(data)
   if (adoptMatch) {
@@ -2980,8 +3026,12 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery({ text: 'Dismissing — go ahead and type.' }).catch(() => {})
     await paneWatcher.withInjection(async () => {
-      await navigateDown(activePaneId!, cp.downCount)
-      await sendKeys(activePaneId!, ['Enter'])
+      if (cp.useEscape) {
+        await sendKeys(activePaneId!, ['Escape'])
+      } else {
+        await navigateDown(activePaneId!, cp.downCount)
+        await sendKeys(activePaneId!, ['Enter'])
+      }
       await waitForSettle(activePaneId!, 300, 5000)
     })
     lastRelayedPromptHash = ''
@@ -3189,6 +3239,19 @@ bot.on('message:text', async ctx => {
   // hand off to handleTabbedAdvance; otherwise the single question resolves.
   const replyTo = ctx.message.reply_to_message
   if (replyTo) {
+    // Reply to a "📂 New session" force-reply → resolve the folder and spawn the session.
+    const nsKey = `${ctx.chat?.id}:${replyTo.message_id}`
+    if (newSessionReplyTargets.has(nsKey)) {
+      newSessionReplyTargets.delete(nsKey)
+      if (!dmCommandGate(ctx)) return
+      const dir = await resolveNewSessionDir(text)
+      const ok = await spawnSession(dir)
+      await ctx.reply(ok
+        ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code> — it'll pop up here with a ▶️ Switch button shortly.`
+        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code> — does that folder exist?`,
+        { parse_mode: 'HTML' })
+      return
+    }
     const ft = freeTextReplyTargets.get(`${ctx.chat?.id}:${replyTo.message_id}`)
     if (ft) {
       freeTextReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
