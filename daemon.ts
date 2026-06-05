@@ -2219,13 +2219,14 @@ async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<voi
 // these exact labels and routes each to the action above before any other handling.
 const BTN_MODE = '🔄 Mode'
 const BTN_MODEL = '🧠 Model'
+const BTN_SESSIONS = '🗂 Sessions'
 const BTN_COST = '📊 Cost'
 const BTN_STOP = '🛑 Stop'
 const BTN_NEW = '🆕 New'
 
 function controlKeyboard(): Keyboard {
   return new Keyboard()
-    .text(BTN_MODE).text(BTN_MODEL).text(BTN_COST).text(BTN_STOP).text(BTN_NEW)
+    .text(BTN_MODEL).text(BTN_MODE).text(BTN_SESSIONS).text(BTN_STOP).text(BTN_NEW)
     .resized().persistent()
 }
 
@@ -2511,6 +2512,18 @@ function sessionSwitchKeyboard(rows: SessionRow[]): InlineKeyboard {
 
 // /session — list the connected sessions (★ = focused). /session # switches focus;
 // /session name # <label> renames one.
+// Render the session listing with the tappable per-session switch keyboard. Shared by the
+// /session command (no-arg) and the control-bar Sessions button.
+async function doSessionList(ctx: Context): Promise<void> {
+  const rows = await sessionRows()
+  if (rows.length === 0) { await ctx.reply('No active Claude Code session.'); return }
+  const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>  <code>${r.paneId ?? 'no-tmux'}</code>`)
+  await ctx.reply(
+    `🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\n` +
+    `Tap a number below, or <code>/session #</code> to switch · <code>/session name # label</code> to rename.`,
+    { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
+}
+
 bot.command('session', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
@@ -2535,12 +2548,7 @@ bot.command('session', async ctx => {
     return
   }
 
-  if (rows.length === 0) { await ctx.reply('No active Claude Code session.'); return }
-  const lines = rows.map((r, i) => `${i + 1}. ${r.current ? '★ ' : ''}<b>${escapeHtml(r.label)}</b>  <code>${r.paneId ?? 'no-tmux'}</code>`)
-  await ctx.reply(
-    `🗂 <b>Sessions</b> (★ = active):\n${lines.join('\n')}\n\n` +
-    `Tap a number below, or <code>/session #</code> to switch · <code>/session name # label</code> to rename.`,
-    { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
+  await doSessionList(ctx)
 })
 
 // Interrupt the current turn by sending Esc to the pane (same as pressing Esc
@@ -2994,11 +3002,12 @@ bot.on('message:text', async ctx => {
   // Control-bar taps arrive as a normal message carrying the button label.
   // Route exact matches to their action before any other handling.
   switch (text) {
-    case BTN_MODE:  await doModePicker(ctx); return
-    case BTN_MODEL: await doModelPicker(ctx); return
-    case BTN_COST:  await doReadout(ctx, 'cost'); return
-    case BTN_STOP:  await doStop(ctx); return
-    case BTN_NEW:   await confirmNewSession(ctx); return
+    case BTN_MODE:     await doModePicker(ctx); return
+    case BTN_MODEL:    await doModelPicker(ctx); return
+    case BTN_SESSIONS: await doSessionList(ctx); return
+    case BTN_COST:     await doReadout(ctx, 'cost'); return
+    case BTN_STOP:     await doStop(ctx); return
+    case BTN_NEW:      await confirmNewSession(ctx); return
   }
 
   // Reply to a ✏️ Type-something force-reply → type the answer into the prompt's
