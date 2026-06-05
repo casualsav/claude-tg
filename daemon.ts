@@ -2484,12 +2484,12 @@ bot.command('compact', async ctx => {
   void relaySlashCommand(activePaneId, paneWatcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id)
 })
 
-// /menu shows the docked control bar; /menu off hides it.
-bot.command('menu', async ctx => {
+// /dock shows the docked control bar; /dock off hides it. /menu stays as a hidden alias.
+bot.command(['dock', 'menu'], async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   if (arg === 'off' || arg === 'hide') {
-    await ctx.reply('Control bar hidden — /menu to show it again.', { reply_markup: { remove_keyboard: true } })
+    await ctx.reply('Control bar hidden — /dock to show it again.', { reply_markup: { remove_keyboard: true } })
     return
   }
   await ctx.reply('🎛 Control bar ready.', { reply_markup: controlKeyboard() })
@@ -3815,7 +3815,7 @@ void (async () => {
           void bot.api.setMyCommands(
             [
               { command: 'start', description: 'Welcome + everything this bot can do' },
-              { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
+              { command: 'dock', description: 'Show the docked control bar (/dock off to hide)' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'mode', description: 'Interactive mode switcher' },
