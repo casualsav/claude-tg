@@ -2594,7 +2594,15 @@ async function updateSessionPin(): Promise<void> {
     const text = await sessionPinText(await sessionRows())
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
-      if (existing) { await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML' }).catch(() => {}); continue }
+      if (existing) {
+        await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML' }).catch(() => {})
+        // If the user unpinned it, re-pin on the next update (e.g. a session switch) so it returns.
+        const info = await bot.api.getChat(chat).catch(() => null)
+        if (info?.pinned_message?.message_id !== existing) {
+          await bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
+        }
+        continue
+      }
       try {
         const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' })
         await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
