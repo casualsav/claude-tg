@@ -23,7 +23,7 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, detectPermissionPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, currentTurnActivity, type Activity } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, currentTurnActivity, listRecentSessions, findSessionCwd, type Activity } from './transcript.ts'
 
 // Off-MCP outbound (experimental): instead of the agent calling the MCP reply tool,
 // the daemon reads its reply from the session transcript and relays it — lets a session
@@ -2337,6 +2337,7 @@ function startHelpText(paired: boolean): string {
 
     `🗂️ <b>Sessions</b>\n` +
     `<code>/sessions</code> — list &amp; switch (<code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename)\n` +
+    `<code>/resume</code> — pick a recent session (with times) to relaunch\n` +
     `• ➕ <b>New session</b> button — start one in any folder\n` +
     `• Switch back and any 💬 unread messages replay automatically\n\n` +
 
@@ -2844,7 +2845,7 @@ async function resolveNewSessionDir(input: string): Promise<string> {
   return t
 }
 
-async function spawnSession(dir: string): Promise<boolean> {
+async function spawnSession(dir: string, extra = ''): Promise<boolean> {
   try {
     let target: string[] = []
     if (activePaneId) {
@@ -2855,7 +2856,8 @@ async function spawnSession(dir: string): Promise<boolean> {
         if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
       } catch {}
     }
-    await exec('tmux', ['new-window', '-d', ...target, '-c', dir, 'claude --strict-mcp-config'], { timeout: 5000 })
+    const cmd = `claude --strict-mcp-config${extra ? ` ${extra}` : ''}`   // extra e.g. "--resume <id>"
+    await exec('tmux', ['new-window', '-d', ...target, '-c', dir, cmd], { timeout: 5000 })
     return true
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
 }
@@ -2873,6 +2875,34 @@ async function doSessionList(ctx: Context): Promise<void> {
     `Tap a number below, or <code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename.`,
     { parse_mode: 'HTML', reply_markup: sessionSwitchKeyboard(rows) })
 }
+
+// Friendly last-activity stamp: relative for the last day, absolute date+time beyond that.
+function fmtWhen(ms: number): string {
+  const mins = Math.floor((Date.now() - ms) / 60_000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  if (mins < 24 * 60) return `${Math.floor(mins / 60)}h ago`
+  return new Date(ms).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
+
+// /resume — list the most recent Claude Code sessions (across all projects) with their last
+// activity, each tappable to relaunch via `claude --resume` in a fresh pane.
+bot.command('resume', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const recents = listRecentSessions(10)
+  if (recents.length === 0) { await ctx.reply('No recent sessions found.'); return }
+  const kb = new InlineKeyboard()
+  const lines = recents.map((s, i) => {
+    const folder = s.cwd.split('/').filter(Boolean).pop() || s.cwd || '—'
+    const title = s.title ? ` — <i>${escapeHtml(s.title)}</i>` : ''
+    kb.text(`${i + 1}`, `resume:${s.sessionId}`)
+    if ((i + 1) % 5 === 0) kb.row()
+    return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtWhen(s.mtime)}${title}`
+  })
+  await ctx.reply(
+    `🕘 <b>Recent sessions</b>\n${lines.join('\n')}\n\nTap a number to resume it in a new pane.`,
+    { parse_mode: 'HTML', reply_markup: kb })
+})
 
 bot.command(['sessions', 'session'], async ctx => {   // /sessions is canonical; /session is the alias
   if (!dmCommandGate(ctx)) return
@@ -3108,6 +3138,24 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText(ok
       ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code> — it'll pop up here with a ▶️ Switch button shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code> — does that folder exist?`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // Resume button from /resume → relaunch that session with `claude --resume` in a new pane.
+  const resumeMatch = /^resume:([0-9a-fA-F-]+)$/.exec(data)
+  if (resumeMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const id = resumeMatch[1]
+    const dir = findSessionCwd(id) ?? homedir()
+    const ok = await spawnSession(dir, `--resume ${id}`)
+    await ctx.reply(ok
+      ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — it'll pop up here with a ♻️ Switch button shortly.`
+      : `❌ Couldn't resume that session in <code>${escapeHtml(dir)}</code>.`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
   }
@@ -3816,6 +3864,7 @@ void (async () => {
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'mode', description: 'Interactive mode switcher' },
               { command: 'sessions', description: 'List sessions (/sessions # switch, /sessions name # label)' },
+              { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
               { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
               { command: 'cost', description: 'Show the session cost readout' },

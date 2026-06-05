@@ -198,6 +198,7 @@ formatted. Bot commands:
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
 | `/status` | Check your pairing state |
 | `/sessions` | List & switch sessions (`/sessions #` switch · `/sessions name # <label>` rename) |
+| `/resume` | List recent sessions with last-activity times; tap one to relaunch (`claude --resume`) |
 | `/mode` | Interactive permission-mode switcher (`/mode <name>` jumps straight to one) |
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
 | `/model` | Show the current model (or `/model <name>` to switch) |

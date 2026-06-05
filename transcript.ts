@@ -3,7 +3,7 @@
 // per-session JSONL transcript and relays it. Each line is one event; assistant `text`
 // blocks are the real reply (thinking / tool_use / tool_result are separate types and
 // never relayed). Every entry carries `type`, `timestamp`, `cwd`, `sessionId`.
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -17,6 +17,66 @@ function textOf(content: unknown): string {
   if (typeof content === 'string') return content
   if (Array.isArray(content)) return content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n')
   return ''
+}
+
+// A resumable session: id, its working dir, last-activity time, and a short title (the
+// first real user message). For the /resume picker.
+export type RecentSession = { sessionId: string; cwd: string; mtime: number; title: string }
+
+// The most-recently-active sessions across every project, newest first. Stat is cheap, so we
+// stat them all to sort, then read only the top `limit` for cwd + title.
+export function listRecentSessions(limit: number): RecentSession[] {
+  let projectDirs: string[]
+  try { projectDirs = readdirSync(PROJECTS_DIR) } catch { return [] }
+  const files: { path: string; sessionId: string; mtime: number }[] = []
+  for (const d of projectDirs) {
+    let names: string[]
+    try { names = readdirSync(join(PROJECTS_DIR, d)) } catch { continue }
+    for (const n of names) {
+      if (!n.endsWith('.jsonl')) continue
+      const path = join(PROJECTS_DIR, d, n)
+      try { files.push({ path, sessionId: n.slice(0, -6), mtime: statSync(path).mtimeMs }) } catch {}
+    }
+  }
+  files.sort((a, b) => b.mtime - a.mtime)
+  return files.slice(0, limit).map(f => {
+    let cwd = '', title = ''
+    try {
+      for (const l of readFileSync(f.path, 'utf8').split('\n')) {
+        if (!l.trim()) continue
+        let e: Entry
+        try { e = JSON.parse(l) } catch { continue }
+        if (!cwd && e.cwd) cwd = e.cwd
+        // First human-typed message, skipping channel tags, slash commands, and synthetic
+        // entries (command output / caveats) that aren't real prompts.
+        if (!title && e.type === 'user') {
+          const t = textOf(e.message?.content).replace(/\s+/g, ' ').trim()
+          if (t && !/^[<\/#]/.test(t) && !/^Caveat:/i.test(t)) title = t.slice(0, 60)
+        }
+        if (cwd && title) break
+      }
+    } catch {}
+    return { sessionId: f.sessionId, cwd, mtime: f.mtime, title }
+  })
+}
+
+// The working dir a session was recorded in (read from its transcript), for relaunching it
+// with `claude --resume <id>` in the right folder. Null if the session can't be found.
+export function findSessionCwd(sessionId: string): string | null {
+  let projectDirs: string[]
+  try { projectDirs = readdirSync(PROJECTS_DIR) } catch { return null }
+  for (const d of projectDirs) {
+    const path = join(PROJECTS_DIR, d, `${sessionId}.jsonl`)
+    if (!existsSync(path)) continue
+    try {
+      for (const l of readFileSync(path, 'utf8').split('\n')) {
+        if (!l.trim()) continue
+        try { const e = JSON.parse(l) as Entry; if (e.cwd) return e.cwd } catch {}
+      }
+    } catch {}
+    return null
+  }
+  return null
 }
 
 // CC stores a session at ~/.claude/projects/<cwd with '/' → '-'>/<sessionId>.jsonl.
