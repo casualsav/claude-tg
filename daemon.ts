@@ -1738,8 +1738,9 @@ function startPaneWatcher(paneId: string): void {
         offMcpPanes.delete(paneId)
         // Adopted off-MCP pane: clear the binding so the rescan re-adopts a fresh one.
         if (adoptedPaneId === paneId) { adoptedPaneId = null; currentSessionId = null }
-        void updateSessionPin()
       }
+      // Down to a single session → focus it automatically, then refresh the pin.
+      void refocusSoleSession().then(() => updateSessionPin())
     },
   )
   paneWatcher.start()
@@ -2538,10 +2539,10 @@ async function sessionNumber(key: string): Promise<number | null> {
 }
 
 // ---- Pinned "current session" indicator ----
-// A single pinned message per chat that names the focused session + its mode, so multi-session
-// users can see where they are at a glance. It only exists while ≥2 sessions are live: it's
-// pinned the moment a second session appears, edited on every switch/mode change, and unpinned
-// when things collapse back to one. Persisted so a daemon restart edits it instead of re-pinning.
+// A single pinned message per chat showing the focused session at a glance —
+// 💻 name • model (…) • mode (…). Pinned once and then edited in place on every switch and
+// mode change; it stays even with a single session. Pin ids are persisted so a daemon restart
+// edits the existing pin instead of pinning a new one.
 const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
 const sessionPins = new Map<string, number>()
 try { for (const [c, m] of Object.entries(JSON.parse(readFileSync(SESSION_PIN_FILE, 'utf8')) as Record<string, number>)) sessionPins.set(c, m) } catch {}
@@ -2549,16 +2550,39 @@ function persistSessionPins(): void {
   try { writeFileSync(SESSION_PIN_FILE, JSON.stringify(Object.fromEntries(sessionPins)), { mode: 0o600 }) } catch {}
 }
 
-// The at-a-glance status line for the focused session: 📍 Session N — name · 🧭 Mode.
+// The model the focused session last used, read from its transcript (non-intrusive, per
+// session) — falls back to lastKnownModel. The transcript stores raw ids like
+// "claude-opus-4-8"; prettyModel turns that into "Opus 4.8".
+function lastModelInTranscript(file: string): string | null {
+  let data = ''
+  try { data = readFileSync(file, 'utf8') } catch { return null }
+  const matches = data.match(/"model":"([^"]+)"/g) ?? []
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const m = matches[i].slice(9, -1)
+    if (m && m !== '<synthetic>') return m
+  }
+  return null
+}
+function prettyModel(id: string | null): string | null {
+  const m = id?.match(/(opus|sonnet|haiku)-(\d+)-(\d+)/i)
+  return m ? `${m[1][0].toUpperCase()}${m[1].slice(1)} ${m[2]}.${m[3]}` : id
+}
+
+// Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
+// pane capture; model from the session's transcript. Both degrade to "—" rather than blocking.
 async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const cur = rows.find(r => r.current)
-  if (!cur) return '📍 <b>No active session</b>'
-  const n = rows.indexOf(cur) + 1
-  let mode = ''
+  if (!cur) return '💻 <b>No active session</b>'
+  let mode = '—', model = lastKnownModel
   if (activePaneId) {
-    try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = ` · 🧭 ${modeLabel(detectCurrentMode(cap))}` } catch {}
+    try { const cap = await capturePane(activePaneId); if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)) } catch {}
+    try {
+      const cwd = await paneCwd(activePaneId)
+      const file = cwd ? resolveTranscript(cwd) : null
+      model = (file && prettyModel(lastModelInTranscript(file))) || model
+    } catch {}
   }
-  return `📍 <b>Session ${n}</b> — ${escapeHtml(cur.label)}${mode}`
+  return `💻 <b>${escapeHtml(cur.label)}</b> • model (${escapeHtml(model ?? '—')}) • mode (${escapeHtml(mode)})`
 }
 
 let pinUpdating = false
@@ -2566,25 +2590,26 @@ async function updateSessionPin(): Promise<void> {
   if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
   pinUpdating = true
   try {
-    const rows = await sessionRows()
-    const multi = rows.length >= 2
-    const text = multi ? await sessionPinText(rows) : ''
+    const text = await sessionPinText(await sessionRows())
     for (const chat of loadAccess().allowFrom) {
       const existing = sessionPins.get(chat)
-      if (multi) {
-        if (existing) { await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML' }).catch(() => {}); continue }
-        try {
-          const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' })
-          await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
-          sessionPins.set(chat, m.message_id); persistSessionPins()
-        } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
-      } else if (existing) {
-        await bot.api.unpinChatMessage(chat, existing).catch(() => {})
-        await bot.api.deleteMessage(chat, existing).catch(() => {})
-        sessionPins.delete(chat); persistSessionPins()
-      }
+      if (existing) { await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML' }).catch(() => {}); continue }
+      try {
+        const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' })
+        await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
+        sessionPins.set(chat, m.message_id); persistSessionPins()
+      } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
     }
   } finally { pinUpdating = false }
+}
+
+// When the focused session dies and exactly one remains, move focus to it automatically.
+async function refocusSoleSession(): Promise<void> {
+  const rows = await sessionRows()
+  if (rows.length !== 1 || rows[0].current) return
+  const only = rows[0]
+  if (only.shim) setFocus(only.key)
+  else if (only.paneId && await paneAlive(only.paneId)) focusOffMcpPane(only.paneId)
 }
 
 // Switch focus to session #n (1-based over sessionRows). Returns the HTML confirmation, or
