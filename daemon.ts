@@ -3329,18 +3329,18 @@ void (async () => {
           process.stderr.write(`telegram daemon: polling as @${info.username}\n`)
           void bot.api.setMyCommands(
             [
-              { command: 'mode', description: 'Interactive mode switcher' },
+              { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
+              { command: 'help', description: 'What this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
-              { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
-              { command: 'cost', description: 'Show the session cost readout' },
-              { command: 'context', description: 'Show the token-context usage' },
+              { command: 'mode', description: 'Interactive mode switcher' },
               { command: 'session', description: 'List sessions (/session # switch, /session name # label)' },
               { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
+              { command: 'cost', description: 'Show the session cost readout' },
+              { command: 'context', description: 'Show the token-context usage' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
-              { command: 'new', description: 'Start a new session' },
               { command: 'status', description: 'Check your pairing status' },
-              { command: 'help', description: 'What this bot can do' },
+              { command: 'new', description: 'Start a new session' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
