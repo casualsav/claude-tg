@@ -2878,7 +2878,11 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    const sent = await ctx.reply('📂 New session — reply with a folder path.\n<code>Here</code> = current session’s folder · empty = home', {
+    const cwd = activePaneId ? await paneCwd(activePaneId) : null
+    const hereLine = cwd
+      ? `<code>Here</code> = current folder (<code>${escapeHtml(cwd)}</code>)`
+      : '<code>Here</code> = current session’s folder'
+    const sent = await ctx.reply(`📂 New session — reply with a folder path.\n${hereLine} · empty = home`, {
       parse_mode: 'HTML',
       reply_markup: { force_reply: true, input_field_placeholder: 'Folder (Here = current, empty = home)' },
     }).catch(() => null)
