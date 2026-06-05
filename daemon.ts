@@ -74,7 +74,6 @@ type Access = {
   textChunkLimit?: number
   chunkMode?: 'length' | 'newline'
   renderMarkdown?: boolean
-  notifyIdle?: boolean
   autoContinue?: boolean
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
 }
@@ -101,7 +100,6 @@ function readAccessFile(): Access {
       textChunkLimit: parsed.textChunkLimit,
       chunkMode: parsed.chunkMode,
       renderMarkdown: parsed.renderMarkdown,
-      notifyIdle: parsed.notifyIdle,
       autoContinue: parsed.autoContinue,
       terminalMirror: parsed.terminalMirror,
     }
@@ -291,30 +289,6 @@ let botUsername = ''
 // almost always kicks off work), then defers to observed pane state. So even if
 // detectWorking misses a spinner variant, the indicator fades on its own rather
 // than sticking — at worst a few seconds of typing, never a stuck one.
-// Set when a reply tool call goes out during a turn; reset when a new inbound is
-// relayed. Lets the idle alert skip turns where Claude already messaged the user.
-let repliedSinceArm = false
-
-// On a Telegram-initiated turn finishing (work seen, then idle) without a reply,
-// ping the originating chats so the user knows Claude is done. Re-checks after a
-// short delay to avoid firing on a one-frame spinner gap. Gated by notifyIdle
-// (default on).
-function maybeNotifyIdle(chats: string[]): void {
-  if (chats.length === 0 || repliedSinceArm) return
-  if (loadAccess().notifyIdle === false) return
-  const paneId = activePaneId
-  setTimeout(async () => {
-    // Don't claim "finished" if Claude is actually still working, or if it's frozen
-    // at a usage-limit banner (blocked ≠ done — this caused false fires during the
-    // 2.5h limit freeze and long agent pauses).
-    try { const cap = paneId ? await capturePane(paneId) : ''; if (detectWorking(cap) || detectLimited(cap)) return } catch { return }
-    if (repliedSinceArm) return
-    for (const chat_id of chats) {
-      void bot.api.sendMessage(chat_id, '✅ Claude finished').catch(() => {})
-    }
-  }, 1500)
-}
-
 class TypingPresence {
   private targets = new Map<string, number>()   // chat_id -> expiry ms
   private lastWorkingAt = 0
@@ -333,7 +307,6 @@ class TypingPresence {
   // An inbound message was relayed to Claude — begin showing presence.
   arm(chat_id: string): void {
     this.ping(chat_id)
-    repliedSinceArm = false
     // With no pane to observe we can't tell when work ends — just ping once.
     if (!paneWatcher) return
     this.targets.set(chat_id, Date.now() + TypingPresence.CAP_MS)
@@ -363,13 +336,8 @@ class TypingPresence {
       for (const chat of this.targets.keys()) this.ping(chat)
       return
     }
-    // Idle past the grace → the turn is over: stop, and notify if work was seen.
-    const chats = [...this.targets.keys()]
-    const finished = this.sawWorking
+    // Idle past the grace → the turn is over: stop the typing indicator.
     this.clearAll()
-    // Off-MCP relays the actual reply (per-inject poll), so skip the "finished" ping;
-    // in MCP mode, ping if the agent didn't already reply via the reply tool.
-    if (finished && !TRANSCRIPT_OUTBOUND) maybeNotifyIdle(chats)
   }
 
   private clearAll(): void {
@@ -934,7 +902,7 @@ let relayLoopGen = 0   // bump to retire the running loop when focus moves
 // Telegram's edit limits. No mirror opens for a sub-tick (tool-less) turn.
 const MIRROR_THROTTLE_MS = 3000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
-const MIRROR_TOOLS = 5         // tools mode: max tool rows shown (kept short to spare chat room)
+const MIRROR_TOOLS = 3         // tools mode: max tool rows shown (just the latest few)
 const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
 let mirrorLastText = ''
 let mirrorLastEditAt = 0
@@ -1002,11 +970,9 @@ function renderDigestMirror(raw: string, done: boolean): string {
 }
 
 function renderToolsMirror(acts: Activity[], done: boolean): string {
-  const shown = acts.slice(-MIRROR_TOOLS)
-  const more = acts.length - shown.length
+  // Just the latest few tool calls — oldest fall off as new ones arrive (no "+N earlier").
   const lines = [done ? `✅ <b>Done</b> · ${acts.length} step${acts.length === 1 ? '' : 's'}` : '⚙️ <b>Working…</b>']
-  if (more > 0) lines.push(`<i>…+${more} earlier</i>`)
-  for (const a of shown) {
+  for (const a of acts.slice(-MIRROR_TOOLS)) {
     const d = a.detail ? ` <code>${escapeHtml(a.detail)}</code>` : ''
     lines.push(`🔧 ${escapeHtml(a.tool)}${d}`)
   }
@@ -1878,7 +1844,6 @@ async function handleCall(
         const files = (args.files as string[] | undefined) ?? []
         const format = args.format as string | undefined
 
-        repliedSinceArm = true   // Claude messaged the user — suppress the idle alert
         assertAllowedChat(chat_id)
         for (const f of files) {
           assertSendable(f)
@@ -2192,7 +2157,6 @@ bot.command('help', async ctx => {
     `/mode — interactive mode switcher\n` +
     `/plan, /auto, /default, /acceptedits, /bypass — quick mode switch\n` +
     `/stop — interrupt the current task (Esc)\n` +
-    `/reply <response> — type a response into the session (e.g. a /login code)\n` +
     `/model — show the current model (or /model <name> to switch)\n\n` +
     `Any other /slash commands are relayed directly to Claude Code.`
   )
@@ -2239,21 +2203,6 @@ bot.command('yolo', ctx => handleModeCommand(ctx, 'bypassPermissions'))
 
 // Type literal text into the session and press Enter — for free-text TUI prompts
 // the button relay can't represent (e.g. pasting a /login code, a filename, etc.).
-bot.command('reply', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  if (!activePaneId || !paneWatcher) {
-    await ctx.reply('No active Claude Code session with tmux.')
-    return
-  }
-  const text = (ctx.match ?? '').toString()
-  if (!text.trim()) {
-    await ctx.reply('Usage: /reply <response> — types the text into the session, then Enter.')
-    return
-  }
-  const ok = await injectText(activePaneId, paneWatcher, text)
-  await ctx.reply(ok ? '✅ Sent to the session.' : 'Could not reach the session pane.')
-})
-
 // /model with no args reports the active model rather than relaying (which would
 // pop the picker on Telegram as buttons); /model <name> still relays to switch.
 bot.command('model', async ctx => {
@@ -2292,25 +2241,6 @@ bot.command('cost', doCost)
 bot.command('context', doContext)
 bot.command('session', doSession)
 
-// /alerts on|off toggles the "Claude finished" idle ping (default on); bare
-// /alerts reports the current state.
-bot.command('alerts', async ctx => {
-  const gated = dmCommandGate(ctx)
-  if (!gated) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg === 'on' || arg === 'off') {
-    gated.access.notifyIdle = arg === 'on'
-    saveAccess(gated.access)
-    const msgId = ctx.message?.message_id
-    if (msgId != null) {
-      void bot.api.setMessageReaction(String(ctx.chat!.id), msgId, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
-    }
-    return
-  }
-  const on = gated.access.notifyIdle !== false
-  await ctx.reply(`🔔 Idle alerts are ${on ? 'ON' : 'OFF'}. Use /alerts on or /alerts off to change.`)
-})
-
 // Trim a captured pane tail down to its content: strip ANSI, drop the trailing
 // input-box / footer chrome and surrounding blanks, and keep the last `maxLines`.
 function cleanPaneTail(raw: string, maxLines: number): string {
@@ -2326,10 +2256,9 @@ function cleanPaneTail(raw: string, maxLines: number): string {
   return lines.join('\n')
 }
 
-// /tail [N] — dump the last N lines of the terminal (default 40, capped) so you can
+// /terminal [N] — dump the last N lines of the terminal (default 40, capped) so you can
 // catch up on recent session activity. Read-only: just captures the pane scrollback.
-// /terminal is the primary name; /tail is kept as a backup alias — both identical.
-bot.command(['terminal', 'tail'], async ctx => {
+bot.command('terminal', async ctx => {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const arg = parseInt((ctx.match ?? '').toString().trim(), 10)
@@ -2354,14 +2283,6 @@ bot.command(['terminal', 'tail'], async ctx => {
 // schedule is persisted so it survives a daemon restart (re-armed on startup).
 const SCHEDULED_RESET_FILE = join(STATE_DIR, 'scheduled-reset.json')
 let resetTimer: ReturnType<typeof setTimeout> | null = null
-
-// Parse a duration like "2h51m", "2h", "90m" → milliseconds (null if unparseable).
-function parseDuration(s: string): number | null {
-  const m = s.trim().toLowerCase().match(/^(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?$/)
-  if (!m || (!m[1] && !m[2])) return null
-  const ms = (parseInt(m[1] ?? '0', 10) * 60 + parseInt(m[2] ?? '0', 10)) * 60_000
-  return ms > 0 ? ms : null
-}
 
 // Claude prints a ROUNDED reset time ("resets 9:30am"), so the real reset can land a little
 // later — firing "continue" exactly then re-hits the limit. Fire a touch after the printed
@@ -2428,36 +2349,6 @@ function loadScheduledReset(): void {
   scheduleReset(data.fireAt, data.chats, data.attempt ?? 0)
 }
 
-// /resetin <dur> schedules the reset ping; bare /resetin shows it; /resetin off cancels.
-bot.command('resetin', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  const chat_id = String(ctx.chat!.id)
-  if (!arg) {
-    let info = 'No reset reminder set.'
-    try {
-      const data = JSON.parse(readFileSync(SCHEDULED_RESET_FILE, 'utf8'))
-      const mins = Math.max(0, Math.round((data.fireAt - Date.now()) / 60_000))
-      info = `⏰ Reset reminder set for ~${Math.floor(mins / 60)}h ${mins % 60}m from now.`
-    } catch {}
-    await ctx.reply(`${info}\nUse <code>/resetin 2h51m</code> to set, or <code>/resetin off</code> to cancel.`, { parse_mode: 'HTML' })
-    return
-  }
-  if (arg === 'off' || arg === 'cancel') {
-    if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
-    try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
-    await ctx.reply('🚫 Reset reminder cancelled.')
-    return
-  }
-  const ms = parseDuration(arg)
-  if (ms == null) {
-    await ctx.reply('Usage: <code>/resetin 2h51m</code> (or 90m, 2h). <code>/resetin off</code> to cancel.', { parse_mode: 'HTML' })
-    return
-  }
-  scheduleReset(Date.now() + ms, [chat_id])
-  const mins = Math.round(ms / 60_000)
-  await ctx.reply(`⏰ Got it — I'll ping you when your usage limit resets, in ~${Math.floor(mins / 60)}h ${mins % 60}m.`)
-})
 
 // /autocontinue on|off toggles whether the reset reminder auto-types "continue"
 // (default on); bare /autocontinue shows the current state.
@@ -3228,30 +3119,20 @@ void (async () => {
           process.stderr.write(`telegram daemon: polling as @${info.username}\n`)
           void bot.api.setMyCommands(
             [
-              { command: 'start', description: 'Welcome and setup guide' },
-              { command: 'help', description: 'What this bot can do' },
-              { command: 'status', description: 'Check your pairing status' },
               { command: 'mode', description: 'Interactive mode switcher' },
-              { command: 'plan', description: 'Switch to plan mode' },
-              { command: 'auto', description: 'Switch to auto mode' },
-              { command: 'default', description: 'Switch to default mode' },
-              { command: 'acceptedits', description: 'Switch to accept-edits mode' },
-              { command: 'bypass', description: 'Switch to bypass-permissions mode' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
-              { command: 'reply', description: 'Type a response into the session (e.g. a /login code)' },
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'session', description: 'Show cwd, branch, mode, and model' },
-              { command: 'alerts', description: 'Toggle the "Claude finished" ping (/alerts on|off)' },
               { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
-              { command: 'tail', description: 'Recent terminal activity (alias of /terminal)' },
-              { command: 'resetin', description: 'Ping me when my usage limit resets (/resetin 2h51m)' },
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
               { command: 'sessions', description: 'List connected Claude Code sessions' },
               { command: 'use', description: 'Switch which session Telegram is wired to (/use N)' },
-              { command: 'new', description: 'Start a new session (shows the model)' },
+              { command: 'new', description: 'Start a new session' },
+              { command: 'status', description: 'Check your pairing status' },
+              { command: 'help', description: 'What this bot can do' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
