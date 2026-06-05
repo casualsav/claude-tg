@@ -2392,6 +2392,14 @@ async function handleInbound(
 
   const imagePath = downloadImage ? await downloadImage() : undefined
 
+  // Off-MCP: there's no download_attachment tool, so fetch any non-image attachment to a
+  // local path up front and inject that path (like image_path) — the agent just Reads it.
+  let attachmentPath: string | undefined
+  if (TRANSCRIPT_OUTBOUND && attach?.file_id && !imagePath) {
+    try { attachmentPath = await downloadTelegramFile(attach.file_id) }
+    catch (e) { process.stderr.write(`daemon: off-mcp attachment download failed: ${e}\n`) }
+  }
+
   const params: InboundParams = {
     content,
     meta: {
@@ -2401,6 +2409,7 @@ async function handleInbound(
       user_id: String(from.id),
       ts: new Date((ctx.message?.date ?? 0) * 1000).toISOString(),
       ...(imagePath ? { image_path: imagePath } : {}),
+      ...(attachmentPath ? { attachment_path: attachmentPath } : {}),
       ...(attach ? {
         attachment_kind: attach.kind,
         attachment_file_id: attach.file_id,
