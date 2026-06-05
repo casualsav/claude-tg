@@ -2359,27 +2359,59 @@ function controlKeyboard(): Keyboard {
 
 // ---- Telegram bot handlers ----
 
-bot.command('start', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  await ctx.reply(
-    `🔗 This bot bridges Telegram to a Claude Code session.\n\n` +
-    `To pair:\n1. DM me anything — you'll get a 6-char code\n` +
-    `2. In Claude Code: /telegram:access pair <code>\n\nAfter that, DMs here reach that session.`
-  )
-})
+// The single welcome + feature guide, shown by /start (and the hidden /help alias). Pairing
+// steps only appear when the sender isn't paired yet.
+function startHelpText(paired: boolean): string {
+  const guide =
+    `<b>Welcome to the Claude Command Center</b>\n` +
+    `Control Claude Code sessions without needing to visit the terminal — send messages &amp; files, get replies, switch models and modes, manage multiple sessions, and watch the work live.\n\n` +
 
-bot.command('help', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  await ctx.reply(
-    `Messages you send here route to a paired Claude Code session.\n\n` +
-    `/start — pairing instructions\n/status — check your pairing state\n` +
-    `/mode — interactive mode switcher\n` +
-    `/plan, /auto, /default, /acceptedits, /bypass — quick mode switch\n` +
-    `/stop — interrupt the current task (Esc)\n` +
-    `/model — show the current model (or /model <name> to switch)\n\n` +
-    `Any other /slash commands are relayed directly to Claude Code.`
-  )
-})
+    `💬 <b>Chatting</b>\n` +
+    `• Any message you send is typed into the focused session.\n` +
+    `• Send 📷 photos, 📎 files, or 🎙️ voice notes — they're handed to the session.\n` +
+    `• Whatever the agent says last comes straight back to you here.\n\n` +
+
+    `🧭 <b>Modes &amp; model</b>\n` +
+    `<code>/mode</code> — interactive mode switcher\n` +
+    `<code>/mode plan·auto·default·acceptedits·bypass</code> — jump to a mode\n` +
+    `<code>/model</code> — show the model (<code>/model &lt;name&gt;</code> to switch)\n\n` +
+
+    `🗂️ <b>Sessions</b>\n` +
+    `<code>/sessions</code> — list &amp; switch (<code>/sessions #</code> to switch · <code>/sessions name # label</code> to rename)\n` +
+    `• ➕ <b>New session</b> button — start one in any folder\n` +
+    `• Switch back and any 💬 unread messages replay automatically\n\n` +
+
+    `📊 <b>Visibility</b>\n` +
+    `<code>/cost</code> — usage &amp; cost breakdown\n` +
+    `<code>/context</code> — token-context usage\n` +
+    `<code>/terminal [N]</code> — recent terminal activity\n` +
+    `<code>/compact</code> — compact the conversation to free context\n\n` +
+
+    `🛑 <b>Control</b>\n` +
+    `<code>/stop</code> — interrupt the current task (Esc)\n` +
+    `<code>/new</code> — start a fresh conversation\n` +
+    `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
+
+    `📌 <b>Pinned bar</b> — your session · model · mode, with 🗂️ 🧠 🧭 quick buttons.\n` +
+    `🔁 Any other <code>/command</code> is relayed straight to Claude Code.`
+
+  if (paired) return guide
+  return guide +
+    `\n\n🔗 <b>Not paired yet?</b>\n` +
+    `1. DM me anything — you'll get a 6-char code\n` +
+    `2. In Claude Code: <code>/telegram:access pair &lt;code&gt;</code>\n` +
+    `Then DMs here reach that session.`
+}
+
+async function sendStartHelp(ctx: Context): Promise<void> {
+  const gated = dmCommandGate(ctx)
+  if (!gated) return
+  const paired = gated.access.allowFrom.includes(gated.senderId)
+  await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
+}
+
+bot.command('start', sendStartHelp)
+bot.command('help', sendStartHelp)   // hidden alias (muscle memory); kept out of the command menu
 
 bot.command('status', async ctx => {
   const gated = dmCommandGate(ctx)
@@ -3782,8 +3814,8 @@ void (async () => {
           process.stderr.write(`telegram daemon: polling as @${info.username}\n`)
           void bot.api.setMyCommands(
             [
+              { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'menu', description: 'Show the docked control bar (/menu off to hide)' },
-              { command: 'help', description: 'What this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
               { command: 'mode', description: 'Interactive mode switcher' },
