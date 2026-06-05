@@ -903,15 +903,15 @@ function progressActive(): boolean {
   return currentProgress !== null
 }
 
-// Episodic progress for a multi-step plan: one large block per phase, filled as each step
-// completes. Calm by design — it only moves when a phase finishes, not on a running %.
+// Episodic progress for a multi-step plan: one ▰ block per phase, filled as each step
+// completes. Calm by design — it fills a block when a phase finishes, no running %.
 function renderProgressBar(p: Progress, done: boolean): string {
   const total = Math.max(1, p.total)
   const cur = Math.max(0, Math.min(total, p.cur))
-  const blocks = '🟩'.repeat(cur) + '⬜'.repeat(total - cur)
+  const blocks = '▰'.repeat(cur) + '▱'.repeat(total - cur)
   const head = done ? '✅ <b>Done</b>' : '⏳ <b>Working…</b>'
-  const label = p.label ? ` · ${escapeHtml(p.label)}` : ''
-  return `${head}\n${blocks} ${cur}/${total}${label}`
+  const label = p.label ? ` ${escapeHtml(p.label)}` : ''
+  return `${head}\n${blocks}${label}`
 }
 
 function mirrorMode(): 'tools' | 'digest' | 'off' {
