@@ -2058,7 +2058,7 @@ async function doStop(ctx: Context): Promise<void> {
 }
 
 // Mode picker — a button per mode (current marked ●) plus a quick-switch tip. Shared by /mode
-// and the 🔄 Mode button; the mode:set:<mode> callback applies a tapped choice.
+// and the 🧭 Mode button; the mode:set:<mode> callback applies a tapped choice.
 const MODES: CcMode[] = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']
 const MODE_TIP = '💡 Tip: use /default, /acceptedits, /plan, /auto, /bypass for fast switching'
 
@@ -2077,7 +2077,7 @@ async function doModePicker(ctx: Context): Promise<void> {
   const cap = await capturePane(activePaneId)
   if (!onNormalPrompt(cap)) { await ctx.reply('⚠️ The terminal is on another screen (settings/menu) — can’t change the mode right now.'); return }
   const current = detectCurrentMode(cap)
-  await ctx.reply(`🎚 <b>Mode</b> — currently ${modeLabel(current)}\n\n${MODE_TIP}`, { parse_mode: 'HTML', reply_markup: modePickerKeyboard(current) })
+  await ctx.reply(`🧭 <b>Mode</b> — currently ${modeLabel(current)}\n\n${MODE_TIP}`, { parse_mode: 'HTML', reply_markup: modePickerKeyboard(current) })
 }
 
 // Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
@@ -2217,7 +2217,7 @@ async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<voi
 // ---- Control bar (docked quick-action keyboard) ----
 // Buttons send their label as a normal message; the message:text handler matches
 // these exact labels and routes each to the action above before any other handling.
-const BTN_MODE = '🔄 Mode'
+const BTN_MODE = '🧭 Mode'
 const BTN_MODEL = '🧠 Model'
 const BTN_SESSIONS = '🗂 Session'
 const BTN_COST = '📊 Cost'
@@ -2598,7 +2598,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText(`Could not switch to ${modeLabel(target)} — try again.`).catch(() => {})
       return
     }
-    await ctx.editMessageText(`🎚 <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
+    await ctx.editMessageText(`🧭 <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
       parse_mode: 'HTML', reply_markup: modePickerKeyboard(reached),
     }).catch(() => {})
     return
