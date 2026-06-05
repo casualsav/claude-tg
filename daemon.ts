@@ -732,8 +732,8 @@ function respondPermission(request_id: string, behavior: 'allow' | 'deny'): void
   w?.({ t: 'permission', params: { request_id, behavior } })
 }
 
-function notifyChats(text: string): void {
-  for (const chat_id of loadAccess().allowFrom) void bot.api.sendMessage(chat_id, text).catch(() => {})
+function notifyChats(text: string, extra?: { reply_markup?: InlineKeyboard; parse_mode?: 'HTML' }): void {
+  for (const chat_id of loadAccess().allowFrom) void bot.api.sendMessage(chat_id, text, extra).catch(() => {})
 }
 
 // Tracks the last prompt sent to Telegram to avoid double-relay.
@@ -1096,6 +1096,10 @@ function startRelayLoop(): void {
 // even an unregistered MCP pane is never grabbed. Explicit FORCE_PANE always wins.
 let adoptedPaneId: string | null = null
 
+// Every plugin-less pane we currently know about (the focused one plus any unfocused
+// siblings). A new pane is announced once, with a switch button, and does NOT steal focus.
+const offMcpPanes = new Set<string>()
+
 // All pids in the process tree rooted at `rootPid` (the pane's shell), so we can find the
 // claude process — it runs as a child of the pane shell, not the pane's own pid.
 async function processTree(rootPid: string): Promise<string[]> {
@@ -1122,15 +1126,14 @@ async function isPluginlessClaude(panePid: string): Promise<boolean> {
   return false
 }
 
-// Scan tmux for an adoptable plugin-less claude pane. Exactly one → its id; none → null;
-// several → null after telling the user to disambiguate with FORCE_PANE.
-async function findOffMcpPane(): Promise<string | null> {
+// Scan tmux for every adoptable plugin-less claude pane (registered MCP sessions excluded).
+async function findOffMcpPanes(): Promise<string[]> {
   let out = ''
   try {
     const { stdout } = await exec('tmux',
       ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{pane_current_command}'], { timeout: 3000 })
     out = stdout
-  } catch { return null }
+  } catch { return [] }
 
   const candidates: string[] = []
   for (const line of out.split('\n')) {
@@ -1140,12 +1143,7 @@ async function findOffMcpPane(): Promise<string | null> {
     if (sessions.has(paneId)) continue               // a registered (plugin/MCP) session — never adopt
     if (await isPluginlessClaude(panePid)) candidates.push(paneId)
   }
-  if (candidates.length > 1) {
-    notifyChats(`🔍 Found ${candidates.length} plugin-less Claude panes (${candidates.join(', ')}). ` +
-      `Pin one with TELEGRAM_FORCE_PANE=<pane> in the channel .env and restart.`)
-    return null
-  }
-  return candidates[0] ?? null
+  return candidates
 }
 
 // Mirror the FORCE_PANE binding for an auto-discovered pane: drive it directly, no Session
@@ -1154,11 +1152,8 @@ async function findOffMcpPane(): Promise<string | null> {
 const ADOPTED_PANE_FILE = join(STATE_DIR, 'adopted-pane')
 
 function adoptPane(paneId: string): void {
-  adoptedPaneId = paneId
-  currentSessionId = paneId
-  activePaneId = paneId
-  startPaneWatcher(paneId)
-  startRelayLoop()
+  offMcpPanes.add(paneId)
+  focusOffMcpPane(paneId)
   process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (auto-discovery)\n`)
   // Only announce a genuinely NEW pane. A daemon restart (frequent during dev, or on reboot)
   // re-adopts the same pane and shouldn't re-ping "Connected". Persisted so it survives the
@@ -1169,13 +1164,45 @@ function adoptPane(paneId: string): void {
   if (prev !== paneId) notifyChats(`🔗 Connected to the Claude session in pane ${paneId}.`)
 }
 
-// Adopt a pane when nothing valid is driving. Runs at startup and on a slow interval, so a
-// work session started before/after the daemon (or restarted) gets picked up on its own.
-async function discoverAndAdopt(): Promise<void> {
+// Point the bridge at an off-MCP pane (no shim socket): drive it directly and read its
+// transcript. Used by initial adoption and when switching to a discovered sibling pane.
+function focusOffMcpPane(paneId: string): void {
+  if (paneWatcher) { paneWatcher.stop(); paneWatcher = null }
+  adoptedPaneId = paneId
+  currentSessionId = paneId
+  activePaneId = paneId
+  activeShim = null
+  lastRelayedPromptHash = ''
+  lastRelayedPermissionHash = ''
+  lastRelayedAuthUrl = ''
+  startPaneWatcher(paneId)
+  startRelayLoop()
+}
+
+// Announce a newly discovered sibling pane with a one-tap switch button — never steals focus.
+async function announceNewSession(paneId: string): Promise<void> {
+  const label = await paneLabel(paneId)
+  const kb = new InlineKeyboard().text(`▶️ Switch to ${label}`, `adoptpane:${paneId}`)
+  notifyChats(`🆕 New Claude session: <b>${escapeHtml(label)}</b> (<code>${paneId}</code>).`,
+    { reply_markup: kb, parse_mode: 'HTML' })
+}
+
+// Keep the pane registry in sync. Adopts a pane only when nothing is driving; any additional
+// pane is registered and announced (with a switch button) without taking focus. Runs at
+// startup and on a slow interval, so panes started before/after the daemon get picked up.
+async function discoverPanes(): Promise<void> {
   if (FORCE_PANE || !TRANSCRIPT_OUTBOUND) return
-  if (activePaneId && await paneAlive(activePaneId)) return
-  const paneId = await findOffMcpPane()
-  if (paneId) adoptPane(paneId)
+  const panes = await findOffMcpPanes()
+  const live = new Set(panes)
+  for (const p of [...offMcpPanes]) if (!live.has(p)) offMcpPanes.delete(p)
+
+  const haveFocus = !!activePaneId && await paneAlive(activePaneId)
+  if (!haveFocus && panes.length) adoptPane(panes[0])   // sets focus + adds to offMcpPanes
+
+  for (const p of panes) {
+    if (p === activePaneId) { offMcpPanes.add(p); continue }
+    if (!offMcpPanes.has(p)) { offMcpPanes.add(p); void announceNewSession(p) }
+  }
 }
 
 // Deliver an inbound Telegram message to the focused session. Claude Code only lets
@@ -1697,6 +1724,7 @@ function startPaneWatcher(paneId: string): void {
       if (entry) endSession(entry[0])
       else {
         activePaneId = null; paneWatcher = null
+        offMcpPanes.delete(paneId)
         // Adopted off-MCP pane: clear the binding so the rescan re-adopts a fresh one.
         if (adoptedPaneId === paneId) { adoptedPaneId = null; currentSessionId = null }
       }
@@ -2481,8 +2509,11 @@ async function sessionRows(): Promise<SessionRow[]> {
     const label = (s.paneId && sessionNames.get(s.paneId)) || s.label
     rows.push({ key: id, paneId: s.paneId, label, current: id === currentSessionId, shim: true })
   }
-  if (activePaneId && !panes.has(activePaneId)) {
-    rows.push({ key: activePaneId, paneId: activePaneId, label: await paneLabel(activePaneId), current: currentSessionId === activePaneId, shim: false })
+  const offMcp = new Set(offMcpPanes)
+  if (activePaneId && !sessions.size) offMcp.add(activePaneId)   // FORCE_PANE / lone adopted pane
+  for (const p of offMcp) {
+    if (panes.has(p)) continue                                   // already listed as a shim session
+    rows.push({ key: p, paneId: p, label: await paneLabel(p), current: currentSessionId === p, shim: false })
   }
   return rows
 }
@@ -2494,9 +2525,10 @@ async function switchSessionTo(n: number): Promise<string> {
   if (n < 1 || n > rows.length) return `No session #${n}. See /session.`
   const row = rows[n - 1]
   if (row.current) return `Already on <b>${escapeHtml(row.label)}</b>.`
-  if (!row.shim) return 'That session is the active pane already.'
-  setFocus(row.key)
-  return `✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId ?? 'no-tmux'}</code>).`
+  if (row.shim) { setFocus(row.key); return `✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId ?? 'no-tmux'}</code>).` }
+  if (!row.paneId || !(await paneAlive(row.paneId))) return 'That session’s pane is gone.'
+  focusOffMcpPane(row.paneId)
+  return `✅ Switched to <b>${escapeHtml(row.label)}</b> (<code>${row.paneId}</code>).`
 }
 
 // One tappable button per session for the /session listing — ★ marks the active one,
@@ -2687,6 +2719,28 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery().catch(() => {})
     await ctx.editMessageReplyMarkup({ reply_markup: sessionSwitchKeyboard(await sessionRows()) }).catch(() => {})
     await ctx.reply(msg, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // "Switch to it" button under a new-session announcement → focus that pane by id.
+  const adoptMatch = /^adoptpane:(%\d+)$/.exec(data)
+  if (adoptMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const paneId = adoptMatch[1]
+    if (paneId === activePaneId) { await ctx.answerCallbackQuery({ text: 'Already focused.' }).catch(() => {}); return }
+    if (!(await paneAlive(paneId))) {
+      await ctx.answerCallbackQuery({ text: 'That pane is gone.' }).catch(() => {})
+      await ctx.editMessageReplyMarkup({}).catch(() => {})
+      return
+    }
+    offMcpPanes.add(paneId)
+    focusOffMcpPane(paneId)
+    await ctx.answerCallbackQuery({ text: 'Switched.' }).catch(() => {})
+    await ctx.editMessageReplyMarkup({}).catch(() => {})
+    await ctx.reply(`✅ Switched to <b>${escapeHtml(await paneLabel(paneId))}</b> (<code>${paneId}</code>).`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
@@ -3314,9 +3368,10 @@ if (FORCE_PANE) {
   process.stderr.write(`daemon: focus pinned to ${FORCE_PANE} (TELEGRAM_FORCE_PANE)\n`)
 } else if (TRANSCRIPT_OUTBOUND) {
   // Off-MCP with no pinned pane: find and adopt a plugin-less work session on our own,
-  // then keep watching so a session started later (or restarted) gets picked up.
-  void discoverAndAdopt()
-  setInterval(() => void discoverAndAdopt(), 30_000)
+  // then keep watching so a session started later (or restarted) gets picked up — siblings
+  // are announced with a switch button rather than stealing focus.
+  void discoverPanes()
+  setInterval(() => void discoverPanes(), 30_000)
 }
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
