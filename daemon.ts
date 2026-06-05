@@ -2219,7 +2219,7 @@ async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<voi
 // these exact labels and routes each to the action above before any other handling.
 const BTN_MODE = '🔄 Mode'
 const BTN_MODEL = '🧠 Model'
-const BTN_SESSIONS = '🗂 Sessions'
+const BTN_SESSIONS = '🗂 Session'
 const BTN_COST = '📊 Cost'
 const BTN_STOP = '🛑 Stop'
 const BTN_NEW = '🆕 New'
