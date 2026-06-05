@@ -825,6 +825,37 @@ function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: Inbo
 
 // ---- Off-MCP outbound: relay the agent's reply from the transcript ----
 
+// Auto-provision off-MCP tooling so a plugin-less session works with no manual setup:
+//  - the `tg` actions CLI on PATH (send/react/edit), and
+//  - a stable ensure-daemon launcher for the SessionStart hook to relaunch the daemon.
+// Re-run each startup so it tracks plugin upgrades. The ensure-daemon launcher globs the
+// cache at runtime, so it survives version bumps even while the daemon is down (post-
+// reboot). No-ops if the off-MCP sources aren't present (a non-off-MCP build).
+function provisionOffMcpTooling(): void {
+  try {
+    const tgctl = join(import.meta.dir, 'tgctl.ts')
+    if (!existsSync(tgctl)) return
+    const binDir = [join(homedir(), '.bun', 'bin'), join(homedir(), '.local', 'bin')].find(d => existsSync(d))
+    if (binDir) {
+      writeFileSync(join(binDir, 'tg'), `#!/bin/sh\nexec bun ${tgctl} "$@"\n`, { mode: 0o755 })
+    }
+    // Stable ensure-daemon launcher: resolves the newest cache copy at run time (so it
+    // works after a version bump, and when the daemon is down). The SessionStart hook
+    // runs `bun <STATE_DIR>/ensure-daemon.js`.
+    writeFileSync(join(STATE_DIR, 'ensure-daemon.js'),
+      `#!/usr/bin/env bun
+import { readdirSync, existsSync } from 'node:fs'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
+const base = join(homedir(), '.claude', 'plugins', 'cache', 'better-claude-plugins', 'telegram')
+let t = null
+try { for (const v of readdirSync(base).sort().reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
+if (t) await import(t)
+`, { mode: 0o755 })
+    process.stderr.write(`daemon: provisioned off-mcp tooling (tg CLI${binDir ? ` → ${binDir}` : ' — no bin dir'}, ensure-daemon)\n`)
+  } catch (e) { process.stderr.write(`daemon: off-mcp provision failed: ${e}\n`) }
+}
+
 async function paneCwd(paneId: string): Promise<string | null> {
   try {
     const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_current_path}'], { timeout: 2000 })
@@ -2735,6 +2766,9 @@ if (FORCE_PANE) {
   startPaneWatcher(FORCE_PANE)
   process.stderr.write(`daemon: focus pinned to ${FORCE_PANE} (TELEGRAM_FORCE_PANE)\n`)
 }
+
+// Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
+provisionOffMcpTooling()
 
 // Re-arm any persisted usage-limit reset reminder across the restart.
 loadScheduledReset()
