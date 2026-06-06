@@ -2822,7 +2822,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   if (cwd) lines.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (rows.length > 1) lines.push(`🗂️ Session ${rows.findIndex(r => r.current) + 1} of ${rows.length}`)
   lines.push(`📌 <i>Tap below to switch session, model, or mode.</i>`)
-  return lines.join('\n')
+  return lines.join('\n\n')   // blank line between each → a taller, easier-to-spot card
 }
 
 // Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
