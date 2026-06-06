@@ -65,7 +65,7 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
 - **Pinned control bar** — a pinned status message shows the active session · model ·
   mode, with 🗂️ Sessions / 🧠 Model / 🧭 Mode quick buttons.
 - **Live activity mirror** — a single self-updating message shows what Claude is doing
-  in real time (💻 terminal, 📖 read, ✏️ edit, 🔎 search, 📋 todo, 🔀 delegate, ❓ clarify…),
+  in real time (💻 terminal, 📋 todo, 📖 read, ✏️ edit, 🔍 search, 🤖 agent, ❓ clarify…),
   read straight from the transcript so it costs zero usage. On by default; opt out with
   `terminalMirror: "off"`.
 

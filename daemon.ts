@@ -920,15 +920,15 @@ function renderDigestMirror(raw: string, done: boolean): string {
 // name + input, so richer rendering here is entirely free (no model calls). Emoji set aligned
 // with the Hermes tool_progress registry where it maps to Claude Code's actual tools.
 const TOOL_BADGE: Record<string, [string, string]> = {
-  Bash: ['💻', 'terminal'],
+  // Existing badges — unchanged.
+  Bash: ['💻', 'terminal'], TodoWrite: ['📋', 'todo'],
+  Read: ['📖', 'read'], Edit: ['✏️', 'edit'], MultiEdit: ['✏️', 'edit'], Write: ['📝', 'write'],
+  Grep: ['🔍', 'search'], Glob: ['🔍', 'find'], LS: ['📂', 'list'],
+  WebFetch: ['🌐', 'fetch'], WebSearch: ['🌐', 'search'], Task: ['🤖', 'agent'],
+  NotebookEdit: ['📓', 'notebook'],
+  // New (no clash with the above): background processes, clarify, plan, skill.
   BashOutput: ['⚙️', 'process'], KillShell: ['⚙️', 'process'], KillBash: ['⚙️', 'process'],
-  Read: ['📖', 'read'], Write: ['✍️', 'write'],
-  Edit: ['✏️', 'edit'], MultiEdit: ['✏️', 'edit'], NotebookEdit: ['📓', 'notebook'],
-  Grep: ['🔎', 'search'], Glob: ['🔎', 'find'], LS: ['📂', 'list'],
-  WebSearch: ['🔍', 'web search'], WebFetch: ['📄', 'web fetch'],
-  Task: ['🔀', 'delegate'], TodoWrite: ['📋', 'todo'],
-  AskUserQuestion: ['❓', 'clarify'], ExitPlanMode: ['📝', 'plan'],
-  Skill: ['📚', 'skill'], SlashCommand: ['📚', 'command'],
+  AskUserQuestion: ['❓', 'clarify'], ExitPlanMode: ['📐', 'plan'], Skill: ['📚', 'skill'],
 }
 function toolBadge(tool: string): [string, string] {
   if (TOOL_BADGE[tool]) return TOOL_BADGE[tool]
@@ -943,7 +943,7 @@ function toolBadge(tool: string): [string, string] {
     if (/search|query|find/i.test(action)) return ['🔍', action]
     return ['🔌', action]
   }
-  return ['⚡', tool]   // unregistered tool (Hermes fallback)
+  return ['🔧', tool]   // unregistered tool
 }
 
 function renderToolsMirror(acts: Activity[], done: boolean): string {
