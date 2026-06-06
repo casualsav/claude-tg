@@ -2859,8 +2859,8 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 // Quick-action buttons on the pinned status message — same emojis as the pin's own fields.
 function pinKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('🧠 Model', 'pin:model').text('🧭 Mode', 'pin:mode').row()
-    .text('🖥️ Sessions', 'pin:sessions').text('⚙️ Settings', 'pin:settings')
+    .text('🖥️ Sessions', 'pin:sessions').text('⚙️ Settings', 'pin:settings').row()
+    .text('🧠 Model', 'pin:model').text('🧭 Mode', 'pin:mode')
 }
 
 let pinUpdating = false
