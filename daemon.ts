@@ -843,7 +843,10 @@ async function sendAgentText(chats: string[], text: string): Promise<void> {
 // required (2 consecutive non-working reads) so mid-turn narration isn't relayed, and the
 // cursor is primed to the current tail on (re)start so existing backlog never re-sends.
 const RELAY_POLL_MS = 1500
-const MIRROR_SETTLE_TICKS = 6   // ~9s of sustained idle before the mirror caps to "Done"
+// Backstop only: cap an open mirror after this much sustained idle when a turn ended without
+// relaying a reply (interrupt / no text). Normal turns cap precisely when their reply relays,
+// so this is large on purpose — it must never fire on a mid-turn pause.
+const MIRROR_IDLE_BACKSTOP = 20   // ~30s
 let lastRelayedUuid = ''
 let relayCursorPrimed = false
 // Last uuid relayed per transcript file, so switching back to a session can replay what it
@@ -976,9 +979,8 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
 // flickers idle between tool calls, and finalizing on those would end the message and start a
 // fresh one on the next call (the "multiple working messages" bug). Caller passes the same
 // 2-tick streak the reply relay uses.
-async function updateTerminalMirror(settled: boolean): Promise<void> {
+async function updateTerminalMirror(): Promise<void> {
   if (mirrorMode() === 'off') { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
-  if (settled) { await finalizeTerminalMirror(); return }
 
   const text = await buildMirrorText(false)
   if (!text) return
@@ -1016,11 +1018,12 @@ async function relayLoopTick(gen: number): Promise<void> {
   const idle = cap !== '' && !detectWorking(cap) && !detectLimited(cap)
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
 
-  // Live activity mirror — finalize (and tear down) only after sustained idle, well past the
-  // 2-tick reply-relay threshold, so a brief pause mid-turn (a tool boundary, a slow render,
-  // a permission prompt) doesn't end the message and start a fresh one on resume. Keeps the
-  // whole turn as one continuous self-updating message.
-  await updateTerminalMirror(relayIdleStreak >= MIRROR_SETTLE_TICKS).catch(() => {})
+  // Keep the live mirror refreshed every tick. It's finalized only when the turn actually
+  // concludes (a new final reply relays, below) — never on a mid-turn pause, however long —
+  // so the whole turn stays one message. A long-idle backstop caps a turn that ended without
+  // relaying any reply (interrupt / no text).
+  await updateTerminalMirror().catch(() => {})
+  if (relayIdleStreak >= MIRROR_IDLE_BACKSTOP) await finalizeTerminalMirror().catch(() => {})
 
   if (relayIdleStreak >= 2) {
     const cwd = await paneCwd(paneId)
@@ -1037,6 +1040,7 @@ async function relayLoopTick(gen: number): Promise<void> {
         process.stderr.write(`daemon: transcript-outbound relaying ${reply.text.length} chars (uuid ${reply.uuid.slice(0, 8)}) to ${chats.join(',')}\n`)
         await sendAgentText(chats, reply.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
       }
+      await finalizeTerminalMirror().catch(() => {})   // turn concluded → cap the mirror once
     }
   }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
