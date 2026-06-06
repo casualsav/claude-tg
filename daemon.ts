@@ -1275,14 +1275,30 @@ function replayBuffer(): void {
 
 // ---- Pane event dispatch ----
 
-// Footer for messages whose input method is a free-text reply, telling the user
-// both ways to respond. Kept in one place so the wording stays consistent.
-const REPLY_FOOTER = `💬 <b>Reply to this message</b>, or use <code>/reply (response)</code>.`
-
-// A sign-in URL surfaced by /login (OAuth authorize link). Scoped to oauth/
-// authorize URLs so ordinary links in Claude's replies aren't re-relayed here —
-// those already arrive through the MCP reply tool.
-const AUTH_URL_RE = /https?:\/\/[^\s│"')]*(?:oauth|authorize)[^\s│"')]*/i
+// A sign-in URL surfaced by /login (OAuth authorize link). Claude Code prints it inside
+// its bordered box where it soft-wraps across several lines — `-J` only rejoins tmux's own
+// wraps, and the box's `│` borders + padding split the URL regardless, so a plain regex
+// grabs only the first line (truncating mid-value). Rebuild it: strip ANSI + box-drawing
+// chars, find the line that starts the authorize URL, then greedily append following lines
+// that are pure URL characters (no spaces) until the URL ends. Scoped to oauth/authorize so
+// ordinary links in Claude's replies aren't re-relayed here.
+const URL_CHARS = /^[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+$/
+function extractAuthUrl(paneText: string): string | null {
+  const lines = stripAnsi(paneText)
+    .split('\n')
+    .map(l => l.replace(/[─-╿]/g, '').replace(/\s+$/, '').trim())
+  const start = lines.findIndex(l => /https?:\/\/\S*(?:oauth|authorize)/i.test(l))
+  if (start === -1) return null
+  const head = lines[start].match(/https?:\/\/\S+/)
+  if (!head) return null
+  let url = head[0]
+  for (let i = start + 1; i < lines.length; i++) {
+    const l = lines[i]
+    if (!l || !URL_CHARS.test(l)) break
+    url += l
+  }
+  return url
+}
 
 const DEBUG_PANE = (process.env.TELEGRAM_DEBUG_PANE ?? '') === '1'
 
@@ -1482,7 +1498,7 @@ function onPaneEvent(text: string): void {
 
   // Surface a /login sign-in link if one appears (independent of prompt detection,
   // since the URL is printed as plain output, not a multiple-choice menu).
-  const authUrl = stripAnsi(text).match(AUTH_URL_RE)?.[0]
+  const authUrl = extractAuthUrl(text)
   if (authUrl) {
     const h = hashText(authUrl)
     if (h !== lastRelayedAuthUrl) {
@@ -1709,6 +1725,24 @@ async function handleTabbedAdvance(chat_id: string): Promise<void> {
 
 // Relay a sign-in link to allowed chats and remember the message ids, so a reply
 // to one is routed into the pane (see the message:text handler).
+// After the auth code is submitted, Claude Code exchanges it for a token (a network
+// round-trip) and then shows a "Login successful" confirmation that waits on Enter. Poll
+// the pane until that screen lands, reading the logged-in email off it, so the caller can
+// report it and press Enter to drop back to the chat. Returns the email if found.
+async function waitForLoginConfirmation(paneId: string, maxMs = 15_000): Promise<string | null> {
+  const deadline = Date.now() + maxMs
+  let email: string | null = null
+  while (Date.now() < deadline) {
+    await sleep(500)
+    const cap = stripAnsi(await capturePane(paneId).catch(() => ''))
+    const m = cap.match(/logged in as[:\s]+([^\s│]+@[^\s│]+)/i)
+            ?? cap.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/)
+    if (m) email = m[1] ?? m[0]
+    if (/login success|logged in|press enter to continue/i.test(cap)) return email
+  }
+  return email
+}
+
 async function relayAuthUrlToTelegram(url: string): Promise<void> {
   const access = loadAccess()
   const targets = access.allowFrom
@@ -1717,15 +1751,16 @@ async function relayAuthUrlToTelegram(url: string): Promise<void> {
   const safe = escapeHtml(url)
   const text =
     `🔑 <b>Sign-in link from Claude Code</b>\n\n` +
-    `<a href="${safe}">${safe}</a>\n\n` +
-    `Open it in your browser to get your code.\n\n` +
-    REPLY_FOOTER
+    `<pre>${safe}</pre>\n` +
+    `Open it in your browser to get your code, then:\n\n` +
+    `💬 <b>Reply to this message with your authentication code.</b>`
 
   for (const chat_id of targets) {
     try {
       const sent = await bot.api.sendMessage(chat_id, text, {
         parse_mode: 'HTML',
         link_preview_options: { is_disabled: true },
+        reply_markup: { force_reply: true, input_field_placeholder: 'Authentication code' },
       })
       authUrlMessageIds.add(`${chat_id}:${sent.message_id}`)
     } catch (e) {
@@ -2389,6 +2424,22 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   const paired = gated.access.allowFrom.includes(gated.senderId)
   await ctx.reply(startHelpText(paired), { parse_mode: 'HTML', link_preview_options: { is_disabled: true } })
 }
+
+// Phone keyboards autocapitalize the first letter, so a typed "/context" arrives as
+// "/Context" — which grammy's case-sensitive matcher misses, dropping it to the raw
+// slash-relay and into the pane verbatim (where Claude Code rejects the unknown "/Context").
+// Lowercase the command verb in place (the leading bot_command entity span, same length so
+// offsets stay valid) so every "/Cmd" routes like "/cmd".
+bot.use(async (ctx, next) => {
+  const msg = ctx.message
+  const ent = msg?.entities?.find(e => e.type === 'bot_command' && e.offset === 0)
+  if (msg?.text && ent) {
+    const verb = msg.text.slice(0, ent.length)
+    const lower = verb.toLowerCase()
+    if (lower !== verb) (msg as { text: string }).text = lower + msg.text.slice(ent.length)
+  }
+  await next()
+})
 
 bot.command('start', sendStartHelp)
 bot.command('help', sendStartHelp)   // hidden alias (muscle memory); kept out of the command menu
@@ -3825,8 +3876,17 @@ bot.on('message:text', async ctx => {
       await ctx.reply('No active Claude Code session with tmux.')
       return
     }
-    const ok = await injectText(activePaneId, paneWatcher, text)
-    await ctx.reply(ok ? '✅ Pasted into the session.' : 'Could not reach the session pane.')
+    const paneId = activePaneId, watcher = paneWatcher
+    const email = await watcher.withInjection(async () => {
+      if (!(await sendKeysLiteral(paneId, text))) return undefined   // pane gone
+      await sendKeys(paneId, ['Enter'])
+      const found = await waitForLoginConfirmation(paneId)
+      await sendKeys(paneId, ['Enter'])                              // skip the confirmation screen
+      await waitForSettle(paneId, 300, 5000)
+      return found
+    })
+    if (email === undefined) { await ctx.reply('Could not reach the session pane.'); return }
+    await ctx.reply(email ? `✅ Successfully logged in as ${escapeHtml(email)}` : '✅ Logged in.', { parse_mode: 'HTML' })
     return
   }
 
