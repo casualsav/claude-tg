@@ -979,13 +979,14 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
 // flickers idle between tool calls, and finalizing on those would end the message and start a
 // fresh one on the next call (the "multiple working messages" bug). Caller passes the same
 // 2-tick streak the reply relay uses.
-async function updateTerminalMirror(): Promise<void> {
+async function updateTerminalMirror(working: boolean): Promise<void> {
   if (mirrorMode() === 'off') { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
 
   const text = await buildMirrorText(false)
   if (!text) return
   const now = Date.now()
   if (mirrorMsgIds.size === 0) {
+    if (!working) return   // never open a fresh mirror while idle — the turn is over (or hasn't started)
     mirrorLastText = text; mirrorLastEditAt = now
     for (const chat of loadAccess().allowFrom) {
       try { const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML' }); mirrorMsgIds.set(chat, m.message_id) }
@@ -1022,7 +1023,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   // concludes (a new final reply relays, below) — never on a mid-turn pause, however long —
   // so the whole turn stays one message. A long-idle backstop caps a turn that ended without
   // relaying any reply (interrupt / no text).
-  await updateTerminalMirror().catch(() => {})
+  await updateTerminalMirror(!idle).catch(() => {})
   if (relayIdleStreak >= MIRROR_IDLE_BACKSTOP) await finalizeTerminalMirror().catch(() => {})
 
   if (relayIdleStreak >= 2) {
