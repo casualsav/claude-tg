@@ -2325,6 +2325,7 @@ function startHelpText(paired: boolean): string {
     `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
 
     `📌 <b>Pinned bar</b> — your session · model · mode, with 🗂️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
+    `⚙️ <code>/settings</code> — mirror, pin, auto-continue, MCP mode in one panel.\n` +
     `🔁 Any other <code>/command</code> is relayed straight to Claude Code.`
 
   if (paired) return guide
@@ -2565,6 +2566,41 @@ bot.command('pin', async ctx => {
     '\nToggle with <code>/pin on</code> | <code>off</code>.',
     { parse_mode: 'HTML' },
   )
+})
+
+// ---- /settings — one tappable panel for the live channel preferences ----
+// MCP on/off is the presence of the plugin's .mcp.json (renamed aside when off). Toggling it
+// only affects sessions started afterward — Claude Code loads MCP servers at launch.
+function mcpEnabled(): boolean { return existsSync(join(import.meta.dir, '.mcp.json')) }
+function toggleMcp(): void {
+  const on = join(import.meta.dir, '.mcp.json'), off = join(import.meta.dir, 'mcp.json.disabled')
+  try {
+    if (existsSync(on)) renameSync(on, off)
+    else if (existsSync(off)) renameSync(off, on)
+  } catch (e) { process.stderr.write(`daemon: mcp toggle failed: ${e}\n`) }
+}
+function transcribeStatus(): string {
+  try { return readFileSync(ENV_FILE, 'utf8').match(/TELEGRAM_TRANSCRIBE=(\S+)/)?.[1]?.replace(/['"]/g, '') || 'off' }
+  catch { return 'off' }
+}
+function settingsText(): string {
+  const a = loadAccess()
+  return `⚙️ <b>Settings</b>\n\n` +
+    `🖥️ Live mirror — <b>${mirrorMode()}</b>\n` +
+    `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
+    `▶️ Auto-continue — <b>${a.autoContinue !== false ? 'on' : 'off'}</b>\n` +
+    `🔌 MCP mode — <b>${mcpEnabled() ? 'on' : 'off'}</b> <i>(new sessions; relaunch to apply)</i>\n` +
+    `🎙️ Voice transcription — <b>${transcribeStatus()}</b> <i>(change via /telegram:configure)</i>\n\n` +
+    `Tap to change:`
+}
+function settingsKeyboard(): InlineKeyboard {
+  return new InlineKeyboard()
+    .text('🖥️ Mirror', 'set:mirror').text('📌 Pin', 'set:pin').row()
+    .text('▶️ Auto-continue', 'set:autocontinue').text('🔌 MCP', 'set:mcp')
+}
+bot.command('settings', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
 })
 
 // /autocontinue on|off toggles whether the reset reminder auto-types "continue"
@@ -2922,6 +2958,33 @@ bot.on('callback_query:data', async ctx => {
     if (data === 'pin:sessions') await doSessionList(ctx)
     else if (data === 'pin:model') await doModelPicker(ctx)
     else await doModePicker(ctx)
+    return
+  }
+
+  // /settings panel toggles → flip the setting and re-render the panel in place.
+  const setMatch = /^set:(mirror|pin|autocontinue|mcp)$/.exec(data)
+  if (setMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const a = loadAccess()
+    if (setMatch[1] === 'mirror') {
+      const m = mirrorMode()
+      a.terminalMirror = m === 'tools' ? 'digest' : m === 'digest' ? 'off' : 'tools'
+      saveAccess(a)
+    } else if (setMatch[1] === 'pin') {
+      a.sessionPin = a.sessionPin === false                 // flip
+      saveAccess(a)
+      if (a.sessionPin) await updateSessionPin(); else await removeSessionPins()
+    } else if (setMatch[1] === 'autocontinue') {
+      a.autoContinue = a.autoContinue === false
+      saveAccess(a)
+    } else {
+      toggleMcp()
+    }
+    await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
     return
   }
 
@@ -3844,6 +3907,7 @@ void (async () => {
               { command: 'autocontinue', description: 'Auto-send "continue" when the limit resets (on/off)' },
               { command: 'dock', description: 'Show the docked control bar (/dock off to hide)' },
               { command: 'pin', description: 'Toggle the pinned status message (on/off)' },
+              { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP' },
               { command: 'status', description: 'Check your pairing status' },
             ],
             { scope: { type: 'all_private_chats' } },

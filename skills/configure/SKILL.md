@@ -7,6 +7,7 @@ allowed-tools:
   - Write
   - Bash(ls *)
   - Bash(mkdir *)
+  - Bash(mv *)
   - Bash(chmod 600 *)
   - Bash(python3 -c *)
   - Bash(python3 -m pip *)
@@ -54,9 +55,9 @@ Read both state files and give the user a complete picture:
      assistant."*
 
 5. **Available actions** — briefly list what this skill can do so the menu is
-   discoverable: `<token>` (save token), `transcribe` (voice), `clear` (remove
-   token), `uninstall` (stop the bot and tear down the channel), plus
-   `/telegram:access` for the allowlist. Keep it to one compact line.
+   discoverable: `<token>` (save token), `transcribe` (voice), `mcp` (MCP server
+   on/off), `clear` (remove token), `uninstall` (stop the bot and tear down the
+   channel), plus `/telegram:access` for the allowlist. Keep it to one compact line.
 
 **Push toward lockdown — always.** The goal for every setup is `allowlist`
 with a defined list. `pairing` is not a policy to stay on; it's a temporary
@@ -150,6 +151,32 @@ no quotes, then `chmod 600`):
 
 Confirm the backend/model, and tell the user transcription applies on the next
 voice message — no restart needed (the daemon reads these settings live).
+
+### `mcp [on | off]` — MCP server (off by default)
+
+Controls whether the plugin loads its MCP server (`shim.ts`). **Off** is the default and
+recommended: the bridge runs off-MCP (replies read from the transcript, actions via the `tg`
+CLI), which costs **zero** per-request tokens but **requires tmux**. **On** restores the MCP
+server so the bridge works without tmux, at the cost of ~700 tokens of tool schemas + an
+instruction block injected on every request. Both modes expose identical features.
+
+The switch is the presence of the plugin's `.mcp.json`. Find the plugin dir (newest version
+under the cache) and rename:
+
+```sh
+DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)
+# on:  mv "$DIR/mcp.json.disabled" "$DIR/.mcp.json"
+# off: mv "$DIR/.mcp.json" "$DIR/mcp.json.disabled"
+```
+
+- **No arg** → report current state (`.mcp.json` present = on, `mcp.json.disabled` = off) and
+  the tradeoff above.
+- **`on`/`off`** → do the rename (skip if already in that state).
+
+Then tell the user it applies to **sessions started afterward** (Claude Code loads MCP servers
+at launch) — and that off-MCP sessions (`claude-tg` / `--strict-mcp-config`) ignore this
+entirely, since the flag drops all MCP servers regardless. (You can also flip this from
+Telegram with `/settings`.)
 
 ### `clear` — remove the token
 
