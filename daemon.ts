@@ -1408,6 +1408,30 @@ function saveUsageNotifState(): void {
   } catch {}
 }
 
+// ── Statusline-sourced usage snapshot ────────────────────────────────────────
+// statusline-command.sh writes exact 5h/7d used% + reset epochs here on each draw —
+// the numbers Claude Code hands the statusline, far more reliable than scraping the
+// pane banner. Goes stale when no session is rendering, so an old ts reads as "no
+// live data" and the pane-scrape fallback (handleUsageLimit) takes back over.
+const USAGE_SNAPSHOT_FILE = join(STATE_DIR, 'usage.json')
+const USAGE_POLL_MS = 20_000
+type RateWindow = { pct: number; resetsAt: number }   // resetsAt in ms (0 = unknown)
+type UsageSnapshot = { fiveHour?: RateWindow; sevenDay?: RateWindow }
+function readUsageSnapshot(maxAgeMs = 120_000): UsageSnapshot | null {
+  let raw: { ts?: unknown; five_hour?: unknown; seven_day?: unknown }
+  try { raw = JSON.parse(readFileSync(USAGE_SNAPSHOT_FILE, 'utf8')) } catch { return null }
+  const ts = typeof raw.ts === 'number' ? raw.ts * 1000 : 0
+  if (!ts || Date.now() - ts > maxAgeMs) return null
+  const win = (w: unknown): RateWindow | undefined => {
+    const o = w as { pct?: unknown; resets_at?: unknown } | null
+    return o && typeof o.pct === 'number'
+      ? { pct: o.pct, resetsAt: typeof o.resets_at === 'number' ? o.resets_at * 1000 : 0 }
+      : undefined
+  }
+  const snap: UsageSnapshot = { fiveHour: win(raw.five_hour), sevenDay: win(raw.seven_day) }
+  return snap.fiveHour || snap.sevenDay ? snap : null
+}
+
 // The next future UTC instant matching "resets HH:MMam (UTC)" (ms), or null.
 function parseResetTime(line: string): number | null {
   const m = line.match(RESET_TIME_RE)
@@ -1420,7 +1444,69 @@ function parseResetTime(line: string): number | null {
   return fire.getTime()
 }
 
+// Send one usage heads-up per threshold (50/75/90) per reset period for a limit type,
+// deduped via usageWarnState. `resetKey` identifies the reset period (epoch-derived from
+// the snapshot, descriptor-derived from a pane banner) so a fresh period re-arms the alerts.
+function maybeWarn(type: string, pct: number, resetKey: string): void {
+  if (pct < 50 || pct >= 100) return   // <50 not notable; 100 is a hit (actOnLimitHit)
+  const threshold = pct >= 90 ? 90 : pct >= 75 ? 75 : 50
+  const prev = usageWarnState.get(type)
+  const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
+  const lockedOut = !!prev && threshold <= prev.threshold && Date.now() - prev.at < WARN_RELOCK_MS
+  if (threshold <= firedThisPeriod || lockedOut) {
+    if (prev) usageWarnState.set(type, { resetKey, threshold: Math.max(prev.threshold, threshold), at: prev.at })
+    saveUsageNotifState()
+    return
+  }
+  usageWarnState.set(type, { resetKey, threshold, at: Date.now() })
+  saveUsageNotifState()
+  process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
+  const chats = loadAccess().allowFrom
+  if (chats.length === 0) return
+  const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
+  for (const chat_id of chats) {
+    void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
+  }
+}
+
+// A limit is exhausted: relay it (Claude can't, being limited) and schedule the reset
+// reminder / auto-continue at the exact reset instant. Deduped on the reset minute so the
+// period can't re-fire while it's still active — and so the pane-scrape and snapshot paths
+// can't double-fire across a snapshot going stale. Drives weekly auto-continue too: a 7d
+// reset is just a `fireAt` days out, well within setTimeout's range.
+function actOnLimitHit(fireAt: number, type: string, banner?: string): void {
+  const key = `hit:${Math.round(fireAt / 60_000)}`
+  if (key === lastActedResetKey && Date.now() < fireAt) return
+  lastActedResetKey = key
+  lastActedResetAt = Date.now()
+  saveUsageNotifState()
+  const chats = loadAccess().allowFrom
+  if (chats.length === 0) return
+  const note = `\n\n⏰ I'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
+  const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
+  for (const chat_id of chats) {
+    void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML' }).catch(() => {})
+  }
+  scheduleReset(fireAt + RESET_GRACE_MS, chats)
+}
+
+// Poll the statusline snapshot: drive warnings + limit auto-continue off exact numbers.
+// While it's fresh it owns usage handling and handleUsageLimit stands down (its early return).
+function checkUsageSnapshot(): void {
+  const snap = readUsageSnapshot()
+  if (!snap) return
+  for (const [win, type] of [['fiveHour', 'session'], ['sevenDay', 'weekly']] as const) {
+    const w = snap[win]
+    if (!w) continue
+    if (w.pct >= 100 && w.resetsAt > Date.now()) actOnLimitHit(w.resetsAt, type)
+    else maybeWarn(type, w.pct, w.resetsAt ? `e${Math.round(w.resetsAt / 60_000)}` : `p:${type}`)
+  }
+}
+
 function handleUsageLimit(text: string): void {
+  // Statusline snapshot is the authoritative source — when it's fresh, checkUsageSnapshot
+  // owns usage handling and this pane-scrape fallback stands down to avoid double-firing.
+  if (readUsageSnapshot()) return
   // Mark lines inside an assistant block ("● …" + its indented continuation), so we
   // ignore the banner text when WE quote it in a message — only a real, free-standing
   // status line counts. (A transcript quote of the banner lives inside a ● block.)
@@ -1453,30 +1539,26 @@ function handleUsageLimit(text: string): void {
   }
   if (hitIdx !== undefined) {
     const limitLine = lines[hitIdx].trim()
-    const tm = limitLine.match(RESET_TIME_RE)
-    const key = tm ? `${tm[1]}:${tm[2]}${tm[3].toLowerCase()}` : limitLine
-    const now = Date.now()
-    if (key === lastActedResetKey && now - lastActedResetAt < RESET_RELOCK_MS) return
-    lastActedResetKey = key
-    lastActedResetAt = now
-    saveUsageNotifState()
-
     try {
       let prev = ''
       try { if (statSync(USAGE_CAPTURE_FILE).size < 256 * 1024) prev = readFileSync(USAGE_CAPTURE_FILE, 'utf8') } catch {}
       writeFileSync(USAGE_CAPTURE_FILE, `${prev}\n===== ${new Date().toISOString()} =====\n${stripAnsi(text)}\n`, { mode: 0o600 })
     } catch {}
 
+    const type = limitLine.match(/(?:hit your|used 100% of your)\s+([\w-]+)\s+limit/i)?.[1]?.toLowerCase() ?? 'usage'
+    const fireAt = parseResetTime(limitLine)
+    if (fireAt) { actOnLimitHit(fireAt, type, limitLine); return }
+    // No parseable reset time — relay once (deduped on the banner line), no schedule.
+    const key = `hit:${limitLine}`
+    if (key === lastActedResetKey && Date.now() - lastActedResetAt < RESET_RELOCK_MS) return
+    lastActedResetKey = key
+    lastActedResetAt = Date.now()
+    saveUsageNotifState()
     const chats = loadAccess().allowFrom
     if (chats.length === 0) return
-    const fireAt = parseResetTime(limitLine)
-    const note = fireAt
-      ? `\n\n⏰ I'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
-      : ''
     for (const chat_id of chats) {
-      void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}${note}`, { parse_mode: 'HTML' }).catch(() => {})
+      void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${escapeHtml(limitLine)}`, { parse_mode: 'HTML' }).catch(() => {})
     }
-    if (fireAt) scheduleReset(fireAt + RESET_GRACE_MS, chats)
     return
   }
 
@@ -1484,32 +1566,7 @@ function handleUsageLimit(text: string): void {
   const warnIdx = bottom.find(i => !inBlock[i] && USAGE_WARN_RE.test(lines[i]))
   if (warnIdx === undefined) return
   const wm = lines[warnIdx].match(USAGE_WARN_RE)!
-  const pct = parseInt(wm[1], 10)
-  if (pct < 50 || pct >= 100) return   // <50 not notable; 100 is a hit (handled above)
-  const type = wm[2].toLowerCase()
-  const resetKey = normResetKey(wm[3])
-  const threshold = pct >= 90 ? 90 : pct >= 75 ? 75 : 50
-  const prev = usageWarnState.get(type)
-  const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
-  // Suppress when this period already saw ≥ this threshold, OR (backstop) we sent the
-  // same-or-higher threshold for this type within the lockout — the latter absorbs a
-  // truncated/wrapped banner frame whose clipped reset text reads as a new period.
-  const lockedOut = !!prev && threshold <= prev.threshold && Date.now() - prev.at < WARN_RELOCK_MS
-  if (threshold <= firedThisPeriod || lockedOut) {
-    if (DEBUG_PANE) process.stderr.write(`daemon: usage warn suppressed type=${type} pct=${pct} key="${resetKey}" prev=${JSON.stringify(prev)}\n`)
-    if (prev) usageWarnState.set(type, { resetKey, threshold: Math.max(prev.threshold, threshold), at: prev.at })
-    saveUsageNotifState()
-    return
-  }
-  usageWarnState.set(type, { resetKey, threshold, at: Date.now() })
-  saveUsageNotifState()
-  process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
-  const chats = loadAccess().allowFrom
-  if (chats.length === 0) return
-  const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
-  for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
-  }
+  maybeWarn(wm[2].toLowerCase(), parseInt(wm[1], 10), normResetKey(wm[3]))
 }
 
 function onPaneEvent(text: string): void {
@@ -4340,6 +4397,10 @@ provisionOffMcpTooling()
 
 // Re-arm any persisted usage-limit reset reminder across the restart.
 loadScheduledReset()
+
+// Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.
+checkUsageSnapshot()
+setInterval(checkUsageSnapshot, USAGE_POLL_MS).unref()
 
 // ---- Bot startup loop (retry with backoff, daemon persists forever) ----
 

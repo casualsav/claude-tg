@@ -68,7 +68,11 @@ bar_color() {
 # degrade to a bare user@host:cwd line if python3 is missing or JSON is bad.
 input=$(cat)
 
-parsed=$(STATUSLINE_JSON="$input" python3 - 2>/dev/null <<'PY'
+# Mirror the rate-limit data to a file the telegram daemon reads as its authoritative
+# usage source (path tracks common.ts STATE_DIR). Best-effort; never blocks the draw.
+usage_file="${TELEGRAM_STATE_DIR:-$HOME/.claude/channels/telegram}/usage.json"
+
+parsed=$(STATUSLINE_JSON="$input" TELEGRAM_USAGE_FILE="$usage_file" python3 - 2>/dev/null <<'PY'
 import os, sys, json, shlex
 try:
     d = json.loads(os.environ.get("STATUSLINE_JSON") or "{}")
@@ -114,6 +118,33 @@ fields = {
     "pr_number":       g("pr", "number"),
     "pr_state":        g("pr", "review_state"),
 }
+# Mirror the account-wide rate limits for the telegram daemon: exact 5h/7d used% +
+# reset epochs, written atomically. Account-global, so any session's draw is fine.
+try:
+    uf = os.environ.get("TELEGRAM_USAGE_FILE")
+    if uf:
+        import time, tempfile
+        def _num(x):
+            try: return float(x)
+            except (TypeError, ValueError): return None
+        def _win(period):
+            pct = _num(g("rate_limits", period, "used_percentage"))
+            if pct is None: return None
+            ra = _num(g("rate_limits", period, "resets_at"))
+            return {"pct": pct, "resets_at": int(ra) if ra is not None else None}
+        snap, fh, sd = {"ts": int(time.time())}, _win("five_hour"), _win("seven_day")
+        if fh: snap["five_hour"] = fh
+        if sd: snap["seven_day"] = sd
+        if fh or sd:
+            d = os.path.dirname(uf) or "."
+            fd, tmp = tempfile.mkstemp(dir=d, prefix=".usage-")
+            with os.fdopen(fd, "w") as f:
+                json.dump(snap, f)
+            os.chmod(tmp, 0o600)
+            os.replace(tmp, uf)
+except Exception:
+    pass
+
 for k, v in fields.items():
     print(f"{k}={shlex.quote(str(v))}")
 PY
