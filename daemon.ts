@@ -2624,7 +2624,7 @@ function startHelpText(paired: boolean): string {
     `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
 
     `📌 <b>Pinned bar</b> — your session · model · mode, with 🖥️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
-    `⚙️ <code>/settings</code> — mirror, pin, auto-continue, MCP mode in one panel.\n` +
+    `⚙️ <code>/settings</code> — stream, pin, auto-continue, voice in one panel (<code>/mcp</code> toggles MCP mode).\n` +
     `🔁 Any other <code>/command</code> is relayed straight to Claude Code.`
 
   if (paired) return guide
@@ -2978,18 +2978,15 @@ function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
-    `🖥️ Live mirror — <b>${mirrorMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `▶️ Auto-continue — <b>${a.autoContinue !== false ? 'on' : 'off'}</b>\n` +
-    `🔌 MCP mode — <b>${mcpEnabled() ? 'on' : 'off'}</b> <i>(new sessions; relaunch to apply)</i>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('💬 Stream', 'set:replymode').text('🖥️ Mirror', 'set:mirror').row()
-    .text('📌 Pin', 'set:pin').text('▶️ Auto-continue', 'set:autocontinue').row()
-    .text('🔌 MCP', 'set:mcp').text('🎙️ Voice transcription', 'set:voice')
+    .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
+    .text('▶️ Auto-continue', 'set:autocontinue').text('🎙️ Voice transcription', 'set:voice')
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -3019,6 +3016,17 @@ bot.command('autocontinue', async ctx => {
     '\nToggle with <code>/autocontinue on</code> | <code>off</code>.',
     { parse_mode: 'HTML' },
   )
+})
+
+// /mcp on|off toggles MCP mode for sessions started afterward (relaunch to apply); bare shows it.
+bot.command('mcp', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  if (arg && arg !== 'on' && arg !== 'off') {
+    await ctx.reply('Usage: <code>/mcp on</code> | <code>off</code>', { parse_mode: 'HTML' }); return
+  }
+  if (arg && (arg === 'on') !== mcpEnabled()) toggleMcp()
+  await ctx.reply(`🔌 MCP mode is <b>${mcpEnabled() ? 'ON' : 'OFF'}</b> <i>(new sessions; relaunch to apply)</i>.\nToggle with <code>/mcp on</code> | <code>off</code>.`, { parse_mode: 'HTML' })
 })
 
 // /stream all|final|hybrid sets how Claude's text reaches you (default hybrid); bare shows it.
@@ -3663,7 +3671,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(mirror|pin|autocontinue|mcp|replymode)$/.exec(data)
+  const setMatch = /^set:(pin|autocontinue|replymode)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -3675,10 +3683,6 @@ bot.on('callback_query:data', async ctx => {
       const m = replyMode()
       a.replyMode = m === 'all' ? 'final' : m === 'final' ? 'hybrid' : 'all'
       saveAccess(a)
-    } else if (setMatch[1] === 'mirror') {
-      const m = mirrorMode()
-      a.terminalMirror = m === 'tools' ? 'digest' : m === 'digest' ? 'off' : 'tools'
-      saveAccess(a)
     } else if (setMatch[1] === 'pin') {
       a.sessionPin = a.sessionPin === false                 // flip
       saveAccess(a)
@@ -3686,11 +3690,6 @@ bot.on('callback_query:data', async ctx => {
     } else if (setMatch[1] === 'autocontinue') {
       a.autoContinue = a.autoContinue === false
       saveAccess(a)
-    } else if (setMatch[1] === 'voice') {
-      await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
-      return
-    } else {
-      toggleMcp()
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
     return
@@ -4821,6 +4820,7 @@ void (async () => {
               { command: 'dock', description: 'Show the docked control bar (/dock off to hide)' },
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
               { command: 'stream', description: 'How replies arrive: all · final · hybrid' },
+              { command: 'mcp', description: 'Toggle MCP mode for new sessions' },
               { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
               { command: 'status', description: 'Check your pairing status' },
             ],
