@@ -1052,7 +1052,6 @@ function renderToolsMirror(acts: Activity[], done: boolean): string {
 // pane scraping), the latest few items. Text shows as a 💭 thought line; tools keep their badge.
 const MIRROR_FEED = 9        // hybrid: max interleaved items shown
 function renderHybridMirror(feed: FeedItem[], done: boolean): string {
-  const header = done ? '🖥️ <b>Session</b> · idle' : '🖥️ <b>Session</b> · live'
   const lines: string[] = []
   for (const it of feed.slice(-MIRROR_FEED)) {
     if (it.kind === 'text') {
@@ -1065,7 +1064,7 @@ function renderHybridMirror(feed: FeedItem[], done: boolean): string {
     }
   }
   if (done) lines.push(`✅ <b>Done</b>`)
-  return `${header}\n\n${lines.join('\n').slice(0, 3500)}`
+  return lines.join('\n').slice(0, 3500)
 }
 
 // The mirror text for the active mode, or null when there's nothing to show yet. All of it is
