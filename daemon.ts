@@ -1467,10 +1467,6 @@ let lastLimitDebugLine = ''
 // (`at`) so a width-clipped repaint of the same banner can't re-fire it within a
 // few hours, so 76/77/… and re-renders don't re-notify.
 const usageWarnState = new Map<string, { resetKey: string; threshold: number; at: number }>()
-// Backstop re-fire lockout: a genuine reset is ≥5h away (session) or days (weekly),
-// so once a threshold is sent for a type, ignore the same-or-lower threshold for this
-// long even if the reset descriptor looks different (a truncated/wrapped banner frame).
-const WARN_RELOCK_MS = 90 * 60_000
 
 // Normalize a reset descriptor (e.g. "Jun 7, 4pm (UTC)") to a width-stable dedup key.
 // Terminal truncation/wrapping clips the trailing "(UTC) · …", so key on the date/time
@@ -1546,19 +1542,17 @@ function maybeWarn(type: string, pct: number, resetKey: string): void {
   if (pct < 50 || pct >= 100) return   // <50 not notable; 100 is a hit (actOnLimitHit)
   const threshold = pct >= 90 ? 90 : pct >= 75 ? 75 : 50
   const prev = usageWarnState.get(type)
+  // Ladder dedup scoped to THIS reset period: only fire a threshold higher than the highest
+  // already sent for this resetKey. A new period (different resetKey) re-arms all thresholds,
+  // so 50 fires again next window — no cross-period lockout that could swallow it.
   const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
-  const lockedOut = !!prev && threshold <= prev.threshold && Date.now() - prev.at < WARN_RELOCK_MS
-  if (threshold <= firedThisPeriod || lockedOut) {
-    if (prev) usageWarnState.set(type, { resetKey, threshold: Math.max(prev.threshold, threshold), at: prev.at })
-    saveUsageNotifState()
-    return
-  }
+  if (threshold <= firedThisPeriod) return
   usageWarnState.set(type, { resetKey, threshold, at: Date.now() })
   saveUsageNotifState()
   process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
-  const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
+  const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : '📊'
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
   }
