@@ -27,9 +27,13 @@ incoming tag; `<message_id>` is `m`.
 
 - Send a file or photo: `tg send <CHAT> /abs/path [caption]`
 - React to their message: `tg react <CHAT> <message_id> 👍`
-  Telegram only allows reactions from a fixed set — stick to common ones like
-  👍 👎 ❤️ 🔥 🎉 👏 🙏 👀 😁 🤔 🤯 🤩 💯 🤣 🙈. Anything outside it (✅ 🆕 📊 …) is
-  coerced to the nearest allowed emoji (or 👍), so the reaction still lands.
+  **Reach for a reaction whenever one carries meaning a sentence otherwise would** — 👍 to
+  acknowledge a request as you pick it up, 👀 while you go look into something, 🎉/🔥 on a
+  win, ❤️/🙏 for thanks or praise, 😂 when they're joking, 🤔 when you're weighing it. It's
+  the fastest way to show a message landed. React when it *adds* something; skip it when your
+  reply already says everything — don't react to every message. Telegram allows only a fixed
+  set, so favor 👍 👎 ❤️ 🔥 🎉 👏 🙏 👀 😁 🤔 🤯 🤩 💯 🤣 🙈; out-of-set picks (✅ 🆕 📊 …)
+  are auto-coerced to the nearest allowed one, so the reaction still lands.
 - Free-form status edit — post once, then edit that one message:
   `tg edit <CHAT> <message_id> "…updated status…"`
   (the message_id to edit comes from `tg`'s own output / a prior `tg reply`)
