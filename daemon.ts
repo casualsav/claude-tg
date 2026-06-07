@@ -2171,6 +2171,19 @@ async function audioInboundText(
 
 // ---- Tool call handling ----
 
+// Telegram only accepts message reactions from a fixed emoji set — anything else fails with
+// 400 REACTION_INVALID and the reaction silently never lands. Claude tends to pick contextual
+// emoji (✅ 🆕 📊 …) outside that set, so map the common intents onto an allowed emoji; the
+// react handler also catches REACTION_INVALID and falls back to 👍 so a reaction never no-ops.
+const REACTION_ALIAS: Record<string, string> = {
+  '✅': '👍', '☑️': '👍', '☑': '👍', '✔️': '👍', '✔': '👍', '👍🏻': '👍',
+  '🆕': '🎉', '🎊': '🎉', '📊': '👀', '🔎': '👀', '🔍': '👀',
+  '🙂': '😁', '😀': '😁', '😄': '😁', '😊': '😁', '😅': '😁',
+  '💪': '🔥', '🚀': '🔥', '⭐': '🔥', '🌟': '🔥', '✨': '🤩',
+  '🤖': '👨‍💻', '💻': '👨‍💻', '👋': '🙏', '🙇': '🙏', '😬': '😨', '😕': '🤔',
+}
+const coerceReaction = (e: string): string => REACTION_ALIAS[e] ?? e
+
 async function handleCall(
   name: string,
   args: Record<string, unknown>,
@@ -2240,10 +2253,18 @@ async function handleCall(
       }
       case 'react': {
         assertAllowedChat(args.chat_id as string)
-        await bot.api.setMessageReaction(args.chat_id as string, Number(args.message_id), [
-          { type: 'emoji', emoji: args.emoji as ReactionTypeEmoji['emoji'] },
-        ])
-        text = 'reacted'
+        const chat = args.chat_id as string, msgId = Number(args.message_id)
+        const wanted = coerceReaction(args.emoji as string)
+        const react = (emoji: string) =>
+          bot.api.setMessageReaction(chat, msgId, [{ type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }])
+        try {
+          await react(wanted)
+          text = 'reacted'
+        } catch (e) {
+          if (!/REACTION_INVALID/.test(String(e))) throw e
+          await react('👍')   // Telegram rejected the emoji — land a 👍 rather than silently no-op.
+          text = `reacted (👍 — Telegram doesn't allow ${args.emoji} as a reaction)`
+        }
         break
       }
       case 'download_attachment': {
@@ -2361,8 +2382,8 @@ async function performReset(command: string): Promise<string> {
   await injectSlash(activePaneId!, paneWatcher!, command)
   const model = await readCurrentModel(activePaneId!, paneWatcher!)
   return model
-    ? `🆕 New session started · model: <b>${escapeHtml(model)}</b>`
-    : '🆕 New session started.'
+    ? `✅ New session started · model: <b>${escapeHtml(model)}</b>`
+    : '✅ New session started.'
 }
 
 // Ask for confirmation before /new resets the session (the 🆕 New button is easy
@@ -2370,8 +2391,14 @@ async function performReset(command: string): Promise<string> {
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
-  const keyboard = new InlineKeyboard().text('✅ Yes, start new session', 'newconfirm:yes')
-  await ctx.reply('🆕 Start a new session? This clears the current conversation.\n\nTap to confirm:', { reply_markup: keyboard })
+  const keyboard = new InlineKeyboard()
+    .text('🆕 Launch new session', 'newsession')
+    .text('♻️ Reset current', 'newconfirm:yes')
+  await ctx.reply(
+    '🆕 <b>New session</b>\n\n' +
+    '• <b>Launch new session</b> — start a fresh Claude in a new window (this one keeps running)\n' +
+    '• <b>Reset current</b> — clear this conversation in place',
+    { parse_mode: 'HTML', reply_markup: keyboard })
 }
 
 // ---- Shared actions (used by both slash commands and the control bar) ----
@@ -2771,15 +2798,92 @@ bot.command('compact', async ctx => {
   void relaySlashCommand(activePaneId, paneWatcher, '/compact', String(ctx.chat!.id), ctx.message!.message_id)
 })
 
-// /update pulls the latest plugin code, rebuilds the cache, and restarts the daemon (with
-// auto-rollback); /update check only reports whether you're behind. Owner-gated via the same
-// allowlist as every other command. The work runs in a detached helper (update.ts) so it can
-// restart this very process — it DMs progress + the result back here.
+// ---- /update: pick what to update — the bridge or Claude itself ----
+// Bare /update opens a dashboard naming both current versions, a button each. The bridge path
+// reuses the detached self-updater (update.ts, with rollback). The Claude path runs the native
+// per-user `claude update` in the background, then — only if it actually moved the version —
+// offers a button to restart the focused session so the running conversation picks it up.
+
+// This bridge's installed version (the cache dir we run from), read non-agentically.
+function bridgeVersion(): string {
+  try { return JSON.parse(readFileSync(join(import.meta.dir, '.claude-plugin', 'plugin.json'), 'utf8')).version ?? '?' } catch { return '?' }
+}
+
+// Installed Claude version — `claude --version` prints "2.1.168 (Claude Code)".
+async function claudeVersion(): Promise<string | null> {
+  try { const { stdout } = await exec('claude', ['--version'], { timeout: 8000 }); return stdout.trim().split(/\s+/)[0] || null } catch { return null }
+}
+
+async function paneCommand(paneId: string): Promise<string> {
+  try { const { stdout } = await exec('tmux', ['display-message', '-p', '-t', paneId, '#{pane_current_command}'], { timeout: 2000 }); return stdout.trim() } catch { return '' }
+}
+
+// The focused off-MCP session's id — the newest transcript under the active pane's cwd, so we can
+// relaunch it with `claude --resume <id>` (same id → same transcript → the conversation continues).
+async function activeSessionId(): Promise<string | null> {
+  if (!activePaneId) return null
+  const cwd = await paneCwd(activePaneId)
+  const file = cwd ? resolveTranscript(cwd) : null
+  return file ? basename(file, '.jsonl') : null
+}
+
+// Restart the focused session in place so a freshly installed Claude takes effect: /exit the
+// running claude, then relaunch `claude --resume <id>` in the SAME pane. Keeping the pane id keeps
+// the watcher (and this bridge) pointed at it; keeping the session id keeps the conversation.
+async function restartFocusedSession(chat: string): Promise<void> {
+  const dm = (t: string) => bot.api.sendMessage(chat, t, { parse_mode: 'HTML' }).catch(() => {})
+  const pane = activePaneId
+  if (!pane || !paneWatcher) { await dm('⚠️ No active session to restart.'); return }
+  const id = await activeSessionId()
+  if (!id) { await dm('⚠️ Couldn’t find this session’s id to resume — start a new session manually to pick up the update.'); return }
+  await dm('♻️ Restarting this session on the new Claude…')
+  await paneWatcher.withInjection(async () => {
+    await sendKeys(pane, ['/exit', 'Enter'])
+    for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
+    await sendKeys(pane, [`claude --strict-mcp-config --resume ${id}`, 'Enter'])
+    await waitForSettle(pane, 400, 30_000)
+  })
+  await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
+}
+
+// Run `claude update` in the background; if it moved the version, offer a one-tap session restart.
+async function updateClaude(chat: string): Promise<void> {
+  const dm = (t: string, kb?: InlineKeyboard) =>
+    bot.api.sendMessage(chat, t, { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) }).catch(() => {})
+  await dm('🧠 Updating Claude in the background…')
+  const before = await claudeVersion()
+  try { await exec('claude', ['update'], { timeout: 300_000 }) }
+  catch (e) { await dm(`❌ Claude update failed.\n<code>${escapeHtml(String((e as { stderr?: string })?.stderr || e).slice(0, 300))}</code>`); return }
+  const after = await claudeVersion()
+  if (after && after !== before) {
+    await dm(`✅ Claude updated <b>v${escapeHtml(before ?? '?')}</b> → <b>v${escapeHtml(after)}</b>.\n\nRestart this session now to apply it to the running conversation?`,
+      new InlineKeyboard().text('♻️ Restart session now', 'claudeupd:restart'))
+  } else {
+    await dm(`✅ Claude is already up to date (<b>v${escapeHtml(after ?? before ?? '?')}</b>).`)
+  }
+}
+
+async function showUpdateDashboard(ctx: Context): Promise<void> {
+  const claudeVer = await claudeVersion()
+  await ctx.reply(
+    '🔄 <b>Update</b>\n\n' +
+    `🌉 Telegram bridge: <b>v${escapeHtml(bridgeVersion())}</b>\n` +
+    `🧠 Claude Code: <b>v${escapeHtml(claudeVer ?? '?')}</b>\n\n` +
+    'What do you want to update?',
+    { parse_mode: 'HTML', reply_markup: new InlineKeyboard()
+        .text('🌉 Update bridge', 'upd:bridge')
+        .text('🧠 Update Claude', 'upd:claude') })
+}
+
+// Bare /update opens the dashboard; `/update check` still peeks at the bridge's own availability.
 bot.command('update', async ctx => {
   if (!dmCommandGate(ctx)) return
-  const mode = (ctx.match ?? '').toString().trim().toLowerCase() === 'check' ? 'check' : 'apply'
-  const r = startUpdate(String(ctx.chat!.id), mode)
-  if (!r.ok) await ctx.reply(`Couldn't start update: ${r.error}`)
+  if ((ctx.match ?? '').toString().trim().toLowerCase() === 'check') {
+    const r = startUpdate(String(ctx.chat!.id), 'check')
+    if (!r.ok) await ctx.reply(`Couldn't check for updates: ${r.error}`)
+    return
+  }
+  await showUpdateDashboard(ctx)
 })
 
 // /dock shows the docked control bar; /dock off hides it. /menu stays as a hidden alias.
@@ -3200,11 +3304,9 @@ function scheduledCancelKeyboard(): InlineKeyboard {
   return kb
 }
 
-async function scheduleCancel(ctx: Context): Promise<void> {
-  if (scheduledMsgs.length === 0) { await ctx.reply('No scheduled messages.'); return }
-  if (scheduledMsgs.length === 1) {
-    const m = scheduledMsgs[0]; cancelScheduled(m.id)
-    await ctx.reply(`🗑 Cancelled — was set for ${fmtWhen(m.fireAt)} → <b>${escapeHtml(m.sessionLabel)}</b>.`, { parse_mode: 'HTML' })
+async function scheduleDashboard(ctx: Context): Promise<void> {
+  if (scheduledMsgs.length === 0) {
+    await ctx.reply('📅 <b>No scheduled messages.</b>\n\nSchedule one with <code>/schedule 12h</code> — then reply with the message to send.', { parse_mode: 'HTML' })
     return
   }
   await ctx.reply(scheduledListText(), { parse_mode: 'HTML', reply_markup: scheduledCancelKeyboard() })
@@ -3213,7 +3315,7 @@ async function scheduleCancel(ctx: Context): Promise<void> {
 bot.command('schedule', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
-  if (/^cancel/i.test(arg)) { await scheduleCancel(ctx); return }
+  if (!arg || /^(cancel|list|dash)/i.test(arg)) { await scheduleDashboard(ctx); return }
   const ms = parseDuration(arg)
   if (!ms) {
     await ctx.reply('Usage: <code>/schedule 12h</code> — then reply with the message to send.\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/schedule cancel</code>.', { parse_mode: 'HTML' })
@@ -3442,7 +3544,8 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 
   // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
   // below is revealed when the pin is expanded, grouped into rule-separated cards.
-  const head = `🖥️ <b>${escapeHtml(cur.label)}</b> • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
+  const quick = status?.h5 ? ` • 📊 ${status.h5.pct}%` : ''
+  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${quick} • 🧠 ${escapeHtml(model ?? '—')} • 🧭 ${escapeHtml(mode)}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
@@ -3858,6 +3961,34 @@ bot.on('callback_query:data', async ctx => {
     await ctx.editMessageText(`🧠 <b>Model</b> — now ${model ? escapeHtml(model) : escapeHtml(alias)}\n\n${MODEL_TIP}`, {
       parse_mode: 'HTML', reply_markup: modelPickerKeyboard(),
     }).catch(() => {})
+    return
+  }
+
+  // /update dashboard → bridge self-update (detached helper, with rollback).
+  if (data === 'upd:bridge') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: 'Updating bridge…' }).catch(() => {})
+    await ctx.editMessageText('🌉 Updating the Telegram bridge… progress will follow.', { parse_mode: 'HTML' }).catch(() => {})
+    const r = startUpdate(String(ctx.chat?.id), 'apply')
+    if (!r.ok) await ctx.editMessageText(`❌ Couldn't start bridge update: ${escapeHtml(r.error ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // /update dashboard → update Claude itself in the background (offers a restart button on finish).
+  if (data === 'upd:claude') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: 'Updating Claude…' }).catch(() => {})
+    await ctx.editMessageReplyMarkup().catch(() => {})   // spend the dashboard buttons
+    void updateClaude(String(ctx.chat?.id))
+    return
+  }
+
+  // "Restart session now" under a finished Claude update.
+  if (data === 'claudeupd:restart') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: 'Restarting…' }).catch(() => {})
+    await ctx.editMessageReplyMarkup().catch(() => {})
+    void restartFocusedSession(String(ctx.chat?.id))
     return
   }
 
@@ -4877,7 +5008,7 @@ void (async () => {
               { command: 'mcp', description: 'Toggle MCP mode for new sessions' },
               { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
               { command: 'status', description: 'Check your pairing status' },
-              { command: 'update', description: 'Update the bridge to the latest version (/update check to peek)' },
+              { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
             ],
             { scope: { type: 'all_private_chats' } },
           ).catch(() => {})
