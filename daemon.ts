@@ -678,24 +678,32 @@ function setFocus(sessionId: string | null): void {
   void updateSessionPin()
 }
 
-// Remove a session; refocus the next one (if any) if it was the focused one.
+// Remove a session. If it was the focused one, drop focus entirely — we no longer auto-switch
+// to another session; the user picks from the session-exit menu (announceFocusedExit).
 function dropSession(sessionId: string): void {
   if (!sessions.delete(sessionId)) return
-  if (currentSessionId === sessionId) setFocus(orderedSessions()[0]?.id ?? null)
+  if (currentSessionId === sessionId) setFocus(null)
 }
 
-// End a session (socket closed or its pane died) and tell the user if focus moved.
+// End a registered session (its socket closed or pane died); if it was focused, offer the
+// switch menu rather than silently moving focus.
 function endSession(sessionId: string): void {
   const s = sessions.get(sessionId)
   if (!s) return
   const wasFocused = currentSessionId === sessionId
   dropSession(sessionId)
-  if (wasFocused) {
-    const next = currentSessionId ? sessions.get(currentSessionId) : null
-    notifyChats(next
-      ? `🔚 Session “${s.label}” ended — focus moved to “${next.label}”.`
-      : `🔚 Session “${s.label}” ended — no active sessions left.`)
+  if (wasFocused) void announceFocusedExit(s.label)
+}
+
+// The focused session just ended. Offer a switch menu over whatever's left (no auto-switch),
+// or note that nothing remains. Off-MCP and registered sessions both surface via sessionRows.
+async function announceFocusedExit(endedLabel: string): Promise<void> {
+  const rows = await sessionRows()
+  if (rows.length === 0) {
+    notifyChats(`🔚 Session “${endedLabel}” ended — no active sessions left.`)
+    return
   }
+  notifyChats('🔚 Current session ended — switch sessions?', { reply_markup: sessionSwitchKeyboard(rows) })
 }
 
 // Route a permission decision back to the session that requested it.
@@ -1693,11 +1701,31 @@ function singleAnswerKeyboard(prompt: PromptInfo, prefix: 'prompt' | 'mq'): Inli
   return kb
 }
 
+// Relay any assistant text that's landed but not yet been sent, so it arrives BEFORE a
+// prompt/permission menu we're about to push. The relay loop normally flushes text at idle,
+// but a menu is detected from the pane and fires first — and the pane reads "working" while
+// it's up — so without this the preamble only lands after the menu is answered. Dedups via
+// lastRelayedUuid (advanced before each await, like the loop) so neither path double-sends.
+async function flushPendingText(): Promise<void> {
+  if (!TRANSCRIPT_OUTBOUND || !relayCursorPrimed || !activePaneId) return
+  const cwd = await paneCwd(activePaneId)
+  const file = cwd ? resolveTranscript(cwd) : null
+  if (!file) return
+  for (const r of finalRepliesAfter(file, lastRelayedUuid)) {
+    if (!r.uuid || r.uuid === lastRelayedUuid) continue
+    lastRelayedUuid = r.uuid
+    lastRelayedByFile.set(file, r.uuid)
+    if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
+    await sendAgentText(loadAccess().allowFrom, r.text).catch(e => process.stderr.write(`daemon: prompt pre-flush send failed: ${e}\n`))
+  }
+}
+
 async function relayPromptToTelegram(prompt: PromptInfo): Promise<void> {
   const access = loadAccess()
   const targets = access.allowFrom
   if (targets.length === 0 || !activePaneId) return
 
+  await flushPendingText()   // preamble text must land before the menu
   const text = renderPromptHtml(prompt)
 
   for (const chat_id of targets) {
@@ -1754,6 +1782,7 @@ async function relayPermissionToTelegram(perm: PermissionPrompt): Promise<void> 
   const targets = loadAccess().allowFrom
   if (targets.length === 0 || !activePaneId) return
 
+  await flushPendingText()   // any preamble text must land before the approve/deny menu
   const parts = [`🔐 <b>${escapeHtml(perm.question)}</b>`]
   if (perm.preview) parts.push(`<blockquote>${escapeHtml(perm.preview)}</blockquote>`)
   const body = parts.join('\n') + WIDTH_PAD
@@ -1867,15 +1896,16 @@ function startPaneWatcher(paneId: string): void {
     () => {
       process.stderr.write(`daemon: pane ${paneId} died\n`)
       const entry = [...sessions.entries()].find(([, s]) => s.paneId === paneId)
-      if (entry) endSession(entry[0])
-      else {
-        activePaneId = null; paneWatcher = null
-        offMcpPanes.delete(paneId)
-        // Adopted off-MCP pane: clear the binding so the rescan re-adopts a fresh one.
-        if (adoptedPaneId === paneId) { adoptedPaneId = null; currentSessionId = null }
-      }
-      // Down to a single session → focus it automatically, then refresh the pin.
-      void refocusSoleSession().then(() => updateSessionPin())
+      if (entry) { endSession(entry[0]); return }   // registered session: handles focus + menu
+      // Off-MCP pane: drop it; if it was the focused one, offer the switch menu (no auto-switch).
+      const wasActive = activePaneId === paneId || currentSessionId === paneId
+      activePaneId = null; paneWatcher = null
+      offMcpPanes.delete(paneId)
+      if (adoptedPaneId === paneId) adoptedPaneId = null   // clear binding so the rescan re-adopts
+      if (wasActive) currentSessionId = null
+      const label = sessionNames.get(paneId) || 'Session'
+      if (wasActive) void announceFocusedExit(label).then(() => updateSessionPin())
+      else void updateSessionPin()
     },
     text => typingPresence.observe(detectWorking(text)),   // live typing signal, every poll
   )
@@ -3221,15 +3251,6 @@ async function checkCrossSessionUnread(): Promise<void> {
       }
     }
   }
-}
-
-// When the focused session dies and exactly one remains, move focus to it automatically.
-async function refocusSoleSession(): Promise<void> {
-  const rows = await sessionRows()
-  if (rows.length !== 1 || rows[0].current) return
-  const only = rows[0]
-  if (only.shim) setFocus(only.key)
-  else if (only.paneId && await paneAlive(only.paneId)) focusOffMcpPane(only.paneId)
 }
 
 // "✅ Switched to Session N (/path)" — the cwd reads clearer than the bare folder name.
