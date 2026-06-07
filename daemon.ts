@@ -800,15 +800,21 @@ const chatPrompts = new Map<string, ChatPrompt>()
 let lastRelayedAuthUrl = ''
 const authUrlMessageIds = new Set<string>()
 
-// Build the <channel> block the agent recognizes (per the shim's MCP instructions)
-// from an inbound message: source + every meta field as an attribute, content as the
-// body — identical shape to a native channel notification, so a session that reads it
-// as typed input still knows to reply via the reply tool with the right chat_id.
+// Build the inbound block the agent reads. Bare minimum, short aliases — it lives in the
+// session's context, so every dropped field is saved tokens: tag name encodes the source,
+// `c`=chat_id (for the tg CLI), `m`=message_id (for react/reply). The sender `u` is kept only
+// for groups (chat_id ≠ user_id) where attribution matters; `img`/`att` are local file paths
+// to Read. user_id / ts are dropped entirely. (off-mcp/CLAUDE.md documents this shape.)
 function formatChannelBlock(params: InboundParams): string {
-  const attrs = Object.entries(params.meta)
-    .map(([k, v]) => `${k}="${v.replace(/"/g, '&quot;')}"`)
-    .join(' ')
-  return `<channel source="telegram"${attrs ? ' ' + attrs : ''}>${params.content}</channel>`
+  const m = params.meta
+  const esc = (v: string) => v.replace(/"/g, '&quot;')
+  const a: string[] = []
+  if (m.chat_id) a.push(`c="${esc(m.chat_id)}"`)
+  if (m.message_id) a.push(`m="${esc(m.message_id)}"`)
+  if (m.user && m.user_id && m.chat_id !== m.user_id) a.push(`u="${esc(m.user)}"`)   // group → keep sender
+  if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
+  if (m.attachment_path) a.push(`att="${esc(m.attachment_path)}"`)
+  return `<tg ${a.join(' ')}>${params.content}</tg>`
 }
 
 // Inbound injections are serialized through one chain: two Telegram messages arriving
