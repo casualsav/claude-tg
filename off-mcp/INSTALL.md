@@ -78,8 +78,15 @@ live in the state dir, and the daemon reads them on first start.
      `large-v3` — and **device** `cpu` or `cuda`),
    - `groq` (ask for **GROQ_API_KEY**; default model `whisper-large-v3-turbo`),
    - `openai` (ask for **OPENAI_API_KEY**; default model `whisper-1`).
-4. **Render Claude's Markdown as Telegram formatting?** (default yes.)
-5. **Auto-continue when a usage limit resets?** (default yes.)
+
+   For `local`, no manual `pip` is needed: on the first voice note the daemon auto-provisions a
+   venv at `~/.claude/channels/telegram/whisper-venv` and installs `faster-whisper` into it (this
+   sidesteps PEP 668 externally-managed Python), recording its interpreter as
+   `TELEGRAM_WHISPER_PYTHON`. The only cost is a one-time delay on that first note.
+4. **Auto-continue when a usage limit resets?** (default yes.)
+
+Markdown rendering is **always on** — Claude's replies are rendered as Telegram formatting; it
+isn't a prompt.
 
 **Write `~/.claude/channels/telegram/.env`** (`mkdir -p` the dir first; then `chmod 600`
 the file — the token is a credential):
@@ -99,7 +106,7 @@ OPENAI_API_KEY=<key>                        # openai only
 use pairing instead if they didn't give an ID):
 ```json
 { "dmPolicy": "allowlist", "allowFrom": ["<their-telegram-id>"], "groups": {}, "pending": {},
-  "renderMarkdown": <true|false>, "autoContinue": <true|false> }
+  "renderMarkdown": true, "autoContinue": <true|false> }
 ```
 
 ## 2. Install the plugin + wire the hooks/convention
@@ -111,9 +118,14 @@ use pairing instead if they didn't give an ID):
 },
 "enabledPlugins": { "telegram@better-claude-plugins": true },
 "hooks": {
-  "SessionStart": [ { "hooks": [ { "type": "command", "command": "bun ~/.claude/channels/telegram/ensure-daemon.js >/dev/null 2>&1 || true" } ] } ]
+  "SessionStart": [ { "hooks": [ { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts\" >/dev/null 2>&1 || true" } ] } ]
 }
 ```
+The hook resolves the **newest plugin-cache copy** of `ensure-daemon.ts` itself, so it works on
+the very first restart with **nothing pre-written** — in pure off-MCP no shim ever runs, so this
+hook is the *only* thing that starts the daemon, and it can't depend on a launcher the daemon
+writes only after its first run. (The daemon still drops a `~/.claude/channels/telegram/ensure-daemon.js`
+shim on startup for older hooks; the inline glob above just removes the bootstrap dependency on it.)
 - Append this repo's `off-mcp/CLAUDE.md` into `~/.claude/CLAUDE.md` so every plugin-less
   session knows how to chat + use `tg`.
 
@@ -141,8 +153,16 @@ DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V 
 [ -f "$DIR/mcp.json.disabled" ] && mv "$DIR/mcp.json.disabled" "$DIR/.mcp.json"   # MCP on
 ```
 Then they launch work sessions with **plain `claude`** (no flag) — the MCP server loads every
-time. To later turn it off: `/telegram:configure mcp off` or `/settings`. (Skip this whole step
-for off-MCP, the default — leave the server disabled.)
+time. To later turn it off: `/telegram:configure mcp off` or `/settings`.
+
+**Off-MCP (default): explicitly ensure the server stays disabled.** MCP loads purely from the
+presence of the plugin's `.mcp.json`, so don't just skip — actively confirm it's renamed aside,
+in case a previous install or a re-download left one in place:
+```sh
+DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)
+[ -f "$DIR/.mcp.json" ] && mv "$DIR/.mcp.json" "$DIR/mcp.json.disabled"   # MCP off (off-MCP mode)
+```
+Off-MCP never enables the server — work sessions launch with `claude-tg` (`--strict-mcp-config`).
 
 **Off-MCP (default):** launch the work session **plugin-less** in a tmux pane. The one flag that
 matters is `--strict-mcp-config`: it drops the plugin's MCP server (so you don't pay the

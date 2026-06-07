@@ -28,9 +28,12 @@ getting the bot token from [@BotFather](https://t.me/BotFather) and the single C
 restart.
 
 ```sh
-git clone https://github.com/casualsav/better-claude-telegram
-cd better-claude-telegram && claude   # then: "set up the Telegram bridge"
+gh repo clone casualsav/better-claude-telegram   # private/preview: uses your gh auth
+cd better-claude-telegram && claude              # then: "set up the Telegram bridge"
 ```
+
+> While the repo is private, `git clone` over HTTPS fails with `could not read Username`. Use
+> `gh repo clone` (authenticated), or an SSH remote, instead.
 
 Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists every step.
 
