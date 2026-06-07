@@ -127,18 +127,22 @@ the very first restart with **nothing pre-written** — in pure off-MCP no shim 
 hook is the *only* thing that starts the daemon, and it can't depend on a launcher the daemon
 writes only after its first run. (The daemon still drops a `~/.claude/channels/telegram/ensure-daemon.js`
 shim on startup for older hooks; the inline glob above just removes the bootstrap dependency on it.)
-- **Install the bundled status line.** It's what populates the pinned message's live metrics —
-  the daemon reads the statusline rendered in the session's pane (context bar, tokens, cost,
-  session/api time, and the 5h/7d rate-limit bars for Pro/Max). Copy it from this repo and make it
-  executable:
+- **Install the bundled status line — do it yourself, inline.** It's what populates the pinned
+  message's live metrics: the daemon reads the statusline rendered in the session's pane (context
+  bar, tokens, cost, session/api time, and the 5h/7d rate-limit bars for Pro/Max). **Set it up
+  directly — write the `statusLine` settings entry above and copy the script with the command
+  below. Do NOT run the `/statusline` command or hand this off to the `statusline-setup` subagent;
+  it's unreliable and has failed installs.** Two steps, both you:
   ```sh
   cp off-mcp/statusline-command.sh ~/.claude/statusline-command.sh && chmod +x ~/.claude/statusline-command.sh
   ```
-  It needs only `bash` + `python3` (no jq), reads everything from Claude Code's session JSON, and
-  degrades to a bare line if `python3` is missing. **If the user already has a `statusLine`
-  configured, leave theirs in place** — skip the `statusLine` settings entry above; the pin parses
-  the common fields (ctx %, `$`cost, `↑↓` tokens, `5h`/`7d`) from any reasonably-formatted
-  statusline, so it still works, just don't clobber their command.
+  and ensure `settings.json` has the `"statusLine"` block shown above (command
+  `bash ~/.claude/statusline-command.sh`).
+  The script **relies on `python3`** (used to parse Claude Code's session JSON — no jq), and
+  degrades to a bare `user@host:cwd` line if `python3` is missing, so confirm `python3` is on PATH.
+  **If the user already has a `statusLine` configured, leave theirs in place** — skip the
+  `statusLine` settings entry; the pin parses the common fields (ctx %, `$`cost, `↑↓` tokens,
+  `5h`/`7d`) from any reasonably-formatted statusline, so it still works, just don't clobber it.
 - Append this repo's `off-mcp/CLAUDE.md` into `~/.claude/CLAUDE.md` so every plugin-less
   session knows how to chat + use `tg`.
 
