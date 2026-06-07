@@ -4391,13 +4391,18 @@ bot.on('callback_query:data', async ctx => {
     })
     await ctx.answerCallbackQuery({ text: `Submitted ${state.selected.size} selected` }).catch(() => {})
     await paneWatcher.withInjection(async () => {
-      if (toggles.length) { await sendKeysPaced(activePaneId!, toggles); await waitForSettle(activePaneId!, 200, 3000) }
-      // This build renders even a single multi-select question with its own Submit tab —
-      // toggling never submits. Move right to the Submit tab and confirm "Submit answers".
-      await sendKeys(activePaneId!, ['Right'])
-      await waitForSettle(activePaneId!, 200, 3000)
+      if (toggles.length) { await sendKeysPaced(activePaneId!, toggles); await waitForSettle(activePaneId!, 250, 4000) }
+      // Even a lone multi-select question has its own Submit tab (reached with Right); landing on
+      // it renders "Ready to submit your answers?" with "Submit answers" focused. A swallowed Right
+      // (render lag) leaves the cursor on an option row, where Enter TOGGLES that row instead of
+      // submitting — wedging the prompt. So press Right until the submit screen actually shows
+      // (capped), and only then confirm with Enter — never blind-fire Enter on an option row.
+      for (let i = 0; i < 4 && !isSubmitScreen(await capturePane(activePaneId!).catch(() => '')); i++) {
+        await sendKeys(activePaneId!, ['Right'])
+        await waitForSettle(activePaneId!, 250, 4000)
+      }
       await sendKeys(activePaneId!, ['Enter'])
-      await waitForSettle(activePaneId!, 300, 5000)
+      await waitForSettle(activePaneId!, 300, 6000)
     })
     pendingMultiSelect.delete(key)
     lastRelayedPromptHash = ''  // allow next prompt to relay
