@@ -12,7 +12,7 @@
 // roll back to the previous dir. Progress + result are DM'd to <chat_id>. `check` only reports.
 import { execFileSync, execSync, spawn } from 'node:child_process'
 import {
-  cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  chmodSync, cpSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -100,6 +100,60 @@ async function waitHealthy(offset: number): Promise<boolean> {
 const logSize = () => { try { return statSync(LOG_FILE).size } catch { return 0 } }
 const shortVer = (sha: string) => sha.slice(0, 7)
 
+// ---- Re-sync installed COPIES that live outside the plugin cache ----
+// The daemon code updates with the cache, but two files are copied into ~/.claude at install
+// time and otherwise go stale across versions: the off-mcp convention block in CLAUDE.md and
+// the statusline script. Refresh both from the just-updated clone so convention/statusline
+// changes ship with /update. Conservative: only touches files that already exist / already
+// carry our block, never creates where the user opted out, never clobbers a custom statusline.
+const GLOBAL_MD = join(HOME, '.claude', 'CLAUDE.md')
+const STATUSLINE_DEST = join(HOME, '.claude', 'statusline-command.sh')
+const STATUSLINE_SIG = 'Claude Code status line'   // header line unique to our script
+const CONV_BEGIN = '<!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->'
+const CONV_END = '<!-- END better-claude-telegram -->'
+const CONV_HEADING = '# Reachable over Telegram (no MCP)'   // first line of off-mcp/CLAUDE.md (legacy, marker-less)
+
+function syncInstalledCopies(): string[] {
+  const notes: string[] = []
+  // 1. Convention block in ~/.claude/CLAUDE.md.
+  try {
+    const template = readFileSync(join(MP, 'off-mcp', 'CLAUDE.md'), 'utf8').trim()
+    const wrapped = `${CONV_BEGIN}\n${template}\n${CONV_END}`
+    if (existsSync(GLOBAL_MD)) {
+      const cur = readFileSync(GLOBAL_MD, 'utf8')
+      const b = cur.indexOf(CONV_BEGIN), e = cur.indexOf(CONV_END)
+      if (b !== -1 && e !== -1 && e > b) {
+        // Already marker-wrapped → swap the block in place.
+        const next = cur.slice(0, b) + wrapped + cur.slice(e + CONV_END.length)
+        if (next !== cur) { writeFileSync(GLOBAL_MD, next); notes.push('refreshed the off-mcp convention in CLAUDE.md') }
+      } else {
+        // Legacy, marker-less: replace from our heading to the next top-level "# " (or EOF),
+        // migrating it into markers. Our block has only the one top-level heading, so this is
+        // exact. Content before/after the block is preserved.
+        const hi = cur.indexOf(CONV_HEADING)
+        if (hi !== -1) {
+          const after = cur.indexOf('\n# ', hi + CONV_HEADING.length)
+          const tail = after === -1 ? '' : cur.slice(after + 1)
+          writeFileSync(GLOBAL_MD, cur.slice(0, hi) + wrapped + (tail ? '\n\n' + tail : '\n'))
+          notes.push('migrated + refreshed the off-mcp convention in CLAUDE.md')
+        }
+      }
+    }
+  } catch {}
+  // 2. Statusline script — only overwrite our own (signature-guarded), never a user's custom one.
+  try {
+    const src = join(MP, 'statusline-command.sh')
+    if (existsSync(STATUSLINE_DEST) && existsSync(src)) {
+      const dest = readFileSync(STATUSLINE_DEST, 'utf8')
+      if (dest.includes(STATUSLINE_SIG) && dest !== readFileSync(src, 'utf8')) {
+        cpSync(src, STATUSLINE_DEST); try { chmodSync(STATUSLINE_DEST, 0o755) } catch {}
+        notes.push('refreshed statusline-command.sh')
+      }
+    }
+  } catch {}
+  return notes
+}
+
 async function main(): Promise<void> {
   if (!existsSync(join(MP, '.git'))) { await notify('❌ Update: marketplace clone not found — is the plugin installed?'); return }
 
@@ -174,7 +228,9 @@ async function main(): Promise<void> {
   launchBridge(target)
 
   if (await waitHealthy(offset)) {
-    await notify(`✅ Updated <code>${shortVer(oldGitref)}</code> → <code>${shortVer(newSha)}</code> (<b>v${newVer}</b>). Reopen the chat / tap "/" to refresh the command menu.`)
+    const synced = syncInstalledCopies()
+    const extra = synced.length ? `\n\nAlso ${synced.join('; ')}. Start a new session to pick up convention changes.` : ''
+    await notify(`✅ Updated <code>${shortVer(oldGitref)}</code> → <code>${shortVer(newSha)}</code> (<b>v${newVer}</b>). Reopen the chat / tap "/" to refresh the command menu.${extra}`)
     // Prune build/backups, keep the immediate predecessor as a manual fallback.
     if (preBackup) { try { rmSync(preBackup, { recursive: true, force: true }) } catch {} }
     return

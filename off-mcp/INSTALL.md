@@ -171,7 +171,14 @@ shim on startup for older hooks; the inline glob above just removes the bootstra
   `statusLine` settings entry; the pin parses the common fields (ctx %, `$`cost, `↑↓` tokens,
   `5h`/`7d`) from any reasonably-formatted statusline, so it still works, just don't clobber it.
 - Append this repo's `off-mcp/CLAUDE.md` into `~/.claude/CLAUDE.md` so every plugin-less
-  session knows how to chat + use `tg`.
+  session knows how to chat + use `tg`. **Wrap it in these exact marker comments** so `/update`
+  can keep it current automatically (the updater swaps the content between them; a marker-less
+  legacy block is migrated into markers on the first update):
+  ```
+  <!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->
+  …contents of off-mcp/CLAUDE.md…
+  <!-- END better-claude-telegram -->
+  ```
 
 ## 3. Restart Claude Code (the one restart)
 **Ask the human to restart Claude Code.** On restart it downloads the plugin and the
