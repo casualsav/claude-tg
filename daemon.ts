@@ -4232,12 +4232,12 @@ bot.on('callback_query:data', async ctx => {
     }
     const num = ppermMatch[1]
     await ctx.answerCallbackQuery({ text: `Answered ${num}` }).catch(() => {})
+    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the buttons immediately on tap, not after the settle
     await paneWatcher.withInjection(async () => {
       await sendKeys(activePaneId!, [num, 'Enter'])
       await waitForSettle(activePaneId!, 300, 5000)
     })
     lastRelayedPermissionHash = ''  // allow the next permission prompt to relay
-    await ctx.editMessageReplyMarkup().catch(() => {})  // drop the buttons — the answer landed
     await verifyPromptClosed()
     return
   }
