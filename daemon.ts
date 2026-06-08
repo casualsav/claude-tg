@@ -3179,9 +3179,10 @@ bot.command('effort', async ctx => {
     if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | xhigh | max | auto</code>', { parse_mode: 'HTML' }); return }
     const chat_id = String(ctx.chat!.id)
     const result = await injectEffortChange(arg, chat_id)
-    // 'confirm' → a Yes/No was relayed; the 👍 would be premature. 'applied' → it took effect.
+    // 'confirm' → a Yes/No card was relayed (the "switched" message follows on Yes). 'applied' → it
+    // took effect immediately, so confirm with a message.
     if (result === 'applied') {
-      void bot.api.setMessageReaction(chat_id, ctx.message!.message_id, [{ type: 'emoji', emoji: '👍' }]).catch(() => {})
+      await ctx.reply(`⚡ Effort switched to ${escapeHtml(effortLabel(arg))}`, { parse_mode: 'HTML' })
     }
     return
   }
@@ -4541,10 +4542,7 @@ bot.on('callback_query:data', async ctx => {
       // A confirmation was relayed as its own Yes/No message — collapse the picker to point at it.
       await ctx.editMessageText(`⚡ <b>Effort</b> — confirm switching to ${escapeHtml(effortLabel(level))} below 👇`, { parse_mode: 'HTML' }).catch(() => {})
     } else {
-      const eff = await currentEffort()
-      await ctx.editMessageText(`⚡ <b>Effort</b> — now ${eff ? escapeHtml(eff) : escapeHtml(level)}\n\n${EFFORT_TIP}`, {
-        parse_mode: 'HTML', reply_markup: effortPickerKeyboard(),
-      }).catch(() => {})
+      await ctx.editMessageText(`⚡ Effort switched to ${escapeHtml(effortLabel(level))}`, { parse_mode: 'HTML' }).catch(() => {})
     }
     return
   }
@@ -4563,8 +4561,7 @@ bot.on('callback_query:data', async ctx => {
       await waitForSettle(activePaneId!, 300, 5000)
     })
     if (yes) {
-      const eff = await currentEffort()
-      await ctx.editMessageText(`⚡ <b>Effort</b> — now ${eff ? escapeHtml(eff) : escapeHtml(level ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
+      await ctx.editMessageText(`⚡ Effort switched to ${escapeHtml(effortLabel(level ?? ''))}`, { parse_mode: 'HTML' }).catch(() => {})
     } else {
       await ctx.editMessageText('⚡ Effort change cancelled — kept the current level.', { parse_mode: 'HTML' }).catch(() => {})
     }
