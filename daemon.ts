@@ -4230,8 +4230,34 @@ async function resolveNewSessionDir(input: string): Promise<string> {
   return t
 }
 
+// Claude Code refuses to start with the skip-permissions flag in an *untrusted* folder (one with
+// no `hasTrustDialogAccepted` entry under `projects` in ~/.claude.json) — it would show a trust
+// dialog, but a freshly-spawned pane isn't focused, so the daemon's onboarding driver can't answer
+// it and the window just dies. Since the authorized user explicitly chose to start a session here,
+// pre-record the trust decision (equivalent to clicking "trust") so claude boots straight to the
+// REPL. Only writes when the folder isn't already trusted (the common case skips the write), and
+// uses an atomic temp+rename so a concurrent claude never reads a half-written config.
+function ensureFolderTrusted(dir: string): void {
+  try {
+    const cfgPath = join(homedir(), '.claude.json')
+    if (!existsSync(cfgPath)) return   // fresh install: claude will create it (and prompt) itself
+    const cfg = JSON.parse(readFileSync(cfgPath, 'utf8'))
+    cfg.projects ??= {}
+    const entry = cfg.projects[dir] ?? {}
+    if (entry.hasTrustDialogAccepted === true) return   // already trusted → no write, no clobber risk
+    entry.hasTrustDialogAccepted = true
+    if (!Array.isArray(entry.allowedTools)) entry.allowedTools = []
+    cfg.projects[dir] = entry
+    const tmp = `${cfgPath}.tg-${process.pid}.tmp`
+    writeFileSync(tmp, JSON.stringify(cfg, null, 2))
+    renameSync(tmp, cfgPath)
+    process.stderr.write(`daemon: marked ${dir} trusted in ~/.claude.json for a new session\n`)
+  } catch (e) { process.stderr.write(`daemon: ensureFolderTrusted(${dir}) failed: ${e}\n`) }
+}
+
 async function spawnSession(dir: string, extra = ''): Promise<boolean> {
   try {
+    ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
     let target: string[] = []
     if (activePaneId) {
       try {
