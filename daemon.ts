@@ -3355,7 +3355,12 @@ async function provisionWhisper(chats: string[]): Promise<void> {
       await exec(venvPy, ['-m', 'pip', 'install', '--quiet', 'faster-whisper'], { timeout: 600_000 })
       writeEnvVars({ TELEGRAM_WHISPER_PYTHON: venvPy })
     }
-    note(whisperReady() ? '✅ Whisper engine installed — local transcription is ready.' : '⚠️ Engine installed but not importable — try <code>/telegram:configure transcribe local</code>.')
+    if (whisperReady()) {
+      await prepullWhisperModel()   // download the chosen model's weights too, so the first note is instant
+      note(`✅ Local transcription ready — engine + <b>${tConfig('TELEGRAM_TRANSCRIBE_MODEL') || 'base'}</b> model.`)
+    } else {
+      note('⚠️ Engine installed but not importable — try <code>/telegram:configure transcribe local</code>.')
+    }
   } catch (e) {
     process.stderr.write(`daemon: whisper provision failed: ${e}\n`)
     const needsVenv = /ensurepip|venv|No module named pip/i.test(String(e))
@@ -3363,6 +3368,37 @@ async function provisionWhisper(chats: string[]): Promise<void> {
       ? '⚠️ Couldn’t build the Whisper venv — this box is missing <code>python3-venv</code>. Install it once (<code>sudo apt-get install -y python3-venv</code>), then retry with <code>/telegram:configure transcribe local</code>. Or switch to hosted: <code>/telegram:configure transcribe groq</code>.'
       : '⚠️ Couldn’t auto-install the Whisper engine. Set it up once in terminal: <code>/telegram:configure transcribe local</code>')
   } finally { whisperInstalling = false }
+}
+
+// The local Whisper model ladder, smallest/fastest → largest/most accurate. `large-v3-turbo` is a
+// distilled large-v3 (near-large accuracy, much faster). Shown in the in-chat model picker.
+const WHISPER_MODELS = ['tiny', 'base', 'small', 'medium', 'large-v3', 'large-v3-turbo'] as const
+// Hardware probe (cached for the process) → recommend a model: GPU ⇒ turbo; else size by CPU cores.
+let _hwProbe: { gpu: boolean; cores: number } | null = null
+function probeHardware(): { gpu: boolean; cores: number } {
+  if (_hwProbe) return _hwProbe
+  let gpu = false, cores = 4
+  try { execFileSync('nvidia-smi', ['-L'], { timeout: 3000, stdio: 'ignore' }); gpu = true } catch {}
+  try { cores = parseInt(execFileSync('nproc', [], { timeout: 2000 }).toString().trim(), 10) || 4 } catch {}
+  _hwProbe = { gpu, cores }
+  return _hwProbe
+}
+function recommendedWhisperModel(): string {
+  const { gpu, cores } = probeHardware()
+  return gpu ? 'large-v3-turbo' : cores >= 4 ? 'small' : 'base'
+}
+// Download the configured model's weights into the HF cache so the first note doesn't stall on a
+// download. Uses the venv python recorded in .env (so faster-whisper resolves). Best-effort.
+async function prepullWhisperModel(): Promise<void> {
+  try {
+    const py = readFileSync(ENV_FILE, 'utf8').match(/TELEGRAM_WHISPER_PYTHON=(\S+)/)?.[1] || 'python3'
+    const model = tConfig('TELEGRAM_TRANSCRIBE_MODEL') || 'base'
+    const device = tConfig('TELEGRAM_WHISPER_DEVICE') || 'cpu'
+    const compute = tConfig('TELEGRAM_WHISPER_COMPUTE') || 'int8'
+    await exec(py, ['-c',
+      'import sys;from faster_whisper import WhisperModel;WhisperModel(sys.argv[1],device=sys.argv[2],compute_type=sys.argv[3])',
+      model, device, compute], { timeout: 1_200_000 })
+  } catch (e) { process.stderr.write(`daemon: whisper model pre-pull failed (downloads on first note instead): ${e}\n`) }
 }
 
 // Readiness note for a transcription backend. Local installs from here; API keys must be
@@ -3376,7 +3412,7 @@ function voiceReady(b: string): string {
 function voiceText(): string {
   const b = transcribeStatus()
   return `🎙️ <b>Voice transcription</b>\n\nBackend: <b>${b}</b> — ${voiceReady(b)}\n\n` +
-    `💻 <b>Local</b> — private &amp; free, installs &amp; runs right here\n☁️ <b>Groq / OpenAI</b> — hosted; the API key is set in the terminal for security\n🔇 <b>Off</b> — disabled\n\n` +
+    `💻 <b>Local</b> — private &amp; free; tap to pick a model\n☁️ <b>Groq / OpenAI</b> — hosted; the API key is set in the terminal for security\n🔇 <b>Off</b> — disabled\n\n` +
     `🔒 <i>Local is fully configurable from here. For Groq/OpenAI, tapping sets the backend, then add the key in terminal so it never lands in chat history.</i>\n\nPick a backend:`
 }
 function voiceKeyboard(): InlineKeyboard {
@@ -3384,6 +3420,34 @@ function voiceKeyboard(): InlineKeyboard {
     .text('🔇 Off', 'voice:off').text('💻 Local', 'voice:local').row()
     .text('☁️ Groq', 'voice:groq').text('☁️ OpenAI', 'voice:openai').row()
     .text('‹ Back', 'voice:back')
+}
+// Sub-panel for the local backend: choose the Whisper model. Reached by tapping 💻 Local; the
+// `local` backend is committed when a model is picked, then the engine + weights provision.
+function voiceModelText(): string {
+  const cur = (tConfig('TELEGRAM_TRANSCRIBE_MODEL') || 'base').toLowerCase()
+  const rec = recommendedWhisperModel()
+  const { gpu, cores } = probeHardware()
+  const status = whisperInstalling ? '⏳ installing engine + weights…' : whisperReady() ? '✅ engine ready' : '⚙️ installs on pick'
+  return `🎙️ <b>Local Whisper — model</b>\n\n` +
+    `Current: <b>${escapeHtml(cur)}</b> · ${status}\n` +
+    `This machine: <b>${gpu ? 'GPU (CUDA)' : `${cores}-core CPU`}</b> → recommended <b>${escapeHtml(rec)}</b> ⭐\n\n` +
+    `tiny → base → small → medium → large-v3 → turbo (smallest/fastest → largest/most accurate). ` +
+    `On CPU, bigger = slower, and it scales with clip length. Tap a model — the engine installs and ` +
+    `its weights download in the background, so your first note is ready:`
+}
+function voiceModelKeyboard(): InlineKeyboard {
+  const cur = (tConfig('TELEGRAM_TRANSCRIBE_MODEL') || '').toLowerCase()
+  const rec = recommendedWhisperModel()
+  const kb = new InlineKeyboard()
+  WHISPER_MODELS.forEach((m, i) => {
+    let label = m === 'large-v3-turbo' ? 'turbo' : m
+    if (m === cur) label = '✓ ' + label
+    if (m === rec) label += ' ⭐'
+    kb.text(label, `voicemodel:${m}`)
+    if (i % 2 === 1) kb.row()
+  })
+  kb.text('‹ Back', 'voice:panel')
+  return kb
 }
 function settingsText(): string {
   const a = loadAccess()
@@ -4152,25 +4216,58 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Voice-transcription sub-panel → switch backend (live; daemon reads .env per voice note).
-  const voiceMatch = /^voice:(off|local|groq|openai|back)$/.exec(data)
+  const voiceMatch = /^voice:(off|local|groq|openai|back|panel)$/.exec(data)
   if (voiceMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    await ctx.answerCallbackQuery().catch(() => {})
     const choice = voiceMatch[1]
     if (choice === 'back') {
+      await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
       return
     }
-    if (choice === 'off') writeEnvVars({ TELEGRAM_TRANSCRIBE: 'off' })
-    else if (choice === 'local') {
-      writeEnvVars({ TELEGRAM_TRANSCRIBE: 'local', ...(envHas('TELEGRAM_TRANSCRIBE_MODEL') ? {} : { TELEGRAM_TRANSCRIBE_MODEL: 'base' }) })
-      if (!whisperReady() && !whisperInstalling) void provisionWhisper(loadAccess().allowFrom)   // install engine here
+    if (choice === 'local') {   // open the model sub-panel; backend commits when a model is chosen
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(voiceModelText(), { parse_mode: 'HTML', reply_markup: voiceModelKeyboard() }).catch(() => {})
+      return
     }
-    else writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })   // groq / openai — key added in terminal (see voiceReady)
+    if (choice === 'panel') {   // back from the model sub-panel to the backend panel
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+      return
+    }
+    // off / groq / openai
+    writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })
+    const needKey = (choice === 'groq' && !envHas('GROQ_API_KEY')) || (choice === 'openai' && !envHas('OPENAI_API_KEY'))
+    await ctx.answerCallbackQuery(needKey
+      ? { text: `Backend set to ${choice}. Add the API key in your terminal — for security, keys never go through chat: /telegram:configure transcribe ${choice}`, show_alert: true }
+      : undefined).catch(() => {})
     await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+    return
+  }
+  const voiceModelMatch = /^voicemodel:(tiny|base|small|medium|large-v3|large-v3-turbo)$/.exec(data)
+  if (voiceModelMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const model = voiceModelMatch[1]
+    const { gpu } = probeHardware()
+    writeEnvVars({
+      TELEGRAM_TRANSCRIBE: 'local',
+      TELEGRAM_TRANSCRIBE_MODEL: model,
+      ...(envHas('TELEGRAM_WHISPER_DEVICE') ? {} : { TELEGRAM_WHISPER_DEVICE: gpu ? 'cuda' : 'cpu' }),
+      ...(envHas('TELEGRAM_WHISPER_COMPUTE') ? {} : { TELEGRAM_WHISPER_COMPUTE: 'int8' }),
+    })
+    // Engine missing → provision it (which also pre-pulls this model's weights). Engine already
+    // there → just pre-pull the newly chosen model's weights in the background. Either way the
+    // first note is instant. Both run detached so the panel refreshes immediately.
+    if (!whisperReady() && !whisperInstalling) void provisionWhisper(loadAccess().allowFrom)
+    else if (whisperReady()) void prepullWhisperModel()
+    await ctx.editMessageText(voiceModelText(), { parse_mode: 'HTML', reply_markup: voiceModelKeyboard() }).catch(() => {})
     return
   }
 
