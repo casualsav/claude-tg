@@ -3466,8 +3466,17 @@ function lastModelInTranscript(file: string): string | null {
   return null
 }
 function prettyModel(id: string | null): string | null {
-  const m = id?.match(/(opus|sonnet|haiku)/i)
-  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
+  if (!id) return id
+  const cap = (s: string) => s[0].toUpperCase() + s.slice(1).toLowerCase()
+  // New ids: claude-<family>-<major>-<minor>[-<date>] → "Opus 4.8".
+  let m = id.match(/(opus|sonnet|haiku)-(\d+)-(\d+)/i)
+  if (m) return `${cap(m[1])} ${m[2]}.${m[3]}`
+  // Legacy ids: claude-<major>-<minor>-<family> → "Sonnet 3.5".
+  m = id.match(/(\d+)-(\d+)-(opus|sonnet|haiku)/i)
+  if (m) return `${cap(m[3])} ${m[1]}.${m[2]}`
+  // Family only (no parseable version).
+  m = id.match(/(opus|sonnet|haiku)/i)
+  return m ? cap(m[1]) : id
 }
 
 // Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
