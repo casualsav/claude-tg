@@ -1500,6 +1500,9 @@ const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
 const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
 let lastActedResetKey = ''
 let lastActedResetAt = 0
+// Highest context-fill threshold (50/75) already warned for the current fill; re-armed to 0 when
+// context drops back under 50% (a /clear or /compact), so each fresh fill warns again.
+let ctxWarnThreshold = 0
 // Last limit-ish line written to the near-miss diagnostic, so a static banner across
 // many pane ticks isn't logged repeatedly.
 let lastLimitDebugLine = ''
@@ -1524,6 +1527,7 @@ try {
   const s = JSON.parse(readFileSync(USAGE_NOTIF_STATE_FILE, 'utf8'))
   if (typeof s.lastActedResetKey === 'string') lastActedResetKey = s.lastActedResetKey
   if (typeof s.lastActedResetAt === 'number') lastActedResetAt = s.lastActedResetAt
+  if (typeof s.ctxWarnThreshold === 'number') ctxWarnThreshold = s.ctxWarnThreshold
   for (const [k, v] of Object.entries(s.warn ?? {})) {
     const e = v as { resetKey?: unknown; threshold?: unknown; at?: unknown }
     if (e && typeof e.resetKey === 'string' && typeof e.threshold === 'number') {
@@ -1536,7 +1540,7 @@ try {
 } catch {}
 function saveUsageNotifState(): void {
   try {
-    writeFileSync(USAGE_NOTIF_STATE_FILE, JSON.stringify({ lastActedResetKey, lastActedResetAt, warn: Object.fromEntries(usageWarnState) }), { mode: 0o600 })
+    writeFileSync(USAGE_NOTIF_STATE_FILE, JSON.stringify({ lastActedResetKey, lastActedResetAt, ctxWarnThreshold, warn: Object.fromEntries(usageWarnState) }), { mode: 0o600 })
   } catch {}
 }
 
@@ -1596,6 +1600,22 @@ function maybeWarn(type: string, pct: number, resetKey: string): void {
   const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`).catch(() => {})
+  }
+}
+
+// Context-fill heads-up: one 💾 ping at 50% and again at 75% as the conversation grows. Re-arms
+// when context drops back under 50% (a /clear or /compact), so the next fill warns again. Driven
+// off the statusline ctxPct read during pin updates; persisted so a daemon restart doesn't re-fire.
+function maybeWarnContext(pct: number | null): void {
+  if (pct == null) return
+  if (pct < 50) { if (ctxWarnThreshold !== 0) { ctxWarnThreshold = 0; saveUsageNotifState() } return }
+  const threshold = pct >= 75 ? 75 : 50
+  if (threshold <= ctxWarnThreshold) return
+  ctxWarnThreshold = threshold
+  saveUsageNotifState()
+  process.stderr.write(`daemon: context warn fired threshold=${threshold} (pct=${pct})\n`)
+  for (const chat_id of loadAccess().allowFrom) {
+    void bot.api.sendMessage(chat_id, `💾 Context is ${threshold}% full — consider <code>/compact</code> or wrapping up soon.`, { parse_mode: 'HTML' }).catch(() => {})
   }
 }
 
@@ -3553,8 +3573,9 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
+    maybeWarnContext(status.ctxPct)
     const usage: string[] = []
-    if (status.ctxPct != null) usage.push(`🧠 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
+    if (status.ctxPct != null) usage.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
     const ct: string[] = []
     if (status.cost) ct.push(`💰 ${status.cost}`)
     if (status.sessionTime) ct.push(`⏱ ${status.sessionTime}`)
