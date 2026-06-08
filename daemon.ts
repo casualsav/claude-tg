@@ -3273,7 +3273,7 @@ async function showUpdateDashboard(ctx: Context): Promise<void> {
     `🌉 Telegram bridge: <b>v${escapeHtml(bridgeVersion())}</b>\n` +
     `🧠 Claude Code: <b>v${escapeHtml(claudeVer ?? '?')}</b>\n\n` +
     'What do you want to update?\n\n' +
-    '💡 Tip: use <code>/update tg</code> (this bridge) · <code>/update claude</code> (Claude Code) to skip the buttons.',
+    '💡 Tip: <code>/update tg</code> (this bridge) · <code>/update claude</code> (Claude Code).',
     { parse_mode: 'HTML', reply_markup: new InlineKeyboard()
         .text('🌉 Update bridge', 'upd:bridge')
         .text('🧠 Update Claude', 'upd:claude') })
