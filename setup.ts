@@ -279,13 +279,15 @@ function patchSettings(mode: Mode): void {
 
   if (mode === 'off-mcp') {
     const bashrc = join(homedir(), process.env.SHELL?.includes('zsh') ? '.zshrc' : '.bashrc')
-    // Two launch aliases, both carrying the --tg bridge marker:
+    // Two launch aliases. The adopt marker is `tmux set -p @tg_bridge 1` — a tmux PANE option, so
+    // it never touches claude's args (decoupled from the autonomy flag, and immune to claude
+    // rejecting unknown flags). The flag that follows only chooses the start mode:
     //  claude-tg   — --allow-dangerously-skip-permissions: starts in a normal mode (prompts relay
     //                to Telegram), bypass is switchable on demand from the /mode picker.
     //  claude-yolo — --dangerously-skip-permissions: starts in full bypass (autonomy from launch).
     const want: [string, string][] = [
-      ['claude-tg', "alias claude-tg='claude --tg --allow-dangerously-skip-permissions'"],
-      ['claude-yolo', "alias claude-yolo='claude --tg --dangerously-skip-permissions'"],
+      ['claude-tg', "alias claude-tg='tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions'"],
+      ['claude-yolo', "alias claude-yolo='tmux set -p @tg_bridge 1 2>/dev/null; claude --dangerously-skip-permissions'"],
     ]
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
     const missing = want.filter(([n]) => !new RegExp(`alias ${n}=`).test(cur)).map(([, a]) => a)
@@ -326,7 +328,7 @@ async function main(): Promise<void> {
     console.log(`\n${C.b('Launch aliases')} ${C.dim('(reload your shell or `source` the rc first):')}`)
     console.log(`  ${C.b('claude-tg')}    starts safe — permission prompts relay to Telegram; flip to full bypass on demand from /mode`)
     console.log(`  ${C.b('claude-yolo')}  starts in full bypass — autonomy from the first action`)
-    console.log(C.dim('  Both bridge automatically (the --tg marker). Run either inside tmux.'))
+    console.log(C.dim('  Both bridge automatically (they tag the pane with the @tg_bridge tmux option). Run either inside tmux.'))
   }
   rl.close()
 }
@@ -362,10 +364,10 @@ async function verifyAndLaunch(cfg: Config): Promise<boolean> {
   if (!polling) { console.log(C.warn('  ⚠ daemon didn\'t reach "polling" in time — check ' + DAEMON_LOG_FILE)); stopCheckoutDaemon(); return false }
   console.log(C.ok(`  ✓ daemon polling${cfg.botUsername ? ` as @${cfg.botUsername}` : ''}`))
 
-  // Spawn the bridge work session (the daemon discovers it by the --tg marker in the claude argv).
-  // Use the safe default (claude-tg): starts in a normal mode, bypass switchable from /mode.
+  // Spawn the bridge work session. The pane tags itself with the @tg_bridge tmux option (the adopt
+  // marker); the daemon discovers it from that. Safe default: normal mode, bypass switchable from /mode.
   if (tmuxHasSession(BRIDGE_SESSION)) console.log(C.dim(`  • tmux session "${BRIDGE_SESSION}" already exists — reusing it`))
-  else if (run('tmux', ['new-session', '-d', '-s', BRIDGE_SESSION, 'claude --tg --allow-dangerously-skip-permissions']).ok)
+  else if (run('tmux', ['new-session', '-d', '-s', BRIDGE_SESSION, 'tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions']).ok)
     console.log(C.ok(`  ✓ bridge session "${BRIDGE_SESSION}" started`))
   else { console.log(C.warn('  ⚠ couldn\'t start the tmux bridge session — start one with claude-tg after the restart.')); stopCheckoutDaemon(); return false }
 

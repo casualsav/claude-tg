@@ -69,7 +69,7 @@ the user and let them pick:
 | --- | --- | --- |
 | Per-request cost | **Zero** — no MCP server; replies are read from the transcript | ~700 tokens of tool schemas **+** an instruction block injected on **every** request |
 | Requires | **tmux** (the daemon drives the session's pane) | nothing — works without tmux |
-| Launch with | `claude-tg` / `claude-yolo` (off-MCP launch aliases, both carry `--tg`) | plain `claude` |
+| Launch with | `claude-tg` / `claude-yolo` (off-MCP launch aliases; both tag the pane `@tg_bridge`) | plain `claude` |
 | Functions | **Full** — reply, react, edit, files, permission prompts, every command | Full (identical) |
 
 Both modes expose the exact same features (reactions, file send/receive, permission buttons,
@@ -308,23 +308,24 @@ Off-MCP keeps the plugin's MCP server disabled, so a plain `claude` is already p
 `--strict-mcp-config` needed for that anymore.
 
 **Off-MCP (default):** run the work session in a tmux pane, launched so the daemon recognizes it as
-a bridge session. The signature the daemon scans for is the launch flag **`--tg`** — a dedicated
-bridge marker (Claude Code tolerates the unknown flag and ignores it). **Auto-add two shortcuts
-for it yourself** — append to the user's `~/.bashrc` (or `~/.zshrc`):
+a bridge session. The signature the daemon scans for is the **`@tg_bridge` tmux pane option** — a
+dedicated marker set at the tmux layer, so it never touches claude's args (immune to claude
+rejecting unknown flags, and decoupled from autonomy mode). **Auto-add two shortcuts that tag the
+pane then launch** — append to the user's `~/.bashrc` (or `~/.zshrc`):
 ```sh
-alias claude-tg='claude --tg --allow-dangerously-skip-permissions'   # safe start, bypass on demand
-alias claude-yolo='claude --tg --dangerously-skip-permissions'       # full bypass from launch
+alias claude-tg='tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions'   # safe start, bypass on demand
+alias claude-yolo='tmux set -p @tg_bridge 1 2>/dev/null; claude --dangerously-skip-permissions'       # full bypass from launch
 ```
-Then **tell the user:** launch work sessions with **`claude-tg`** (the default). The `--tg` flag is the
-bridge marker; the bypass flags are the autonomy choice:
+Then **tell the user:** launch work sessions with **`claude-tg`** (the default). The `@tg_bridge`
+pane option is the bridge marker; the bypass flags are the autonomy choice:
 - **`claude-tg`** uses `--allow-dangerously-skip-permissions` — Claude starts in a normal mode where
   permission prompts are **relayed to Telegram** (Yes / allow-all / No buttons), and you can switch
   **into full bypass on demand** from the `/mode` picker. The safe, fully-remote-controllable default.
 - **`claude-yolo`** uses `--dangerously-skip-permissions` — starts in **full bypass** (autonomy from
   the first action). For when you want zero prompts up front.
 
-Bypass is optional either way: even `claude --tg` alone is bridged. You can switch modes any time
-(Shift+Tab, or `/mode`); in a
+Bypass is optional either way: a pane tagged with `@tg_bridge` is bridged regardless of the launch
+flag. You can switch modes any time (Shift+Tab, or `/mode`); in a
 non-bypass mode, permission prompts are relayed to Telegram with **Yes / allow-all / No** buttons to
 approve remotely.
 
@@ -337,9 +338,10 @@ From Telegram, message the session → you get its reply (read from the transcri
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 
 **If inbound never reaches the session (pin shows "No active session"):** the daemon only
-auto-adopts a pane whose `claude` argv carries the bridge marker — **`--tg`** (or the legacy
-**`--dangerously-skip-permissions`**), i.e. the `claude-tg` alias. A session started with a bare
-`claude` (no marker) is **not** adopted — confirm in `daemon.log` you see `adopted off-MCP pane …`
+auto-adopts a pane carrying the **`@tg_bridge` tmux pane option** (set by the `claude-tg` /
+`claude-yolo` aliases). A session started with a bare `claude` (no marker) is **not** adopted —
+check with `tmux show-options -p @tg_bridge` in the pane, and confirm in `daemon.log` you see
+`adopted off-MCP pane …`
 or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `claude-tg`;
 or (b) pin the existing pane explicitly — get its id with
 `tmux list-panes -a -F '#{pane_id} #{pane_current_command}'`, then set

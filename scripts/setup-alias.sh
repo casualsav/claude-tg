@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # One-time convenience: add a `claude-tg` alias for launching a Telegram-bridged
 # Claude Code session. Mode-aware (default off-MCP, the recommended mode):
-#   off-mcp  ->  claude --tg --allow-dangerously-skip-permissions
-#                (--tg is the daemon's adopt marker; the plugin's MCP ships disabled so the session
-#                 is already plugin-less. --allow-dangerously-skip-permissions starts in a normal mode
+#   off-mcp  ->  tmux set -p @tg_bridge 1; claude --allow-dangerously-skip-permissions
+#                (`tmux set -p @tg_bridge 1` is the daemon's adopt marker — a tmux PANE option, so
+#                 it never touches claude's args. The plugin's MCP ships disabled so the session is
+#                 already plugin-less. --allow-dangerously-skip-permissions starts in a normal mode
 #                 (prompts relay to Telegram) with bypass switchable on demand from /mode. For a
 #                 full-bypass-from-launch variant, add by hand:
-#                   alias claude-yolo='claude --tg --dangerously-skip-permissions')
+#                   alias claude-yolo='tmux set -p @tg_bridge 1 2>/dev/null; claude --dangerously-skip-permissions')
 #   mcp      ->  claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions
 #
 # Idempotent — re-running updates the alias in place if the mode changed. Run from the repo root:
@@ -16,7 +17,7 @@ set -euo pipefail
 MODE="${1:-off-mcp}"
 ALIAS_NAME="claude-tg"
 case "$MODE" in
-  off-mcp) ALIAS_CMD="claude --tg --allow-dangerously-skip-permissions" ;;
+  off-mcp) ALIAS_CMD="tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions" ;;
   mcp)     ALIAS_CMD="claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions" ;;
   *)       echo "usage: setup-alias.sh [off-mcp|mcp]  (default: off-mcp)" >&2; exit 2 ;;
 esac

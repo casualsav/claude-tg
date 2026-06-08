@@ -63,18 +63,18 @@ the first-use delay. Working as designed — documented here for completeness.
 ## 5. `scripts/setup-alias.sh` adds the wrong alias for off-MCP (resolved)
 **Symptom (historical):** the alias script wrote the MCP/channel-load launcher for off-MCP.
 **Resolved:** `setup-alias.sh` is mode-aware — off-MCP is now
-`alias claude-tg='claude --tg --allow-dangerously-skip-permissions'` (`--tg` is the daemon's adopt
-marker; the plugin's MCP ships disabled so the session is already plugin-less; `--allow-…` starts in
-a normal mode with bypass switchable on demand from `/mode`. The `claude-yolo` variant uses
+`alias claude-tg='tmux set -p @tg_bridge 1 2>/dev/null; claude --allow-dangerously-skip-permissions'`
+(the `@tg_bridge` tmux pane option is the daemon's adopt marker — decoupled from claude's args; the
+plugin's MCP ships disabled so the session is already plugin-less; `--allow-…` starts in a normal
+mode with bypass switchable on demand from `/mode`. The `claude-yolo` variant uses
 `--dangerously-skip-permissions` for full bypass from launch).
 
 ## 6. Inbound delivery needs a bridge-signature tmux pane (most common "it's not working")
 **Symptom:** bot is paired and polling, but Telegram messages never reach a Claude session.
 **Cause:** off-MCP delivers inbound by **typing into a tmux pane**. The daemon auto-discovers a
-pane only if its `claude` argv carries the bridge marker — `--tg` (or the legacy
-`--dangerously-skip-permissions`); the `claude-tg` alias; `isPluginlessClaude`, `daemon.ts`.
-A bare `claude` pane, or a Claude session **not running inside tmux**, is never adopted — so
-there's nowhere to deliver.
+pane only if it carries the **`@tg_bridge` tmux pane option** (set by the `claude-tg` alias; see
+`findOffMcpPanes`, `daemon.ts`). A bare `claude` pane, or a Claude session **not running inside
+tmux**, is never adopted — so there's nowhere to deliver.
 **Extra gotcha:** spawning the session **detached** (e.g. `tmux new-session -d`) lands on the
 **first-run theme picker / onboarding**, which blocks the chat prompt; a detached spawn can't get
 past it, so the pane is never drivable.
@@ -82,7 +82,7 @@ past it, so the pane is never drivable.
 ```sh
 source ~/.bashrc        # load the claude-tg alias
 tmux new -s tg          # or attach to existing tmux
-claude-tg               # = claude --tg --allow-dangerously-skip-permissions ; pick a theme on first run
+claude-tg               # = tmux set -p @tg_bridge 1 ; claude --allow-dangerously-skip-permissions ; pick a theme on first run
 ```
 The daemon then discovers and adopts the pane (log: `adopted off-MCP pane …`), announces the
 session to Telegram, and inbound starts flowing. Note: the *dev/terminal* session you ran the

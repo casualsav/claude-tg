@@ -1416,74 +1416,42 @@ function startRelayLoop(): void {
 }
 
 // ---- Off-MCP pane auto-discovery ----
-// When no pane is pinned (FORCE_PANE) and no shim session is driving, find a plugin-less
+// When no pane is pinned (FORCE_PANE) and no shim session is driving, find a bridge-marked
 // `claude` pane on its own and adopt it — no .env edit / restart to bind a work session.
 // Plugin (MCP) sessions register over the shim socket, so they live in `sessions` and are
-// excluded here; and we only adopt panes whose claude argv carries the bridge opt-in marker
-// (--tg, or the legacy --dangerously-skip-permissions), so a plain unrelated claude is never
-// grabbed. Explicit FORCE_PANE still wins when set, but isn't needed — discovery binds on its own.
+// excluded here; and we only adopt panes carrying the @tg_bridge tmux pane option (see
+// BRIDGE_PANE_OPT), so a plain unrelated claude is never grabbed. Explicit FORCE_PANE still wins
+// when set, but isn't needed — discovery binds on its own.
 let adoptedPaneId: string | null = null
 
 // Every plugin-less pane we currently know about (the focused one plus any unfocused
 // siblings). A new pane is announced once, with a switch button, and does NOT steal focus.
 const offMcpPanes = new Set<string>()
 
-// All pids in the process tree rooted at `rootPid` (the pane's shell), so we can find the
-// claude process — it runs as a child of the pane shell, not the pane's own pid.
-async function processTree(rootPid: string): Promise<string[]> {
-  const all = [rootPid], queue = [rootPid]
-  while (queue.length) {
-    const pid = queue.shift()!
-    try {
-      const { stdout } = await exec('pgrep', ['-P', pid], { timeout: 2000 })
-      for (const c of stdout.split('\n').map(s => s.trim()).filter(Boolean)) { all.push(c); queue.push(c) }
-    } catch {}
-  }
-  return all
-}
+// Bridge opt-in marker: a tmux *pane* user-option set on panes that should be adopted. It lives at
+// the tmux layer, so it's fully decoupled from claude's CLI/argv (no fragile launch flag a claude
+// version bump can reject — `--tg` did exactly that) and from autonomy mode. Daemon-spawned panes
+// set it themselves (see spawnSession); a user-launched bridge session sets it via the claude-tg
+// alias (`tmux set -p @tg_bridge 1`). A plain claude pane without it is never grabbed.
+const BRIDGE_PANE_OPT = '@tg_bridge'
 
-// A process's full argv. Linux exposes it via /proc; macOS/BSD has no /proc, so fall back to
-// `ps -ww` (unlimited width, no truncation). Keeps off-MCP auto-discovery portable.
-async function processArgv(pid: string): Promise<string> {
-  try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim() } catch {}
-  try { return (await exec('ps', ['-ww', '-p', pid, '-o', 'args='], { timeout: 2000 })).stdout.trim() } catch {}
-  return ''
-}
-
-// True if the pane shell `panePid` has a `claude` child the user opted in for bridging. The opt-in
-// marker is `--allow-dangerously-skip-permissions` (bypass available, switchable from /mode) or the
-// full-bypass `--dangerously-skip-permissions` — both real Claude Code flags, so the launched
-// `claude` actually starts. (We also still match the historical `--tg` marker, but current Claude
-// Code REJECTS `--tg` as an unknown option and exits, so it's no longer a usable launch flag — see
-// spawnSession.) A plain `claude` carrying no marker is never grabbed, so unrelated sessions are safe.
-async function isPluginlessClaude(panePid: string): Promise<boolean> {
-  for (const pid of await processTree(panePid)) {
-    const argv = await processArgv(pid)
-    if (!argv || !/\bclaude\b/.test(argv)) continue
-    const args = argv.split(/\s+/)
-    return args.includes('--allow-dangerously-skip-permissions')
-      || args.includes('--dangerously-skip-permissions')
-      || args.includes('--tg')
-  }
-  return false
-}
-
-// Scan tmux for every adoptable plugin-less claude pane (registered MCP sessions excluded).
+// Scan tmux for every adoptable bridge-marked pane (registered MCP sessions excluded). Reads the
+// pane option straight off list-panes — no process-tree walk, no argv parsing.
 async function findOffMcpPanes(): Promise<string[]> {
   let out = ''
   try {
     const { stdout } = await exec('tmux',
-      ['list-panes', '-a', '-F', '#{pane_id}\t#{pane_pid}\t#{pane_current_command}'], { timeout: 3000 })
+      ['list-panes', '-a', '-F', `#{pane_id}\t#{${BRIDGE_PANE_OPT}}`], { timeout: 3000 })
     out = stdout
   } catch { return [] }
 
   const candidates: string[] = []
   for (const line of out.split('\n')) {
     if (!line.trim()) continue
-    const [paneId, panePid, cmd] = line.split('\t')
-    if (!/^(claude|node|bun)$/.test(cmd)) continue   // cheap prefilter before walking the tree
-    if (sessions.has(paneId)) continue               // a registered (plugin/MCP) session — never adopt
-    if (await isPluginlessClaude(panePid)) candidates.push(paneId)
+    const [paneId, mark] = line.split('\t')
+    if (mark !== '1') continue            // pane not opted in for bridging
+    if (sessions.has(paneId)) continue    // a registered (plugin/MCP) session — never adopt
+    candidates.push(paneId)
   }
   return candidates
 }
@@ -1551,6 +1519,16 @@ async function announceNewSession(paneId: string): Promise<void> {
   notifyChats(`🆕 New Claude session: <b>${who}</b>${where}`, { reply_markup: kb, parse_mode: 'HTML' })
 }
 
+// Bind a daemon-spawned pane immediately rather than waiting for the next discovery tick — and do
+// it even under FORCE_PANE (which disables auto-discovery), since /new is an explicit user action.
+// Adopt it if nothing currently holds focus; otherwise announce it with a switch button (no steal).
+function registerSpawnedPane(paneId: string): void {
+  if (offMcpPanes.has(paneId)) return
+  offMcpPanes.add(paneId)
+  if (!activePaneId) adoptPane(paneId)
+  else void announceNewSession(paneId)
+}
+
 // Keep the pane registry in sync. Adopts a pane only when nothing is driving; any additional
 // pane is registered and announced (with a switch button) without taking focus. Runs at
 // startup and on a slow interval, so panes started before/after the daemon get picked up.
@@ -1607,7 +1585,7 @@ async function hintNoSession(params: InboundParams): Promise<void> {
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
     '<code>claude-tg</code>   — safe start, bypass on demand from /mode\n' +
     '<code>claude-yolo</code> — full bypass from launch\n' +
-    'The daemon auto-discovers the pane (the <code>--tg</code> marker) and replays anything buffered.',
+    'The daemon auto-discovers the pane (these aliases tag it with the <code>@tg_bridge</code> tmux option) and replays anything buffered.',
     { parse_mode: 'HTML' }).catch(() => {})
 }
 
@@ -4269,11 +4247,16 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
         if (stdout.trim()) target = ['-t', `${stdout.trim()}:`]
       } catch {}
     }
-    // --allow-dangerously-skip-permissions is the adopt marker AND a real flag (claude starts with
-    // bypass switchable from /mode). NB: the old `--tg` marker is gone — current claude rejects it
-    // as an unknown option and exits, which is why spawned sessions were dying instantly. extra e.g. "--resume <id>".
+    // The adopt marker is a tmux pane option set below — NOT a claude flag. We keep
+    // --allow-dangerously-skip-permissions purely for the bypass-on-demand UX (switchable from
+    // /mode), which is unrelated to adoption. extra e.g. "--resume <id>".
     const cmd = `claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}`
-    await exec('tmux', ['new-window', '-d', ...target, '-c', dir, cmd], { timeout: 5000 })
+    const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
+    const newPane = stdout.trim()
+    if (newPane) {
+      try { await exec('tmux', ['set-option', '-p', '-t', newPane, BRIDGE_PANE_OPT, '1'], { timeout: 2000 }) } catch {}
+      registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
+    }
     return true
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
 }
