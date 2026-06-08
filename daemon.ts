@@ -45,6 +45,11 @@ const TRANSCRIPT_OUTBOUND = (process.env.TELEGRAM_TRANSCRIPT_OUTBOUND ?? '') ===
 // plugin-less session for off-MCP testing/standalone use. When set, shim subscribes
 // register but don't steal this focus.
 const FORCE_PANE = process.env.TELEGRAM_FORCE_PANE || null
+// Opt-in "bang shell": an inbound `!<cmd>` runs as a shell command on the host (focused pane's cwd)
+// and the output is relayed back — mirroring Claude Code's terminal `!` REPL. This is direct remote
+// code execution from a chat app, so it's OFF unless TELEGRAM_BANG_SHELL=1, and still gated by the
+// access allowlist.
+const BANG_SHELL = process.env.TELEGRAM_BANG_SHELL === '1'
 
 const exec = promisify(execFile)
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
@@ -2580,6 +2585,29 @@ async function relaySlashCommand(
   void bot.api.setMessageReaction(chat_id, message_id, [
     { type: 'emoji', emoji: '👍' },
   ]).catch(() => {})
+}
+
+// Run a `!<cmd>` shell command on the host (in the focused pane's cwd) and relay stdout/stderr back.
+// Runs directly in the daemon — independent of any Claude turn — so it works even mid-task. Callers
+// must have passed the access gate; BANG_SHELL must be enabled.
+async function runBangCommand(chat_id: string, cmd: string): Promise<void> {
+  if (!cmd) { await bot.api.sendMessage(chat_id, 'Usage: <code>!&lt;shell command&gt;</code>', { parse_mode: 'HTML' }).catch(() => {}); return }
+  const cwd = (activePaneId && await paneCwd(activePaneId)) || homedir()
+  void bot.api.sendChatAction(chat_id, 'typing').catch(() => {})
+  let out = '', code = 0
+  try {
+    const r = await exec('bash', ['-lc', cmd], { cwd, timeout: 120_000, maxBuffer: 2_000_000 })
+    out = `${r.stdout ?? ''}${r.stderr ? `\n${r.stderr}` : ''}`
+  } catch (e) {
+    const ee = e as { stdout?: string; stderr?: string; code?: number; message?: string; killed?: boolean }
+    out = `${ee.stdout ?? ''}${ee.stderr ? `\n${ee.stderr}` : ''}` || (ee.killed ? '(timed out)' : ee.message ?? '')
+    code = typeof ee.code === 'number' ? ee.code : 1
+  }
+  out = out.replace(/\s+$/, '') || '(no output)'
+  if (out.length > 8000) out = out.slice(0, 8000) + '\n…(truncated)'
+  const header = `$ ${cmd}${code ? `  · exit ${code}` : ''}`
+  const body = `📁 <code>${escapeHtml(cwd)}</code>\n<b>${escapeHtml(header)}</b>\n<pre>${escapeHtml(out)}</pre>`
+  for (const chunk of chunkHtml(body)) await bot.api.sendMessage(chat_id, chunk, { parse_mode: 'HTML' }).catch(() => {})
 }
 
 // ---- Mode command helper ----
@@ -5221,6 +5249,21 @@ bot.on('message:text', async ctx => {
     case BTN_COST:     await doReadout(ctx, 'cost'); return
     case BTN_STOP:     await confirmStop(ctx); return
     case BTN_NEW:      await confirmNewSession(ctx); return
+  }
+
+  // `!<cmd>` → run a shell command on the host and relay its output (opt-in: TELEGRAM_BANG_SHELL=1),
+  // mirroring Claude Code's terminal `!` REPL. Gated by the access allowlist like any inbound.
+  if (BANG_SHELL && text.startsWith('!')) {
+    const result = gate(ctx)
+    if (result.action !== 'deliver') {
+      if (result.action === 'pair') {
+        const lead = result.isResend ? 'Still pending' : 'Pairing required'
+        await ctx.reply(`🔗 ${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
+      }
+      return
+    }
+    await runBangCommand(String(ctx.chat!.id), text.slice(1).trim())
+    return
   }
 
   // Reply to a ✏️ Type-something force-reply → type the answer into the prompt's

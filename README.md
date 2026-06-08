@@ -249,6 +249,17 @@ The bot token and transcription settings live in
 `~/.claude/channels/telegram/.env` (kept `chmod 600`), managed by
 `/telegram:configure`.
 
+### Bang shell (`!cmd`) — opt-in, off by default
+
+Set `TELEGRAM_BANG_SHELL=1` in `.env` to let an inbound message that starts with `!`
+run as a **shell command on the host** (in the focused session's cwd), with stdout/stderr
+relayed back — like Claude Code's terminal `!` REPL, e.g. `!git status`. It runs directly
+in the daemon, so it works even while Claude is mid-task. **This is remote code execution
+from a chat app:** every allowlisted sender (and anyone who compromises the bot token or an
+allowlisted account) can run arbitrary commands. It stays gated by the access allowlist, but
+treat enabling it as widening trust. Leave it unset to disable (then `!`-messages are just
+normal messages to Claude).
+
 ## Upgrading
 
 The daemon is long-lived and deliberately survives Claude sessions, so installing
