@@ -137,6 +137,18 @@ function assertAllowedChat(chat_id: string): void {
   throw new Error(`chat ${chat_id} is not allowlisted — add via /telegram:access`)
 }
 
+// Off-MCP token saver: DM inbound blocks no longer carry `c` (the chat id is constant for the
+// sole allowlisted user — printing it every message just wastes context). So deliberate actions
+// may pass `.` (or nothing) as the chat and we resolve it to that single allowlisted chat here.
+// Groups still pass an explicit id. assertAllowedChat validates the result either way.
+function resolveChatId(raw: unknown): string {
+  const s = (raw == null ? '' : String(raw)).trim()
+  if (s && s !== '.') return s
+  const allow = loadAccess().allowFrom
+  if (allow.length === 1) return allow[0]
+  throw new Error(s ? `chat "${s}" not resolvable` : 'no chat id given and not exactly one allowlisted chat')
+}
+
 function saveAccess(a: Access): void {
   if (STATIC) return
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
@@ -809,7 +821,11 @@ function formatChannelBlock(params: InboundParams): string {
   const m = params.meta
   const esc = (v: string) => v.replace(/"/g, '&quot;')
   const a: string[] = []
-  if (m.chat_id) a.push(`c="${esc(m.chat_id)}"`)
+  // DM (chat_id == user_id): omit c — it's the same id every message, so it's pure token waste.
+  // Deliberate actions (tg send/react/edit) default to the sole allowlisted chat (accept `.`).
+  // Groups keep c so the agent targets the right chat.
+  const isDm = !!m.user_id && m.chat_id === m.user_id
+  if (m.chat_id && !isDm) a.push(`c="${esc(m.chat_id)}"`)
   if (m.message_id) a.push(`m="${esc(m.message_id)}"`)
   if (m.user && m.user_id && m.chat_id !== m.user_id) a.push(`u="${esc(m.user)}"`)   // group → keep sender
   if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
@@ -2219,7 +2235,7 @@ async function handleCall(
     let text: string
     switch (name) {
       case 'reply': {
-        const chat_id = args.chat_id as string
+        const chat_id = resolveChatId(args.chat_id)
         const msgText = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
@@ -2277,8 +2293,9 @@ async function handleCall(
         break
       }
       case 'react': {
-        assertAllowedChat(args.chat_id as string)
-        const chat = args.chat_id as string, msgId = Number(args.message_id)
+        const chat = resolveChatId(args.chat_id)
+        assertAllowedChat(chat)
+        const msgId = Number(args.message_id)
         const wanted = coerceReaction(args.emoji as string)
         const react = (emoji: string) =>
           bot.api.setMessageReaction(chat, msgId, [{ type: 'emoji', emoji: emoji as ReactionTypeEmoji['emoji'] }])
@@ -2297,7 +2314,8 @@ async function handleCall(
         break
       }
       case 'edit_message': {
-        assertAllowedChat(args.chat_id as string)
+        const editChat = resolveChatId(args.chat_id)
+        assertAllowedChat(editChat)
         const editFormat = args.format as string | undefined
         const editRender = editFormat !== 'text' && editFormat !== 'markdownv2' && loadAccess().renderMarkdown !== false
         const editParseMode = editRender ? 'HTML' as const : editFormat === 'markdownv2' ? 'MarkdownV2' as const : undefined
@@ -2306,7 +2324,7 @@ async function handleCall(
           ? chunkHtml(mdToTelegramHtml(args.text as string), MAX_CHUNK_LIMIT)[0]
           : args.text as string
         const edited = await bot.api.editMessageText(
-          args.chat_id as string,
+          editChat,
           Number(args.message_id),
           editText,
           ...(editParseMode ? [{ parse_mode: editParseMode }] : []),

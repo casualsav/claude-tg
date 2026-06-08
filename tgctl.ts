@@ -4,10 +4,11 @@
 // talking to the daemon's unix socket directly with the same {t:'call'} the shim used.
 // (Plain text replies are relayed automatically from the transcript; this is the rest.)
 //
-//   tgctl send  <chat_id> <path> [caption|-]     send a file/photo (- reads caption from stdin)
-//   tgctl react <chat_id> <message_id> <emoji>   add an emoji reaction
-//   tgctl edit  <chat_id> <message_id> <text|->   edit a message the bot sent (- reads stdin)
-//   tgctl reply <chat_id> <text|->                send a text message (- reads stdin)
+// <chat> is `.` in a DM (resolves to the sole allowlisted chat) or an explicit id in a group.
+//   tgctl send  <chat> <path> [caption|-]     send a file/photo (- reads caption from stdin)
+//   tgctl react <chat> <message_id> <emoji>   add an emoji reaction
+//   tgctl edit  <chat> <message_id> <text|->   edit a message the bot sent (- reads stdin)
+//   tgctl reply <chat> <text|->                send a text message (- reads stdin)
 import net from 'node:net'
 import { readFileSync } from 'node:fs'
 import { frame, makeLineReader, SOCKET_PATH, type ShimToDaemon, type DaemonToShim } from './common.ts'
