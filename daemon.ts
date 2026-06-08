@@ -3814,7 +3814,13 @@ function lastModelInTranscript(file: string): string | null {
 function prettyModel(id: string | null): string | null {
   if (!id) return id
   const m = id.match(/(opus|sonnet|haiku)/i)
-  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
+  if (!m) return id
+  const name = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()
+  // Append the major.minor version when the id carries one as adjacent digit groups, e.g.
+  // claude-opus-4-8 → Opus 4.8, claude-3-5-sonnet → Sonnet 3.5. Date-only ids (…-20240229) have
+  // no hyphenated pair, so they fall back to family-only.
+  const v = id.match(/(\d+)-(\d+)/)
+  return v ? `${name} ${v[1]}.${v[2]}` : name
 }
 
 // Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
@@ -3920,12 +3926,11 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
   // below is revealed when the pin is expanded, grouped into rule-separated cards.
   // Tagline order: session · usage · model · effort · mode, then the think badge. Items are
-  // separated by a single space — the emojis act as dividers (test: single-space; restore the
-  // double space `  ` before each emoji, or ` • `, to revert).
-  const usage = status?.h5 ? ` 📊 ${status.h5.pct}%` : ''
-  const effortBadge = status?.effort ? ` ⚡ ${escapeHtml(status.effort)}` : ''
-  const thinkBadge = status?.think ? ' ✻ think' : ''
-  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${usage} 🧠 ${escapeHtml(model ?? '—')}${effortBadge} 🎚️ ${escapeHtml(mode)}${thinkBadge}`
+  // separated by a double space — the emojis act as dividers (restore ` • ` to revert).
+  const usage = status?.h5 ? `  📊 ${status.h5.pct}%` : ''
+  const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
+  const thinkBadge = status?.think ? '  ✻ think' : ''
+  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${usage}  🧠 ${escapeHtml(model ?? '—')}${effortBadge}  🎚️ ${escapeHtml(mode)}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
