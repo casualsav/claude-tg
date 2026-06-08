@@ -2650,11 +2650,11 @@ async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const keyboard = new InlineKeyboard()
-    .text('➕ Launch new session', 'newsession')
+    .text('➕ Add new session', 'newsession')
     .text('♻️ Reset current', 'newconfirm:yes')
   await ctx.reply(
     '🆕 <b>New session</b>\n\n' +
-    '• <b>Launch new session</b> — start a fresh Claude in a new window (this one keeps running)\n' +
+    '• <b>Add new session</b> — start a fresh Claude in a new window (this one keeps running)\n' +
     '• <b>Reset current</b> — clear this conversation in place',
     { parse_mode: 'HTML', reply_markup: keyboard })
 }
