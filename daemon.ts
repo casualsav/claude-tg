@@ -5217,10 +5217,20 @@ bot.on('message:text', async ctx => {
       newSessionReplyTargets.delete(nsKey)
       if (!dmCommandGate(ctx)) return
       const dir = await resolveNewSessionDir(text)
+      // If the specified folder doesn't exist, create it (recursively) so a new session can start
+      // in a fresh directory — the user asked for a path, so honour it rather than erroring out.
+      let created = false
+      if (!existsSync(dir)) {
+        try { mkdirSync(dir, { recursive: true }); created = true }
+        catch (e) {
+          await ctx.reply(`❌ Couldn't create <code>${escapeHtml(dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}`, { parse_mode: 'HTML' })
+          return
+        }
+      }
       const ok = await spawnSession(dir)
       await ctx.reply(ok
-        ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code> — it'll pop up here with a ▶️ Switch button shortly.`
-        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code> — does that folder exist?`,
+        ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — it'll pop up here with a ▶️ Switch button shortly.`
+        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
         { parse_mode: 'HTML' })
       return
     }
