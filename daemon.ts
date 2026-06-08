@@ -346,7 +346,7 @@ class TypingPresence {
   private workingUntil = 0                      // keep pinging until this time
   private timer: ReturnType<typeof setInterval> | null = null
   private static readonly PING_MS = 2_000          // Telegram typing expires ~5s; 2s = solid margin (was 4s)
-  private static readonly GRACE_MS = 5_000         // bridge brief gaps (tool boundaries / inject pauses)
+  private static readonly GRACE_MS = 2_500         // bridges the start gap only (work refreshes every 1.5s poll); keeps the post-reply tail short
   private static readonly SEND_TIMEOUT_MS = 1_500  // abandon a slow send so it can't pile up across ticks
 
   private pingAll(): void {
