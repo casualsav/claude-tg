@@ -169,6 +169,14 @@ function toolDetail(input: unknown): string {
   return s.length > 56 ? s.slice(0, 55) + '…' : s
 }
 
+// A `tg react …` Bash call. The reaction lands on the user's own message where they see it, so
+// echoing it in the activity / stream feed is pure noise — both feed builders drop it.
+function isReactionToolUse(b: any): boolean {
+  if (b?.name !== 'Bash') return false
+  const cmd = (b?.input as { command?: unknown })?.command
+  return typeof cmd === 'string' && /(^|[;&|]\s*)tg\s+react\b/.test(cmd)
+}
+
 // Tool calls made in the current (latest) turn — every assistant `tool_use` block after the
 // last real user message (tool_result entries skipped, so a turn spans its tool calls), each
 // summarised to name + a short detail. Oldest first.
@@ -188,7 +196,7 @@ export function currentTurnActivity(file: string): Activity[] {
     const content = entries[i].message?.content
     if (!Array.isArray(content)) continue
     for (const b of content as any[]) {
-      if (b?.type === 'tool_use' && typeof b.name === 'string') acts.push({ tool: b.name, detail: toolDetail(b.input) })
+      if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) acts.push({ tool: b.name, detail: toolDetail(b.input) })
     }
   }
   return acts
@@ -295,7 +303,7 @@ export function currentTurnFeed(file: string): FeedItem[] {
     const narration = e.message?.stop_reason === 'tool_use'
     for (const b of content as any[]) {
       if (narration && b?.type === 'text' && typeof b.text === 'string' && b.text.trim()) out.push({ kind: 'text', text: b.text.trim() })
-      else if (b?.type === 'tool_use' && typeof b.name === 'string') out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input) })
+      else if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input) })
     }
   }
   return out
