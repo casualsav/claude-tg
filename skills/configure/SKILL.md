@@ -92,8 +92,9 @@ Read both state files and give the user a complete picture:
 
 5. **Available actions** — briefly list what this skill can do so the menu is
    discoverable: `<token>` (save token), `transcribe` (voice), `mcp` (MCP server
-   on/off), `clear` (remove token), `uninstall` (stop the bot and tear down the
-   channel), plus `/telegram:access` for the allowlist. Keep it to one compact line.
+   on/off), `bang` (Telegram `!` shell — RCE, off by default), `clear` (remove token),
+   `uninstall` (stop the bot and tear down the channel), plus `/telegram:access` for
+   the allowlist. Keep it to one compact line.
 
 **Push toward lockdown — always.** The goal for every setup is `allowlist`
 with a defined list. `pairing` is not a policy to stay on; it's a temporary
@@ -213,6 +214,28 @@ Then tell the user it applies to **sessions started afterward** (Claude Code loa
 at launch) — and that off-MCP `claude-tg` sessions don't load the plugin's MCP server anyway
 (it ships disabled), so this doesn't affect them. (You can also flip this from
 Telegram with `/settings`.)
+
+### `bang [on | off]` — Telegram shell commands (off by default)
+
+Controls **bang shell**: whether an inbound Telegram message starting with `!` runs as a shell
+command on the host (in the focused pane's cwd) with output relayed back — like Claude Code's
+terminal `!` REPL (e.g. `!git status`). **Off by default.**
+
+⚠️ **This is remote code execution from a chat app.** Any allowlisted sender — or anyone who
+compromises the bot token or an allowlisted account — can run arbitrary commands. It stays gated by
+the access allowlist, but enabling it widens trust significantly. Confirm the user really wants it.
+Only ever flip it from **this terminal skill** — it is deliberately **not** a `/settings` toggle,
+because a Telegram-tappable switch would let a chat-side actor enable RCE.
+
+The switch is the `TELEGRAM_BANG_SHELL` line in `<state-dir>/.env`:
+- **No arg** → report current state (`TELEGRAM_BANG_SHELL=1` present = on, else off) + the warning.
+- **`on`** → ensure a `TELEGRAM_BANG_SHELL=1` line in `.env` (add if absent); keep the file `chmod 600`.
+- **`off`** → remove the `TELEGRAM_BANG_SHELL` line.
+
+Then **restart that instance's daemon** so it re-reads `.env` (the flag is read at startup):
+`kill "$(cat <state-dir>/daemon.pid)"` then `bun ~/.claude/channels/telegram/ensure-daemon.js`
+(enumerates every configured instance and relaunches any that's down). Tell the user it's now live
+for new inbound `!` messages (or disabled).
 
 ### `clear` — remove the token
 
