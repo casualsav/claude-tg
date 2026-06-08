@@ -100,16 +100,35 @@ live in the state dir, and the daemon reads them on first start.
    (If they'd rather pair after restart, skip this and see the note in Step 4.)
 3. **Voice transcription of inbound voice/audio notes?** One of:
    - `off` (voice arrives as a placeholder),
-   - `local` (Whisper on this machine — then ask **which model**: default
-     `large-v3-turbo`; smaller = faster/less accurate: `tiny`/`base`/`small`/`medium`/
-     `large-v3` — and **device** `cpu` or `cuda`),
+   - `local` (Whisper on this machine — **recommend a model from the hardware**, see below),
    - `groq` (ask for **GROQ_API_KEY**; default model `whisper-large-v3-turbo`),
    - `openai` (ask for **OPENAI_API_KEY**; default model `whisper-1`).
 
-   For `local`, no manual `pip` is needed: on the first voice note the daemon auto-provisions a
-   venv at `~/.claude/channels/telegram/whisper-venv` and installs `faster-whisper` into it (this
-   sidesteps PEP 668 externally-managed Python), recording its interpreter as
-   `TELEGRAM_WHISPER_PYTHON`. The only cost is a one-time delay on that first note.
+   **If they pick `local`, don't just default the model — size it to the machine and present the
+   options with a recommendation.** First probe the hardware:
+   ```sh
+   nproc                                                      # CPU cores
+   (command -v nvidia-smi >/dev/null && nvidia-smi -L) || echo "no CUDA GPU"
+   free -h | awk '/Mem:/{print $2" RAM"}'
+   ```
+   The model ladder (smallest/fastest → largest/most accurate): `tiny` → `base` → `small` →
+   `medium` → `large-v3`, plus `large-v3-turbo` (a distilled `large-v3`: near-large accuracy, much
+   faster). English-only `.en` variants (`tiny.en`…`medium.en`) are slightly better for English at
+   the same size. On CPU, latency scales with both model size **and** clip length. **Recommend by
+   hardware, then let them choose:**
+   - **CUDA GPU present** → `large-v3-turbo`, **device `cuda`** — best accuracy, still fast.
+   - **CPU-only, ≤4 cores** → **`small`** (the balanced pick; ~7s on a short note on a 4-core ARM
+     box), or `base` for snappier/rougher. `medium`/`large` are painfully slow here (`medium` ≈ 3×
+     `small`; a 30–40s note can take a minute+) — only if accuracy clearly outweighs speed.
+   - **CPU-only, 5–8 cores** → `small` for chat, or `medium` if they want accuracy and tolerate the
+     wait. `large`/`turbo` are GPU territory.
+   - **Tight RAM (<4 GB free)** → stay at `small` or below (`medium` peaks ~2 GB, `large` ~4 GB).
+
+   Also pick **device** (`cpu`, or `cuda` only if a GPU was detected) and keep **compute `int8`**
+   (good CPU default). Whichever model they choose, you **provision it during install** — see
+   "If `local`: provision the engine now" right after the config writes below. (Don't rely on a
+   first-voice-note auto-install: the daemon's `provisionWhisper` only fires from the `/settings`
+   voice toggle, **not** from a `local` value written straight into `.env` like this flow does.)
 4. **Auto-continue when a usage limit resets?** (default yes.)
 
 Markdown rendering is **always on** — Claude's replies are rendered as Telegram formatting; it
@@ -125,6 +144,7 @@ TELEGRAM_TRANSCRIBE=<off|local|groq|openai>
 TELEGRAM_TRANSCRIBE_MODEL=<model>           # local/groq/openai
 TELEGRAM_WHISPER_DEVICE=<cpu|cuda>          # local only
 TELEGRAM_WHISPER_COMPUTE=int8               # local only
+TELEGRAM_WHISPER_PYTHON=<venv>/bin/python   # local only — written by the provisioning step below
 GROQ_API_KEY=<key>                          # groq only
 OPENAI_API_KEY=<key>                        # openai only
 ```
@@ -135,6 +155,38 @@ use pairing instead if they didn't give an ID):
 { "dmPolicy": "allowlist", "allowFrom": ["<their-telegram-id>"], "groups": {}, "pending": {},
   "renderMarkdown": true, "autoContinue": <true|false> }
 ```
+
+**If `local`: provision the engine now (don't defer it to the first voice note).** Writing
+`TELEGRAM_TRANSCRIBE=local` into `.env` does **not** trigger the daemon's `provisionWhisper`
+(that only runs from the `/settings` voice toggle), so a `local` install left unprovisioned
+fails the first note with `faster-whisper not installed`. Set it up yourself, in order:
+
+1. **Ensure `python3-venv` (ensurepip) is present** — `python3 -m venv` fails without it
+   (`ensurepip is not available`), and PEP 668 system Python can't `pip install faster-whisper`
+   directly, so a venv is required. On Debian/Ubuntu:
+   ```sh
+   python3 -c 'import ensurepip' 2>/dev/null || sudo apt-get update && sudo apt-get install -y python3-venv
+   ```
+   (If you can't `sudo`, tell the user to run that one line, or fall back to `groq`/`openai`.)
+2. **Create the venv + install faster-whisper:**
+   ```sh
+   VENV=~/.claude/channels/telegram/whisper-venv
+   python3 -m venv "$VENV"
+   "$VENV/bin/python" -m pip install --quiet --upgrade pip
+   "$VENV/bin/python" -m pip install --quiet faster-whisper
+   "$VENV/bin/python" -c 'import faster_whisper; print("faster-whisper", faster_whisper.__version__)'
+   ```
+3. **Record the interpreter in `.env`** so the daemon uses it (not bare `python3`):
+   `TELEGRAM_WHISPER_PYTHON=<venv>/bin/python`.
+4. **Pre-pull the chosen model weights** so the first real note isn't stalled by a download
+   (`small` ≈ 250 MB, `medium` ≈ 1.5 GB, `large` ≈ 3 GB — into `~/.cache/huggingface`). Run the
+   bundled helper once on any short audio file, or just let the user know the first note carries a
+   one-time download delay:
+   ```sh
+   "$VENV/bin/python" "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)transcribe_local.py" <some.oga> <model>
+   ```
+   (The plugin cache exists only after Step 3's restart; if you provision before that, pre-pull
+   after the restart, or skip it and accept the one-time first-note delay.)
 
 ## 2. Install the plugin + wire the hooks/convention
 - In `~/.claude/settings.json` add the marketplace, enable the plugin, and add the
