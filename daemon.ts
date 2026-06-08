@@ -3272,20 +3272,34 @@ async function showUpdateDashboard(ctx: Context): Promise<void> {
     '🔄 <b>Update</b>\n\n' +
     `🌉 Telegram bridge: <b>v${escapeHtml(bridgeVersion())}</b>\n` +
     `🧠 Claude Code: <b>v${escapeHtml(claudeVer ?? '?')}</b>\n\n` +
-    'What do you want to update?',
+    'What do you want to update?\n\n' +
+    '💡 Or skip the buttons: <code>/update tg</code> (this bridge) · <code>/update claude</code> (Claude Code).',
     { parse_mode: 'HTML', reply_markup: new InlineKeyboard()
         .text('🌉 Update bridge', 'upd:bridge')
         .text('🧠 Update Claude', 'upd:claude') })
 }
 
-// Bare /update opens the dashboard; `/update check` still peeks at the bridge's own availability.
+// Kick off the bridge self-update (detached helper, with rollback) and report. Shared by the
+// `upd:bridge` button and `/update tg`.
+function runBridgeUpdate(chat: string): void {
+  void bot.api.sendMessage(chat, '🌉 Updating the Telegram bridge… progress will follow.', { parse_mode: 'HTML' }).catch(() => {})
+  const r = startUpdate(chat, 'apply')
+  if (!r.ok) void bot.api.sendMessage(chat, `❌ Couldn't start bridge update: ${escapeHtml(r.error ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
+}
+
+// Bare /update opens the dashboard. Subcommands skip it: `tg` updates this bridge, `claude` updates
+// Claude Code, `check` peeks at the bridge's own availability.
 bot.command('update', async ctx => {
   if (!dmCommandGate(ctx)) return
-  if ((ctx.match ?? '').toString().trim().toLowerCase() === 'check') {
-    const r = startUpdate(String(ctx.chat!.id), 'check')
+  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
+  const chat_id = String(ctx.chat!.id)
+  if (arg === 'check') {
+    const r = startUpdate(chat_id, 'check')
     if (!r.ok) await ctx.reply(`Couldn't check for updates: ${r.error}`)
     return
   }
+  if (arg === 'tg' || arg === 'bridge') { runBridgeUpdate(chat_id); return }
+  if (arg === 'claude' || arg === 'cc') { void updateClaude(chat_id); return }
   await showUpdateDashboard(ctx)
 })
 
