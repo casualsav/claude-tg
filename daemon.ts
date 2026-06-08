@@ -3815,13 +3815,7 @@ function lastModelInTranscript(file: string): string | null {
 function prettyModel(id: string | null): string | null {
   if (!id) return id
   const m = id.match(/(opus|sonnet|haiku)/i)
-  if (!m) return id
-  const name = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase()
-  // Append the major.minor version when the id carries one as adjacent digit groups, e.g.
-  // claude-opus-4-8 → Opus 4.8, claude-3-5-sonnet → Sonnet 3.5. Date-only ids (…-20240229) have
-  // no hyphenated pair, so they fall back to family-only.
-  const v = id.match(/(\d+)-(\d+)/)
-  return v ? `${name} ${v[1]}.${v[2]}` : name
+  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
 }
 
 // Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
