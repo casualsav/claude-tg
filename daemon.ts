@@ -78,7 +78,7 @@ type Access = {
   autoContinue?: boolean
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
   sessionPin?: boolean
-  replyMode?: 'all' | 'final' | 'hybrid' | 'stream' | 'live'   // stream/live are legacy aliases
+  replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
 }
 
 function defaultAccess(): Access {
@@ -975,16 +975,19 @@ function mirrorMode(): 'tools' | 'digest' | 'off' {
   return 'tools'   // unset, true, or 'tools'
 }
 
-// How Claude's text reaches Telegram. Default 'hybrid'.
-//   'all'    — every thought block as its own message, no tool mirror, plus the conclusion.
-//   'final'  — only the turn's conclusion block(s) + the live tool-use mirror.
-//   'hybrid' — one silent self-editing card (live thoughts + tool use), plus the conclusion
-//              block(s) as real messages. (Legacy values stream→all, live→hybrid.)
-function replyMode(): 'all' | 'final' | 'hybrid' {
+// How Claude's text reaches Telegram. Default 'hybrid'. Every mode sends only the turn's
+// conclusion block(s) as real messages; they differ only in the live self-editing card:
+//   'thoughts' — card shows only Claude's thoughts (💭 lines).
+//   'tools'    — card shows only tool calls (the legacy 'final' behavior; honors terminalMirror).
+//   'hybrid'   — card shows thoughts + tool calls interleaved.
+//   'off'      — no live card at all, just the final message.
+// Legacy aliases: all/stream→thoughts, final→tools, live→hybrid.
+function replyMode(): 'thoughts' | 'tools' | 'hybrid' | 'off' {
   const v = loadAccess().replyMode as string | undefined
-  if (v === 'all' || v === 'stream') return 'all'
-  if (v === 'final') return 'final'
-  return 'hybrid'
+  if (v === 'thoughts' || v === 'all' || v === 'stream') return 'thoughts'
+  if (v === 'tools' || v === 'final') return 'tools'
+  if (v === 'off') return 'off'
+  return 'hybrid'   // 'hybrid', 'live', or unset
 }
 
 // Claude's recent "● <text>" blocks from the pane — each leading bullet plus its indented
@@ -1086,19 +1089,21 @@ function renderHybridMirror(feed: FeedItem[], done: boolean): string {
 
 // The mirror text for the active mode, or null when there's nothing to show yet. All of it is
 // built from the transcript — no pane scraping — so it can't drop or garble blocks.
-//   all    → no card (every block goes out as its own message).
-//   hybrid → narration + tool calls interleaved (the thought stream the user asked for).
-//   final  → the tool-use feed (or, opt-in, the legacy pane digest; none if terminalMirror=off).
+//   off      → no card (just the final message).
+//   hybrid   → narration + tool calls interleaved.
+//   thoughts → narration only (the feed filtered to text items).
+//   tools    → the tool-use feed (or, opt-in, the legacy pane digest; none if terminalMirror=off).
 async function buildMirrorText(done: boolean): Promise<string | null> {
   const mode = replyMode()
-  if (mode === 'all') return null
+  if (mode === 'off') return null
   const cwd = activePaneId ? await paneCwd(activePaneId) : null
   const file = cwd ? resolveTranscript(cwd) : null
-  if (mode === 'hybrid') {
-    const feed = file ? currentTurnFeed(file) : []
+  if (mode === 'hybrid' || mode === 'thoughts') {
+    let feed = file ? currentTurnFeed(file) : []
+    if (mode === 'thoughts') feed = feed.filter(it => it.kind === 'text')   // thoughts-only card
     return feed.length ? renderHybridMirror(feed, done) : null
   }
-  // final
+  // tools (legacy 'final')
   if (mirrorMode() === 'off') return null
   if (mirrorMode() === 'digest') {
     const raw = await mirrorCapture()
@@ -1116,8 +1121,8 @@ async function buildMirrorText(done: boolean): Promise<string | null> {
 // "esc to interrupt" footer). Idempotent: repeated not-working ticks are a no-op once cleared.
 async function updateTerminalMirror(working: boolean): Promise<void> {
   const mode = replyMode()
-  // all → never a card. final+terminalMirror:off → no card.
-  if (mode === 'all' || (mode === 'final' && mirrorMode() === 'off')) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
+  // off → never a card. tools+terminalMirror:off → no card.
+  if (mode === 'off' || (mode === 'tools' && mirrorMode() === 'off')) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
 
   if (!working) { if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }   // turn settled → cap the card once
 
@@ -1170,14 +1175,13 @@ async function relayLoopTick(gen: number): Promise<void> {
   const working = file ? turnInProgress(file) : !idle
   await updateTerminalMirror(working).catch(() => {})
 
-  // Relay off the transcript, classified by stop_reason: 'all' sends every text block as it
-  // lands (play-by-play); 'final'/'hybrid' send only conclusion blocks (stop_reason !== tool_use)
-  // and skip mid-turn narration. No pane-idle gate — a block relays the moment it's written, so
-  // a turn's conclusion can't leak early and narration can't slip into final/hybrid. The card is
+  // Relay off the transcript, classified by stop_reason: every mode sends only conclusion blocks
+  // (stop_reason !== tool_use) and skips mid-turn narration — the live narration now lives in the
+  // card (thoughts/hybrid). No pane-idle gate — a block relays the moment it's written, so a
+  // turn's conclusion can't leak early and narration can't slip into the messages. The card is
   // already capped by updateTerminalMirror above (which ran before this send), so the ✅ Done
   // lands just before the conclusion message.
   if (relayCursorPrimed && file) {
-    const mode = replyMode()
     // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
     // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
     const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
@@ -1185,7 +1189,7 @@ async function relayLoopTick(gen: number): Promise<void> {
       if (!b.uuid || b.uuid === lastRelayedUuid) continue
       lastRelayedUuid = b.uuid                 // advance before the await so a fast tick can't double-send
       lastRelayedByFile.set(file, b.uuid)
-      if ((mode === 'all' || b.conclusion) && !isBanner(b.text)) {
+      if (b.conclusion && !isBanner(b.text)) {
         const chats = loadAccess().allowFrom
         process.stderr.write(`daemon: relaying ${b.text.length} chars (uuid ${b.uuid.slice(0, 8)}, ${b.conclusion ? 'conclusion' : 'narration'}) to ${chats.join(',')}\n`)
         await sendAgentText(chats, b.text).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
@@ -1649,7 +1653,8 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string): void {
   saveUsageNotifState()
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
-  const note = `\n\n⏰ I'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
+  const resetStr = `${fmtWhen(fireAt)} (in ${formatDuration(Math.max(0, fireAt - Date.now()))})`
+  const note = `\n\n⏰ Resets ${resetStr}.\nI'll ping you when it resets${loadAccess().autoContinue !== false ? ' and auto-continue' : ''}.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
   for (const chat_id of chats) {
     void bot.api.sendMessage(chat_id, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML' }).catch(() => {})
@@ -3235,20 +3240,25 @@ bot.command('mcp', async ctx => {
   await ctx.reply(`🔌 MCP mode is <b>${mcpEnabled() ? 'ON' : 'OFF'}</b> <i>(new sessions; relaunch to apply)</i>.\nToggle with <code>/mcp on</code> | <code>off</code>.`, { parse_mode: 'HTML' })
 })
 
-// /stream all|final|hybrid sets how Claude's text reaches you (default hybrid); bare shows it.
+// One-line descriptions of each stream mode, shared by /stream and the usage hint.
+const STREAM_DESC: Record<'thoughts' | 'tools' | 'hybrid' | 'off', string> = {
+  thoughts: 'a silent self-updating card of Claude’s thoughts, plus the conclusion block(s).',
+  tools: 'a silent self-updating card of tool calls, plus the conclusion block(s).',
+  hybrid: 'a silent self-updating card (live thoughts + tools), plus the conclusion block(s).',
+  off: 'just the final message — no live mirror.',
+}
+
+// /stream thoughts|tools|hybrid|off sets how Claude's text reaches you (default hybrid); bare shows it.
 bot.command('stream', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg === 'all' || arg === 'final' || arg === 'hybrid') {
+  if (arg === 'thoughts' || arg === 'tools' || arg === 'hybrid' || arg === 'off') {
     const access = loadAccess(); access.replyMode = arg; saveAccess(access)
   } else if (arg) {
-    await ctx.reply('Usage: <code>/stream all | final | hybrid</code>', { parse_mode: 'HTML' }); return
+    await ctx.reply('Usage: <code>/stream thoughts | tools | hybrid | off</code>', { parse_mode: 'HTML' }); return
   }
   const m = replyMode()
-  const desc = m === 'all' ? 'every thought as its own message, no tool mirror, plus the conclusion.'
-    : m === 'final' ? 'only the conclusion block(s), with the live tool-use mirror.'
-    : 'a silent self-updating card (live thoughts + tools), plus the conclusion block(s).'
-  await ctx.reply(`💬 Stream mode is <b>${m}</b> — ${desc}\nChange with <code>/stream all | final | hybrid</code>.`, { parse_mode: 'HTML' })
+  await ctx.reply(`💬 Stream mode is <b>${m}</b> — ${STREAM_DESC[m]}\nChange with <code>/stream thoughts | tools | hybrid | off</code>.`, { parse_mode: 'HTML' })
 })
 
 // ---- /schedule: deferred messages into a chosen session ----
@@ -3923,7 +3933,8 @@ bot.on('callback_query:data', async ctx => {
     const a = loadAccess()
     if (setMatch[1] === 'replymode') {
       const m = replyMode()
-      a.replyMode = m === 'all' ? 'final' : m === 'final' ? 'hybrid' : 'all'
+      // Cycle thoughts → tools → hybrid → off → thoughts.
+      a.replyMode = m === 'thoughts' ? 'tools' : m === 'tools' ? 'hybrid' : m === 'hybrid' ? 'off' : 'thoughts'
       saveAccess(a)
     } else if (setMatch[1] === 'pin') {
       a.sessionPin = a.sessionPin === false                 // flip
@@ -5089,8 +5100,8 @@ void (async () => {
               { command: 'sessions', description: 'List sessions (/sessions # switch, /sessions name # label)' },
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
-              { command: 'new', description: 'Start a fresh conversation' },
-              { command: 'stream', description: 'How replies arrive: all · final · hybrid' },
+              { command: 'new', description: 'Start a new session' },
+              { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
