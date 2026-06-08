@@ -69,8 +69,8 @@ ships disabled so the session is already plugin-less, and the flag is the daemon
 ## 6. Inbound delivery needs a bridge-signature tmux pane (most common "it's not working")
 **Symptom:** bot is paired and polling, but Telegram messages never reach a Claude session.
 **Cause:** off-MCP delivers inbound by **typing into a tmux pane**. The daemon auto-discovers a
-pane only if its `claude` argv carries a bridge signature — `--dangerously-skip-permissions`
-(the `claude-tg` alias) or the legacy `--strict-mcp-config` (`isPluginlessClaude`, `daemon.ts`).
+pane only if its `claude` argv carries the bridge signature — `--dangerously-skip-permissions`
+(the `claude-tg` alias; `isPluginlessClaude`, `daemon.ts`).
 A bare `claude` pane, or a Claude session **not running inside tmux**, is never adopted — so
 there's nowhere to deliver.
 **Extra gotcha:** spawning the session **detached** (e.g. `tmux new-session -d`) lands on the

@@ -247,7 +247,7 @@ Off-MCP keeps the plugin's MCP server disabled, so a plain `claude` is already p
 
 **Off-MCP (default):** run the work session in a tmux pane, launched so the daemon recognizes it as
 a bridge session. The signature the daemon scans for is the launch flag
-`--dangerously-skip-permissions` (the older `--strict-mcp-config` is still accepted too). **Auto-add
+`--dangerously-skip-permissions`. **Auto-add
 a `claude-tg` shortcut for it yourself** — append to the user's `~/.bashrc` (or `~/.zshrc`):
 ```sh
 alias claude-tg='claude --dangerously-skip-permissions'
@@ -267,8 +267,8 @@ From Telegram, message the session → you get its reply (read from the transcri
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 
 **If inbound never reaches the session (pin shows "No active session"):** the daemon only
-auto-adopts a pane whose `claude` argv carries a bridge signature — **`--dangerously-skip-permissions`**
-(the `claude-tg` alias) or **`--strict-mcp-config`** (legacy). A session started with a bare
+auto-adopts a pane whose `claude` argv carries the bridge signature — **`--dangerously-skip-permissions`**
+(the `claude-tg` alias). A session started with a bare
 `claude` (no such flag) is **not** adopted — confirm in `daemon.log` you see `adopted off-MCP pane …`
 or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `claude-tg`;
 or (b) pin the existing pane explicitly — get its id with

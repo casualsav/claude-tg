@@ -6,6 +6,9 @@ import type { Buffer } from 'node:buffer'
 
 export const STATE_DIR = process.env.TELEGRAM_STATE_DIR ?? join(homedir(), '.claude', 'channels', 'telegram')
 export const ACCESS_FILE = join(STATE_DIR, 'access.json')
+// Mutable preferences (stream mode, pin, auto-continue, voice, …). Split out from access.json so
+// static mode can freeze the security half (allowlist) while these stay editable from /settings.
+export const PREFS_FILE = join(STATE_DIR, 'prefs.json')
 export const APPROVED_DIR = join(STATE_DIR, 'approved')
 export const ENV_FILE = join(STATE_DIR, '.env')
 export const INBOX_DIR = join(STATE_DIR, 'inbox')

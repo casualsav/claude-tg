@@ -13,7 +13,7 @@ import { promisify } from 'node:util'
 import net from 'node:net'
 import {
   frame, makeLineReader, computeCodeFingerprint,
-  STATE_DIR, ACCESS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
+  STATE_DIR, ACCESS_FILE, PREFS_FILE, APPROVED_DIR, ENV_FILE, INBOX_DIR,
   SOCKET_PATH, DAEMON_PID_FILE, PENDING_EVENTS_FILE,
   DAEMON_LOG_FILE, WATCHDOG_PID_FILE, HEARTBEAT_FILE,
   type ShimToDaemon, type DaemonToShim, type InboundParams,
@@ -85,40 +85,54 @@ function defaultAccess(): Access {
   return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} }
 }
 
+// Security fields live in access.json (baked + immutable under static mode); everything else is a
+// mutable preference kept in prefs.json so /settings keeps working even under a static lockdown.
+const PREF_KEYS = [
+  'mentionPatterns', 'ackReaction', 'replyToMode', 'textChunkLimit', 'chunkMode',
+  'renderMarkdown', 'autoContinue', 'terminalMirror', 'sessionPin', 'replyMode',
+] as const satisfies readonly (keyof Access)[]
+
 const MAX_CHUNK_LIMIT = 4096
 const MAX_ATTACHMENT_BYTES = 50 * 1024 * 1024
 const PERMISSION_REPLY_RE = /^\s*(y|yes|n|no)\s+([a-km-z]{5})\s*$/i
 
-function readAccessFile(): Access {
+// Parse a JSON access/prefs file into a partial; {} on missing, moved-aside + {} on corrupt.
+function readJsonAccess(path: string): Partial<Access> {
   try {
-    const parsed = JSON.parse(readFileSync(ACCESS_FILE, 'utf8')) as Partial<Access>
-    return {
-      dmPolicy: parsed.dmPolicy ?? 'pairing',
-      allowFrom: parsed.allowFrom ?? [],
-      groups: parsed.groups ?? {},
-      pending: parsed.pending ?? {},
-      mentionPatterns: parsed.mentionPatterns,
-      ackReaction: parsed.ackReaction,
-      replyToMode: parsed.replyToMode,
-      textChunkLimit: parsed.textChunkLimit,
-      chunkMode: parsed.chunkMode,
-      renderMarkdown: parsed.renderMarkdown,
-      autoContinue: parsed.autoContinue,
-      terminalMirror: parsed.terminalMirror,
-      sessionPin: parsed.sessionPin,
-      replyMode: parsed.replyMode,
-    }
+    return JSON.parse(readFileSync(path, 'utf8')) as Partial<Access>
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return defaultAccess()
-    try { renameSync(ACCESS_FILE, `${ACCESS_FILE}.corrupt-${Date.now()}`) } catch {}
-    process.stderr.write(`telegram daemon: access.json corrupt, moved aside\n`)
-    return defaultAccess()
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return {}
+    try { renameSync(path, `${path}.corrupt-${Date.now()}`) } catch {}
+    process.stderr.write(`telegram daemon: ${path} corrupt, moved aside\n`)
+    return {}
   }
 }
 
-const BOOT_ACCESS: Access | null = STATIC
+// Security half — dmPolicy/allowFrom/groups/pending from access.json. Baked at boot in static mode.
+function readSecurity(): Access {
+  const p = readJsonAccess(ACCESS_FILE)
+  return {
+    dmPolicy: p.dmPolicy ?? 'pairing',
+    allowFrom: p.allowFrom ?? [],
+    groups: p.groups ?? {},
+    pending: p.pending ?? {},
+  }
+}
+
+// Preference half — from prefs.json; always mutable, even under static mode. Migration: before
+// prefs.json exists, fall back to any pref fields still living in the legacy combined access.json.
+function readPrefs(): Partial<Access> {
+  let raw = readJsonAccess(PREFS_FILE)
+  if (Object.keys(raw).length === 0) raw = readJsonAccess(ACCESS_FILE)
+  const out: Partial<Access> = {}
+  for (const k of PREF_KEYS) if (raw[k] !== undefined) (out as Record<string, unknown>)[k] = raw[k]
+  return out
+}
+
+// Only the security half is frozen at boot under static mode (tamper-proof allowlist).
+const BOOT_SECURITY: Access | null = STATIC
   ? (() => {
-      const a = readAccessFile()
+      const a = readSecurity()
       if (a.dmPolicy === 'pairing') {
         process.stderr.write('telegram daemon: static mode — dmPolicy "pairing" downgraded to "allowlist"\n')
         a.dmPolicy = 'allowlist'
@@ -128,7 +142,8 @@ const BOOT_ACCESS: Access | null = STATIC
     })()
   : null
 
-function loadAccess(): Access { return BOOT_ACCESS ?? readAccessFile() }
+// Merge the frozen-or-live security half with the always-live preferences.
+function loadAccess(): Access { return { ...(BOOT_SECURITY ?? readSecurity()), ...readPrefs() } }
 
 function assertAllowedChat(chat_id: string): void {
   const access = loadAccess()
@@ -149,12 +164,21 @@ function resolveChatId(raw: unknown): string {
   throw new Error(s ? `chat "${s}" not resolvable` : 'no chat id given and not exactly one allowlisted chat')
 }
 
+function writeJsonAtomic(path: string, obj: unknown): void {
+  const tmp = path + '.tmp'
+  writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 })
+  renameSync(tmp, path)
+}
+
 function saveAccess(a: Access): void {
-  if (STATIC) return
   mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
-  const tmp = ACCESS_FILE + '.tmp'
-  writeFileSync(tmp, JSON.stringify(a, null, 2) + '\n', { mode: 0o600 })
-  renameSync(tmp, ACCESS_FILE)
+  // Preferences are always persisted — even under static mode, so /settings keeps working.
+  const prefs: Record<string, unknown> = {}
+  for (const k of PREF_KEYS) if (a[k] !== undefined) prefs[k] = a[k]
+  writeJsonAtomic(PREFS_FILE, prefs)
+  // Security half is frozen under static mode (tamper-proof allowlist); writable otherwise.
+  if (STATIC) return
+  writeJsonAtomic(ACCESS_FILE, { dmPolicy: a.dmPolicy, allowFrom: a.allowFrom, groups: a.groups, pending: a.pending })
 }
 
 function pruneExpired(a: Access): boolean {
@@ -1244,8 +1268,8 @@ function startRelayLoop(): void {
 // `claude` pane on its own and adopt it — no .env edit / restart to bind a work session.
 // Plugin (MCP) sessions register over the shim socket, so they live in `sessions` and are
 // excluded here; and we only adopt panes whose claude argv carries the bridge opt-in flag
-// (--dangerously-skip-permissions or --strict-mcp-config), so a plain unrelated claude is never
-// grabbed. Explicit FORCE_PANE always wins.
+// (--dangerously-skip-permissions), so a plain unrelated claude is never grabbed. Explicit
+// FORCE_PANE still wins when set, but is no longer needed — discovery binds the pane on its own.
 let adoptedPaneId: string | null = null
 
 // Every plugin-less pane we currently know about (the focused one plus any unfocused
@@ -1275,16 +1299,14 @@ async function processArgv(pid: string): Promise<string> {
 }
 
 // True if the pane shell `panePid` has a `claude` child the user opted in for bridging. The
-// opt-in is the launch flag: `--dangerously-skip-permissions` (the `claude-tg` autonomy alias)
-// or, kept for back-compat, `--strict-mcp-config` (the older off-MCP launcher). Either marks the
-// pane as "bridge me", so a plain `claude` doing unrelated work is never grabbed. (The plugin's
-// MCP server ships disabled, so off-MCP no longer hinges on --strict-mcp-config — it's just one
-// of the accepted signatures now.)
+// opt-in is the launch flag `--dangerously-skip-permissions` (the `claude-tg` autonomy alias),
+// which marks the pane as "bridge me" so a plain `claude` doing unrelated work is never grabbed.
+// (The legacy `--strict-mcp-config` signature is gone — off-MCP works without it now.)
 async function isPluginlessClaude(panePid: string): Promise<boolean> {
   for (const pid of await processTree(panePid)) {
     const argv = await processArgv(pid)
     if (!argv || !/\bclaude\b/.test(argv)) continue
-    return argv.includes('--dangerously-skip-permissions') || argv.includes('--strict-mcp-config')
+    return argv.includes('--dangerously-skip-permissions')
   }
   return false
 }
