@@ -7,6 +7,7 @@ allowed-tools:
   - Write
   - Bash(ls *)
   - Bash(mkdir *)
+  - Bash(tmux display-message *)
 ---
 
 # /telegram:access — Telegram Channel Access Management
@@ -28,12 +29,18 @@ Arguments passed: `$ARGUMENTS`
 
 ## Instances (more than one bot)
 
-If the user runs multiple bridges, an optional leading **instance slot number** in `$ARGUMENTS`
-picks which one: **`1` or omitted** → `~/.claude/channels/telegram`; **`N`** →
-`~/.claude/channels/telegramN`. Substitute that path for `~/.claude/channels/telegram` everywhere
-below (its own `access.json`, `approved/`, etc.). Each bot's allowlist/pairings are fully isolated.
-That instance's daemon re-reads its own `access.json` live — no restart needed. Strip the leading
-slot number (if present) before parsing the rest of the arguments.
+If the user runs multiple bridges, **resolve which instance this targets**, in priority order:
+1. **Explicit leading slot number** in `$ARGUMENTS` (e.g. `/telegram:access 2 pair <code>`).
+2. **Otherwise, the current pane's slot:** `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`
+   — if non-empty (e.g. `2`), use it, so inside a `claude-tg 2` session you can just run
+   `/telegram:access pair <code>` and it targets slot 2.
+3. **Otherwise** → slot `1`.
+
+State dir: slot `1` → `~/.claude/channels/telegram`; slot `N` → `~/.claude/channels/telegramN`.
+Substitute that path for `~/.claude/channels/telegram` everywhere below (its own `access.json`,
+`approved/`, etc.). Each bot's allowlist/pairings are fully isolated; that instance's daemon
+re-reads its own `access.json` live — no restart needed. Strip the leading slot number (if present)
+before parsing the rest of the arguments.
 
 ---
 

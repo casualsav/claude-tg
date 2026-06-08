@@ -16,6 +16,7 @@ allowed-tools:
   - Bash(rm -rf ~/.claude/channels/telegram*)
   - Bash(rm -f ~/.bun/bin/tg ~/.local/bin/tg)
   - Bash(bun *ensure-daemon*)
+  - Bash(tmux display-message *)
 ---
 
 # /telegram:configure — Telegram Channel Setup
@@ -30,20 +31,26 @@ Arguments passed: `$ARGUMENTS`
 ## Instances (running more than one bot)
 
 A user can run several **independent** bridges (different bots) on one machine, each in its own
-state dir. An optional leading **instance slot number** in `$ARGUMENTS` selects which:
+state dir. **Resolve which instance this invocation targets**, in priority order:
 
-- **slot `1` or omitted** → the default dir `~/.claude/channels/telegram` (everything below uses this).
-- **slot `N` (2, 3, …)** → `~/.claude/channels/telegramN`. **Substitute that path for
-  `~/.claude/channels/telegram` everywhere in the steps below**, and set `TELEGRAM_INSTANCE_ID` is
-  *not* needed — the daemon derives id `N` from the `telegramN` dir name.
+1. **Explicit leading slot number** in `$ARGUMENTS` (e.g. `/telegram:configure 2 <token>`) → that slot.
+2. **Otherwise, the current pane's slot.** The session you're running in may itself be tagged for a
+   slot (it was launched with `claude-tg N`). Read it:
+   `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`. If that prints a non-empty
+   value (e.g. `2`), use it — so a user who ran `claude-tg 2` can just type `/telegram:configure
+   <token>` here and it correctly targets slot 2 (the very session they're in).
+3. **Otherwise** → slot `1` (the default).
 
-So `/telegram:configure 2 <token>` configures bot #2 in `~/.claude/channels/telegram2/`; its
-allowlist/pairings live in that dir's own `access.json`, fully isolated from bot #1.
+State dir for the resolved slot: slot `1` → `~/.claude/channels/telegram`; slot `N` →
+`~/.claude/channels/telegramN`. **Substitute that path for `~/.claude/channels/telegram` everywhere
+in the steps below.** The daemon derives instance id `N` from the `telegramN` dir name
+(`TELEGRAM_INSTANCE_ID` is not needed). Each slot's token/allowlist/pairings are fully isolated.
 
 **After writing a NEW slot's token,** bring its daemon up now (it isn't covered by the already-running
 hook until the next session start): run `bun ~/.claude/channels/telegram/ensure-daemon.js` — it
-enumerates every configured slot and launches any that's down. Then tell the user to launch work
-panes for it with **`claude-tg N`** (the launcher functions take the slot number).
+enumerates every configured slot and launches any that's down. The new daemon then auto-discovers
+and adopts the tagged pane (e.g. the `claude-tg N` session the user is in). For panes elsewhere,
+tell the user to launch them with **`claude-tg N`**.
 
 Strip the leading slot number (if present) before parsing the rest of the arguments below.
 
