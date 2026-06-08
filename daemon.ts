@@ -2596,7 +2596,7 @@ async function performStop(): Promise<string> {
 }
 
 // Mode picker — a button per mode (current marked ●) plus a quick-switch tip. Shared by /mode
-// and the 🧭 Mode button; the mode:set:<mode> callback applies a tapped choice.
+// and the 🎛️ Mode button; the mode:set:<mode> callback applies a tapped choice.
 const MODES: CcMode[] = ['default', 'acceptEdits', 'plan', 'auto', 'bypassPermissions']
 const MODE_TIP = '💡 Tip: use /default, /acceptedits, /plan, /auto, /bypass for fast switching'
 
@@ -2615,7 +2615,7 @@ async function doModePicker(ctx: Context): Promise<void> {
   const cap = await capturePane(activePaneId)
   if (!onNormalPrompt(cap)) { await ctx.reply('⚠️ The terminal is on another screen (settings/menu) — can’t change the mode right now.'); return }
   const current = detectCurrentMode(cap)
-  await ctx.reply(`🧭 <b>Mode</b> — currently ${modeLabel(current)}\n\n${MODE_TIP}`, { parse_mode: 'HTML', reply_markup: modePickerKeyboard(current) })
+  await ctx.reply(`🎛️ <b>Mode</b> — currently ${modeLabel(current)}\n\n${MODE_TIP}`, { parse_mode: 'HTML', reply_markup: modePickerKeyboard(current) })
 }
 
 // Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
@@ -2819,7 +2819,7 @@ async function runReadout(chatId: string, kind: 'cost' | 'context'): Promise<voi
 // ---- Control bar (docked quick-action keyboard) ----
 // Buttons send their label as a normal message; the message:text handler matches
 // these exact labels and routes each to the action above before any other handling.
-const BTN_MODE = '🧭 Mode'
+const BTN_MODE = '🎛️ Mode'
 const BTN_MODEL = '🧠 Model'
 const BTN_SESSIONS = '🖥️ Session'
 const BTN_COST = '📊 Cost'
@@ -2846,7 +2846,7 @@ function startHelpText(paired: boolean): string {
     `• Send 📷 photos, 📎 files, or 🎙️ voice notes — they're handed to the session.\n` +
     `• Whatever the agent says last comes straight back to you here.\n\n` +
 
-    `🧭 <b>Modes &amp; model</b>\n` +
+    `🎛️ <b>Modes &amp; model</b>\n` +
     `<code>/mode</code> — interactive mode switcher\n` +
     `<code>/mode plan·auto·default·acceptedits·bypass</code> — jump to a mode\n` +
     `<code>/model</code> — show the model (<code>/model &lt;name&gt;</code> to switch)\n\n` +
@@ -2868,7 +2868,7 @@ function startHelpText(paired: boolean): string {
     `<code>/new</code> — start a fresh conversation\n` +
     `<code>/autocontinue</code> — auto-send "continue" when the limit resets\n\n` +
 
-    `📌 <b>Pinned bar</b> — your session · model · mode, with 🖥️ 🧠 🧭 quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
+    `📌 <b>Pinned bar</b> — your session · model · mode, with 🖥️ 🧠 🎛️ quick buttons (<code>/pin</code> to toggle). <code>/dock</code> shows a tap-keyboard of quick actions.\n` +
     `⚙️ <code>/settings</code> — stream, pin, auto-continue, voice in one panel (<code>/mcp</code> toggles MCP mode).\n` +
     `🔁 Any other <code>/command</code> is relayed straight to Claude Code.`
 
@@ -3749,7 +3749,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   if (activePaneId) {
     try {
       const cap = await capturePane(activePaneId)
-      // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🧭.
+      // Strip modeLabel's leading per-mode emoji — the pin uses a single generic 🎛️.
       if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).replace(/^\S+\s+/, '')
       status = parseStatusline(cap)
     } catch {}
@@ -3763,10 +3763,11 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 
   // First line is the collapsed preview Telegram shows up top — keep it identity-only. Everything
   // below is revealed when the pin is expanded, grouped into rule-separated cards.
-  const quick = status?.h5 ? ` • 📊 ${status.h5.pct}%` : ''
+  // Tagline order: session · mode · model · 5h usage, then the effort/think badges.
+  const usage = status?.h5 ? ` • 📊 ${status.h5.pct}%` : ''
   const effortBadge = status?.effort ? ` • ⚡ ${escapeHtml(status.effort)}` : ''
   const thinkBadge = status?.think ? ' • ✻ think' : ''
-  const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${quick} • 🧠 ${escapeHtml(model ?? '—')}${effortBadge} • 🧭 ${escapeHtml(mode)}${thinkBadge}`
+  const head = `🖥️ <b>${escapeHtml(cur.label)}</b> • 🎛️ ${escapeHtml(mode)} • 🧠 ${escapeHtml(model ?? '—')}${usage}${effortBadge}${thinkBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
@@ -3794,7 +3795,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
 function pinKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('🖥️ Sessions', 'pin:sessions').text('⚙️ Settings', 'pin:settings').row()
-    .text('🧠 Model', 'pin:model').text('🧭 Mode', 'pin:mode').row()
+    .text('🧠 Model', 'pin:model').text('🎛️ Mode', 'pin:mode').row()
     .text('💾 Context', 'pin:context').text('🗜️ Compact', 'pin:compact').row()
     .text('💰 Cost', 'pin:cost').text('🧹 Clear', 'pin:clear')
 }
@@ -4159,7 +4160,7 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText(`Could not switch to ${modeLabel(target)} — try again.`).catch(() => {})
       return
     }
-    await ctx.editMessageText(`🧭 <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
+    await ctx.editMessageText(`🎛️ <b>Mode</b> — now ${modeLabel(reached)}\n\n${MODE_TIP}`, {
       parse_mode: 'HTML', reply_markup: modePickerKeyboard(reached),
     }).catch(() => {})
     void updateSessionPin()
