@@ -3949,7 +3949,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
   // below is revealed when the pin is expanded, grouped into rule-separated cards.
   // Tagline order: session · usage · model · effort · mode, then the think badge. Items are
   // separated by a double space — the emojis act as dividers (restore ` • ` to revert).
-  const usage = status?.h5 ? `  🧮 ${status.h5.pct}%` : ''
+  const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
   const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
   const thinkBadge = status?.think ? '  ✻ think' : ''
   const head = `🖥️ <b>${escapeHtml(cur.label)}</b>${usage}  🧠 ${escapeHtml(model ?? '—')}${effortBadge}  🎚️ ${escapeHtml(mode)}${thinkBadge}`
@@ -3966,7 +3966,7 @@ async function sessionPinText(rows: SessionRow[]): Promise<string> {
     if (ct.length) usage.push(ct.join('  ·  '))
     if (usage.length) groups.push(usage.join('\n'))
     const lim: string[] = []
-    if (status.h5) lim.push(`🧮 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
+    if (status.h5) lim.push(`📈 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
     if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
     if (lim.length) groups.push(lim.join('\n'))
   }
