@@ -1056,7 +1056,8 @@ function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   for (const it of feed.slice(-MIRROR_FEED)) {
     if (it.kind === 'text') {
       const t = it.text.replace(/\s+/g, ' ').trim()
-      lines.push(`💭 <i>${escapeHtml(t.length > 160 ? t.slice(0, 159) + '…' : t)}</i>`)
+      // Test (reversible): thoughts rendered plain, not italic — wrap in <i>…</i> to revert.
+      lines.push(`💭 ${escapeHtml(t.length > 160 ? t.slice(0, 159) + '…' : t)}`)
     } else {
       const [emoji, label] = toolBadge(it.tool)
       const d = it.detail ? `: <code>${escapeHtml(it.detail)}</code>` : ''
@@ -3616,7 +3617,8 @@ function pinKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('🖥️ Sessions', 'pin:sessions').text('⚙️ Settings', 'pin:settings').row()
     .text('🧠 Model', 'pin:model').text('🧭 Mode', 'pin:mode').row()
-    .text('💾 Context', 'pin:context').text('💰 Cost', 'pin:cost')
+    .text('💾 Context', 'pin:context').text('🗜️ Compact', 'pin:compact').row()
+    .text('💰 Cost', 'pin:cost').text('🧹 Clear', 'pin:clear')
 }
 
 // True when an edit failed because the target message is gone (deleted) rather than a transient
@@ -3876,6 +3878,19 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery().catch(() => {})
     await doReadout(ctx, data === 'pin:context' ? 'context' : 'cost')
+    return
+  }
+
+  // Pinned-message session actions → /compact (relay) and /clear (confirm + reset).
+  if (data === 'pin:compact' || data === 'pin:clear') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (data === 'pin:clear') { await confirmNewSession(ctx); return }
+    if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+    void relaySlashCommand(activePaneId, paneWatcher, '/compact', String(ctx.chat!.id), ctx.callbackQuery.message!.message_id)
     return
   }
 
@@ -5054,21 +5069,16 @@ void (async () => {
             [
               { command: 'start', description: 'Welcome + everything this bot can do' },
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
-              { command: 'model', description: 'Show the current model (or /model <name> to switch)' },
-              { command: 'mode', description: 'Interactive mode switcher' },
+              { command: 'status', description: 'Re-post the status pin at the bottom' },
+              { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
               { command: 'sessions', description: 'List sessions (/sessions # switch, /sessions name # label)' },
+              { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'new', description: 'Start a fresh conversation' },
-              { command: 'terminal', description: 'Show recent terminal activity (/terminal [N] lines)' },
+              { command: 'stream', description: 'How replies arrive: all · final · hybrid' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
-              { command: 'dock', description: 'Show the docked control bar (/dock off to hide)' },
-              { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
-              { command: 'stream', description: 'How replies arrive: all · final · hybrid' },
-              { command: 'mcp', description: 'Toggle MCP mode for new sessions' },
-              { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
-              { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
             ],
             { scope: { type: 'all_private_chats' } },
