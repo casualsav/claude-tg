@@ -363,3 +363,9 @@ adoptable pane.
   sessions and reboots — no MCP session needed to keep it alive.
 - `TELEGRAM_FORCE_PANE=<pane>` in the `.env` overrides auto-discovery when you want a specific
   pane.
+- **Running two bridges for the same user** (two bots, one tmux server): give each its own
+  `TELEGRAM_STATE_DIR` (own socket/pid/token/access — clears the single-instance lock) **and** its
+  own **instance id**. The id scopes the `@tg_bridge` pane marker so each daemon adopts only its own
+  panes. The default state dir keeps id `1`; a custom state dir derives the id from its basename, or
+  set `TELEGRAM_INSTANCE_ID` explicitly. Tag that instance's work panes to match — e.g.
+  `alias claude-tg2='tmux set -p @tg_bridge <id> 2>/dev/null; claude --allow-dangerously-skip-permissions'`.

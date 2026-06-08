@@ -1432,8 +1432,21 @@ const offMcpPanes = new Set<string>()
 // the tmux layer, so it's fully decoupled from claude's CLI/argv (no fragile launch flag a claude
 // version bump can reject — `--tg` did exactly that) and from autonomy mode. Daemon-spawned panes
 // set it themselves (see spawnSession); a user-launched bridge session sets it via the claude-tg
-// alias (`tmux set -p @tg_bridge 1`). A plain claude pane without it is never grabbed.
+// alias (`tmux set -p @tg_bridge <instance-id>`). A plain claude pane without it is never grabbed.
 const BRIDGE_PANE_OPT = '@tg_bridge'
+
+// The marker's VALUE is the instance id, so multiple daemons on the SAME user/tmux server (each
+// with its own TELEGRAM_STATE_DIR + bot token) adopt only their own panes instead of fighting over
+// every marked pane. Explicit TELEGRAM_INSTANCE_ID wins; otherwise the default state dir keeps the
+// legacy id "1" (so existing `@tg_bridge=1` tags + the claude-tg alias keep working with no
+// migration), and any custom state dir derives a stable id from its basename. Sanitised to a safe
+// token (the value is read back through a tab-delimited list-panes format).
+const DEFAULT_STATE_DIR = join(homedir(), '.claude', 'channels', 'telegram')
+const INSTANCE_ID = (
+  process.env.TELEGRAM_INSTANCE_ID
+  || (STATE_DIR === DEFAULT_STATE_DIR ? '1' : basename(STATE_DIR))
+).replace(/[^A-Za-z0-9_-]/g, '') || '1'
+if (INSTANCE_ID !== '1') process.stderr.write(`daemon: bridge instance id = ${INSTANCE_ID} (state dir ${STATE_DIR})\n`)
 
 // Scan tmux for every adoptable bridge-marked pane (registered MCP sessions excluded). Reads the
 // pane option straight off list-panes — no process-tree walk, no argv parsing.
@@ -1449,7 +1462,7 @@ async function findOffMcpPanes(): Promise<string[]> {
   for (const line of out.split('\n')) {
     if (!line.trim()) continue
     const [paneId, mark] = line.split('\t')
-    if (mark !== '1') continue            // pane not opted in for bridging
+    if (mark !== INSTANCE_ID) continue    // not opted in for THIS instance (blank, or another daemon's)
     if (sessions.has(paneId)) continue    // a registered (plugin/MCP) session — never adopt
     candidates.push(paneId)
   }
@@ -4254,7 +4267,7 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
     if (newPane) {
-      try { await exec('tmux', ['set-option', '-p', '-t', newPane, BRIDGE_PANE_OPT, '1'], { timeout: 2000 }) } catch {}
+      try { await exec('tmux', ['set-option', '-p', '-t', newPane, BRIDGE_PANE_OPT, INSTANCE_ID], { timeout: 2000 }) } catch {}
       registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
     }
     return true
