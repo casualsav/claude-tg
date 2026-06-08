@@ -638,21 +638,29 @@ function looksLikeModel(s: string): boolean {
 
 function parseCurrentModel(pickerText: string): string | null {
   const lines = pickerText.split('\n').map(l => stripAnsi(l))
-  // Each option renders as "[❯] N. <Label> [✔]   <Version> · <description>", with
-  // the active model marked by ✔ (the cursor ❯ also opens on it). Take that row and
-  // return the version — the first "·"-segment of the description column (the text
-  // after the run of 2+ spaces that separates label from description).
+  // Each option renders as "[❯] N. <Label>   <description>", with the active model
+  // marked by ✔ (the cursor ❯ also opens on it). The model identity lives in
+  // EITHER column depending on the choice: "Default" rows carry it in the
+  // description ("Opus 4.8 · …"), while a picked "Opus"/"Sonnet" row carries the
+  // bare name in the label and plain prose ("Most capable for complex work") in the
+  // description. So scan the whole row for a model family token rather than trusting
+  // a fixed column (the old "last column" heuristic returned the prose description).
   const isOption = (l: string) => /^\s*(?:[❯►▶]\s*)?\d+[.)]\s/.test(l)
   const row =
     lines.find(l => isOption(l) && /[❯►▶]/.test(l) && /[✔✓]/.test(l)) ??
     lines.find(l => isOption(l) && /[✔✓]/.test(l)) ??
     lines.find(l => /^\s*[❯►▶]\s*\d+[.)]\s/.test(l))
   if (!row) return null
+  // A family name + optional version — "Opus 4.8", "Sonnet 4.6", "Haiku". Prefer a
+  // match that carries a version number (more specific) over a bare family word.
+  const tokens = [...row.matchAll(/\b(?:Opus|Sonnet|Haiku)\b(?:\s+v?\d[\d.]*)?/gi)].map(m => m[0].trim())
+  const token = tokens.find(t => /\d/.test(t)) ?? tokens[0]
+  if (token && looksLikeModel(token)) return token
+  // Fallback for an unfamiliar layout: the label column (the text before the run of
+  // 2+ spaces), filtered to model-shaped strings.
   const rest = row.replace(/^\s*[❯►▶]?\s*\d+[.)]\s*/, '').trim()
-  const cols = rest.split(/\s{2,}/).map(s => s.trim()).filter(Boolean)
-  const desc = cols.length >= 2 ? cols[cols.length - 1] : (cols[0] ?? '')
-  const name = desc.split('·')[0].replace(/[✔✓]/g, '').trim()
-  return looksLikeModel(name) ? name : null
+  const label = rest.split(/\s{2,}/)[0]?.replace(/[✔✓]/g, '').trim() ?? ''
+  return looksLikeModel(label) ? label : null
 }
 
 // Read the active model by briefly opening the /model picker, reading the marked
@@ -2624,24 +2632,39 @@ async function performReset(command: string): Promise<string> {
   reactionCueArmed = true   // context cleared by /new or /clear → re-surface the reaction affordance
 
   const model = await readCurrentModel(activePaneId!, paneWatcher!)
+  const head = command === '/clear' ? '🧹 Conversation cleared' : '✅ New session started'
   return model
-    ? `✅ New session started · model: <b>${escapeHtml(model)}</b>`
-    : '✅ New session started.'
+    ? `${head} · model: <b>${escapeHtml(model)}</b>`
+    : `${head}.`
 }
 
-// Ask for confirmation before /new resets the session (the 🆕 New button is easy
+// Ask for confirmation before /new resets the session (the ➕ New button is easy
 // to hit by accident); the reset runs on the Yes tap — see the newconfirm handler.
+// /new keeps the two-way choice (launch a fresh session vs. reset in place);
+// /clear and /reset use confirmResetSession below — a plain Yes/No reset-in-place.
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
   const keyboard = new InlineKeyboard()
-    .text('🆕 Launch new session', 'newsession')
+    .text('➕ Launch new session', 'newsession')
     .text('♻️ Reset current', 'newconfirm:yes')
   await ctx.reply(
     '🆕 <b>New session</b>\n\n' +
     '• <b>Launch new session</b> — start a fresh Claude in a new window (this one keeps running)\n' +
     '• <b>Reset current</b> — clear this conversation in place',
     { parse_mode: 'HTML', reply_markup: keyboard })
+}
+
+// /clear and /reset just wipe the current conversation in place — a single Yes/No
+// confirmation (no "launch new" branch; that stays exclusive to /new). The clear
+// runs on the Yes tap — see the clearconfirm handler.
+async function confirmResetSession(ctx: Context): Promise<void> {
+  if (!dmCommandGate(ctx)) return
+  if (!activePaneId || !paneWatcher) { await ctx.reply('No active Claude Code session with tmux.'); return }
+  const keyboard = new InlineKeyboard()
+    .text('✅ Yes, clear', 'clearconfirm:yes')
+    .text('✖️ No', 'clearconfirm:no')
+  await ctx.reply('♻️ Clear this conversation in place?\n\nTap to confirm:', { reply_markup: keyboard })
 }
 
 // ---- Shared actions (used by both slash commands and the control bar) ----
@@ -3086,7 +3109,7 @@ bot.command('effort', async ctx => {
 // /new asks to confirm, then resets and reports the model. /clear is a hidden
 // alias for /new (kept for muscle memory; deliberately left out of the menu).
 bot.command('new', confirmNewSession)
-bot.command('clear', confirmNewSession)
+bot.command(['clear', 'reset'], confirmResetSession)
 
 // /compact relays straight to the session — compact the conversation to free context.
 bot.command('compact', async ctx => {
@@ -4483,6 +4506,28 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // /clear + /reset confirmation: a plain Yes/No reset-in-place (no "launch new" branch).
+  if (data === 'clearconfirm:yes' || data === 'clearconfirm:no') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (data === 'clearconfirm:no') {
+      await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
+      await ctx.editMessageText('✖️ Cancelled — conversation kept.').catch(() => {})
+      return
+    }
+    if (!activePaneId || !paneWatcher) {
+      await ctx.answerCallbackQuery({ text: 'No active tmux session.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Clearing…' }).catch(() => {})
+    await ctx.editMessageText('🧹 Clearing the conversation…').catch(() => {})
+    const result = await performReset('/clear')
+    await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // Confirm/cancel exiting the only session (see the /exit handler's only-session guard).
   if (data === 'exitconfirm:yes' || data === 'exitconfirm:no') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
@@ -5483,6 +5528,7 @@ void (async () => {
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'new', description: 'Start a new session' },
+              { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
               { command: 'effort', description: 'Reasoning effort: low · medium · high · max' },
               { command: 'cost', description: 'Show the session cost readout' },
