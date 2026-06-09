@@ -51,7 +51,8 @@ export const usageWarnState = new Map<string, { resetKey: string; threshold: num
 export const voiceNudged = new Set<string>()
 
 // ---- Scheduled messages ----
-export const scheduledTimers = new Map<string, ReturnType<typeof setTimeout>>()
+// The fire-time queue + timers live in scheduler.ts; only the force-reply targets (the
+// daemon's command/inbound plumbing) are shared here.
 export const scheduleReplyTargets = new Map<string, { fireAt: number; paneId: string | null; sessionLabel: string }>()
 
 // ---- Session names / pins ----

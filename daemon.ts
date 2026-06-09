@@ -37,10 +37,15 @@ import {
   _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
   pendingMultiSelect, freeTextPrompts, freeTextReplyTargets, chatPrompts, authUrlMessageIds,
   lastRelayedByFile, unreadNotified, unreadNotifMsgs, mirrorMsgIds, offMcpPanes,
-  usageWarnState, voiceNudged, scheduledTimers, scheduleReplyTargets,
+  usageWarnState, voiceNudged, scheduleReplyTargets,
   sessionNames, renameReplyTargets, nameReplyTargets, sessionPins, pinTextCache,
   newSessionReplyTargets,
 } from './state.ts'
+import { parseDuration, formatDuration, fmtWhen } from './time.ts'
+import {
+  initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
+  scheduledListText, scheduledCancelKeyboard, scheduleDashboard, MAX_TIMEOUT,
+} from './scheduler.ts'
 
 // Load .env ourselves. The daemon is (re)launched by the SessionStart hook and the watchdog,
 // neither of which sources a shell — so without this, a post-reboot relaunch comes up with no
@@ -3593,69 +3598,6 @@ bot.command('stream', async ctx => {
 // the session that was focused when scheduled (pinned by paneId, so different messages can
 // target different sessions). Persisted so the queue survives a restart; overdue ones fire on
 // load. /schedule cancel removes one — or lists them with a button each when there are several.
-const SCHEDULED_MSGS_FILE = join(STATE_DIR, 'scheduled-messages.json')
-const MAX_TIMEOUT = 2_147_483_647   // setTimeout's ceiling (~24.8 days); longer waits re-arm
-let scheduledMsgs: ScheduledMessage[] = []
-
-// "12h" "1h30m" "90s" "2d" "1w" → ms (sum of every unit chunk), or null if nothing parsed.
-function parseDuration(s: string): number | null {
-  const unit: Record<string, number> = { s: 1e3, m: 6e4, h: 36e5, d: 864e5, w: 6048e5 }
-  let total = 0, matched = false
-  for (const m of s.toLowerCase().matchAll(/(\d+)\s*([smhdw])/g)) { matched = true; total += parseInt(m[1], 10) * unit[m[2]] }
-  return matched && total > 0 ? total : null
-}
-
-// "12h" / "1h 30m" / "3d 4h" — compact, largest units first; for confirmations.
-function formatDuration(ms: number): string {
-  const d = Math.floor(ms / 864e5), h = Math.floor(ms % 864e5 / 36e5), m = Math.floor(ms % 36e5 / 6e4)
-  return [d && `${d}d`, h && `${h}h`, m && `${m}m`].filter(Boolean).join(' ') || '<1m'
-}
-
-// Absolute fire time in UTC, e.g. "Jun 8, 01:30 UTC" — unambiguous regardless of timezone.
-function fmtWhen(at: number): string {
-  return new Date(at).toLocaleString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false }) + ' UTC'
-}
-
-function saveScheduledMsgs(): void { try { writeFileSync(SCHEDULED_MSGS_FILE, JSON.stringify(scheduledMsgs), { mode: 0o600 }) } catch {} }
-
-function armScheduled(msg: ScheduledMessage): void {
-  const prev = scheduledTimers.get(msg.id); if (prev) clearTimeout(prev)
-  const delay = Math.min(Math.max(0, msg.fireAt - Date.now()), MAX_TIMEOUT)
-  scheduledTimers.set(msg.id, setTimeout(() => void fireScheduled(msg.id), delay))
-}
-
-function cancelScheduled(id: string): void {
-  const t = scheduledTimers.get(id); if (t) clearTimeout(t)
-  scheduledTimers.delete(id)
-  scheduledMsgs = scheduledMsgs.filter(m => m.id !== id)
-  saveScheduledMsgs()
-}
-
-async function fireScheduled(id: string): Promise<void> {
-  const msg = scheduledMsgs.find(m => m.id === id)
-  if (!msg) return
-  if (Date.now() < msg.fireAt - 1000) { armScheduled(msg); return }   // capped long wait → re-arm
-  scheduledMsgs = scheduledMsgs.filter(m => m.id !== id)
-  scheduledTimers.delete(id)
-  saveScheduledMsgs()
-  await deliverScheduled(msg)
-}
-
-async function deliverScheduled(msg: ScheduledMessage): Promise<void> {
-  const chats = msg.chatId ? [msg.chatId] : loadAccess().allowFrom
-  const note = (t: string) => { for (const c of chats) void bot.api.sendMessage(c, t, { parse_mode: 'HTML' }).catch(() => {}) }
-  if (!msg.paneId || !(await paneAlive(msg.paneId))) {
-    note(`⏰ Couldn't send your scheduled message — <b>${escapeHtml(msg.sessionLabel)}</b> is gone:\n\n${escapeHtml(msg.text)}`)
-    return
-  }
-  const ok = msg.paneId === activePaneId && paneWatcher
-    ? await injectPaste(msg.paneId, paneWatcher, msg.text)
-    : await pasteToPane(msg.paneId, msg.text)
-  note(ok
-    ? `📤 Sent your scheduled message to <b>${escapeHtml(msg.sessionLabel)}</b>:\n\n${escapeHtml(msg.text)}`
-    : `⚠️ Couldn't deliver your scheduled message to <b>${escapeHtml(msg.sessionLabel)}</b>.`)
-}
-
 // Paste into a pane the watcher isn't driving (a non-focused scheduled target). Mirrors
 // injectPaste minus the watcher pause — safe because no relay loop is reading this pane.
 async function pasteToPane(paneId: string, text: string): Promise<boolean> {
@@ -3667,35 +3609,6 @@ async function pasteToPane(paneId: string, text: string): Promise<boolean> {
     await sendKeys(paneId, ['Enter'])
     return true
   } catch { return false }
-}
-
-function loadScheduledMsgs(): void {
-  try {
-    const arr = JSON.parse(readFileSync(SCHEDULED_MSGS_FILE, 'utf8'))
-    if (Array.isArray(arr)) scheduledMsgs = arr.filter((m): m is ScheduledMessage =>
-      m && typeof m.id === 'string' && typeof m.fireAt === 'number' && typeof m.text === 'string')
-  } catch {}
-  for (const m of scheduledMsgs) armScheduled(m)   // overdue ones fire ~immediately
-}
-
-function scheduledListText(): string {
-  const lines = scheduledMsgs.map((m, i) =>
-    `${i + 1}. ${fmtWhen(m.fireAt)} → <b>${escapeHtml(m.sessionLabel)}</b>: ${escapeHtml(m.text.length > 40 ? m.text.slice(0, 39) + '…' : m.text)}`)
-  return `📅 <b>Scheduled messages</b>\n${lines.join('\n')}\n\nTap to cancel:`
-}
-
-function scheduledCancelKeyboard(): InlineKeyboard {
-  const kb = new InlineKeyboard()
-  scheduledMsgs.forEach((m, i) => { kb.text(`🗑 ${i + 1}`, `schedcancel:${m.id}`); if ((i + 1) % 4 === 0) kb.row() })
-  return kb
-}
-
-async function scheduleDashboard(ctx: Context): Promise<void> {
-  if (scheduledMsgs.length === 0) {
-    await ctx.reply('📅 <b>No scheduled messages.</b>\n\nSchedule one with <code>/schedule 12h</code> — then reply with the message to send.', { parse_mode: 'HTML' })
-    return
-  }
-  await ctx.reply(scheduledListText(), { parse_mode: 'HTML', reply_markup: scheduledCancelKeyboard() })
 }
 
 bot.command('schedule', async ctx => {
@@ -4628,10 +4541,11 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    const existed = scheduledMsgs.some(m => m.id === schedCancelMatch[1])
+    const before = scheduledCount()
     cancelScheduled(schedCancelMatch[1])
+    const existed = scheduledCount() < before
     await ctx.answerCallbackQuery({ text: existed ? 'Cancelled.' : 'Already gone.' }).catch(() => {})
-    if (scheduledMsgs.length) await ctx.editMessageText(scheduledListText(), { parse_mode: 'HTML', reply_markup: scheduledCancelKeyboard() }).catch(() => {})
+    if (scheduledCount()) await ctx.editMessageText(scheduledListText(), { parse_mode: 'HTML', reply_markup: scheduledCancelKeyboard() }).catch(() => {})
     else await ctx.editMessageText('📅 No scheduled messages left.').catch(() => {})
     return
   }
@@ -5179,7 +5093,7 @@ bot.on('message:text', async ctx => {
       scheduleReplyTargets.delete(replyKey)
       if (!dmCommandGate(ctx)) return
       const msg: ScheduledMessage = { id: randomBytes(4).toString('hex'), fireAt: sched.fireAt, chatId: String(ctx.chat?.id), paneId: sched.paneId, sessionLabel: sched.sessionLabel, text }
-      scheduledMsgs.push(msg); saveScheduledMsgs(); armScheduled(msg)
+      addScheduled(msg)
       await ctx.reply(`✅ Scheduled for ${fmtWhen(msg.fireAt)} → <b>${escapeHtml(msg.sessionLabel)}</b>.\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
       return
     }
@@ -5569,6 +5483,16 @@ provisionOffMcpTooling()
 loadScheduledReset()
 
 // Re-arm any persisted /schedule messages (overdue ones fire shortly after load).
+// Wire the scheduler's daemon dependencies first: inject into the focused pane (with the
+// watcher paused) when it's the active one, else plain-paste into the target pane.
+initScheduler({
+  bot,
+  loadAccess,
+  injectToPane: (paneId, text) =>
+    paneId === activePaneId && paneWatcher
+      ? injectPaste(paneId, paneWatcher, text)
+      : pasteToPane(paneId, text),
+})
 loadScheduledMsgs()
 
 // Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.
