@@ -43,6 +43,7 @@ import {
   newSessionReplyTargets,
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror } from './mirror.ts'
+import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { parseDuration, formatDuration, fmtWhen } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
@@ -3467,68 +3468,7 @@ async function gitBranch(dir: string): Promise<string | null> {
 // the pin's own layout. Scoped to the statusline's slot — the lines just above Claude Code's
 // footer hint — so we never pick up numbers from Claude's reply text higher in the pane.
 
-type StatuslineData = {
-  ctxPct: number | null
-  tokens: string | null
-  cost: string | null
-  sessionTime: string | null
-  apiTime: string | null
-  h5: { pct: number; reset: string } | null
-  d7: { pct: number; reset: string } | null
-  effort: string | null   // ε:<level> from the statusline
-  think: boolean          // ✻think badge present
-}
-
 const PIN_RULE = '──────────────────────────'
-const STATUS_DUR = '(\\d+h\\d+m|\\d+m\\d+s|\\d+h|\\d+m|\\d+s)'
-
-function pinBar(pct: number, width = 10): string {
-  const p = Math.max(0, Math.min(100, pct))
-  const filled = Math.round((p / 100) * width)
-  return '█'.repeat(filled) + '░'.repeat(Math.max(0, width - filled))
-}
-
-// The contiguous non-empty, non-border lines directly above the pane's last footer hint — i.e.
-// the custom statusline's slot. null when there's no statusline there (the line above the footer
-// is the input-box border) or the pane is in a transient state.
-function statuslineBlock(paneText: string): string | null {
-  const lines = paneText.split('\n').map(l => stripAnsi(l).replace(/\s+$/, ''))
-  let last = lines.length - 1
-  while (last >= 0 && !lines[last].trim()) last--
-  if (last < 1) return null
-  const out: string[] = []
-  for (let i = last - 1; i >= 0 && last - i <= 6; i--) {
-    const l = lines[i]
-    if (!l.trim()) break
-    if (/^[\s─━│┃┌┐└┘├┤┬┴┼╭╮╰╯╶╴╵╷]+$/.test(l)) break   // input-box border — statusline ends here
-    out.unshift(l)
-  }
-  return out.length ? out.join('\n') : null
-}
-
-function parseStatusline(paneText: string): StatuslineData | null {
-  const block = statuslineBlock(paneText)
-  if (!block) return null
-  const str = (re: RegExp): string | null => { const m = block.match(re); return m?.[1] ?? null }
-  const up = str(/↑\s*([\d.]+[kKmM]?)/), down = str(/↓\s*([\d.]+[kKmM]?)/)
-  const costRaw = str(/\$\s*([\d.]+)/)
-  const limit = (re: RegExp): { pct: number; reset: string } | null => {
-    const m = block.match(re); return m ? { pct: parseInt(m[1], 10), reset: m[2] } : null
-  }
-  const data: StatuslineData = {
-    ctxPct: (() => { const m = block.match(/ctx\D*?(\d+)\s*%/i); return m ? parseInt(m[1], 10) : null })(),
-    tokens: up || down ? `↑${up ?? '?'} ↓${down ?? '?'}` : null,
-    cost: costRaw ? `$${parseFloat(costRaw).toFixed(2)}` : null,
-    sessionTime: str(new RegExp(`\\$[\\d.]+[^|]*\\|\\s*\\D*?${STATUS_DUR}`)),  // first duration after cost
-    apiTime: str(new RegExp(`api\\s+${STATUS_DUR}`, 'i')),
-    h5: limit(new RegExp(`5h\\D*?(\\d+)\\s*%\\D*?${STATUS_DUR}`)),
-    d7: limit(new RegExp(`7d\\D*?(\\d+)\\s*%\\D*?${STATUS_DUR}`)),
-    effort: str(/ε:\s*(\w+)/),
-    think: /✻\s*think/i.test(block),
-  }
-  const empty = data.ctxPct == null && !data.tokens && !data.cost && !data.sessionTime && !data.h5 && !data.d7
-  return empty ? null : data
-}
 
 async function sessionPinText(rows: SessionRow[]): Promise<string> {
   const cur = rows.find(r => r.current)
