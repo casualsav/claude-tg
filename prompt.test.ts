@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -77,6 +77,29 @@ test('detectLoginPrompt parses the login-method menu (Esc-to-cancel footer only)
 
 test('detectLoginPrompt ignores an ordinary Esc-to-cancel screen', () => {
   expect(detectLoginPrompt('Pick a fruit\n  1. Apple\n  2. Banana\n  Esc to cancel')).toBeNull()
+})
+
+test('isUsageLimitChoice matches the live usage-limit menu', () => {
+  const pane = [
+    '   What do you want to do?',
+    '   _ 1. Stop and wait for limit to reset',
+    '     2. Upgrade your plan',
+    '     3. Upgrade to Team plan',
+    '   Enter to confirm • Esc to cancel',
+  ].join('\n')
+  expect(isUsageLimitChoice(pane)).toBe(true)
+})
+
+test('isUsageLimitChoice ignores a scrolled-up past menu and unrelated confirms', () => {
+  const scrolled = [
+    '   1. Stop and wait for limit to reset',
+    '   Enter to confirm • Esc to cancel',
+    '',
+    '● back to work, output here',
+    '  and more output below',
+  ].join('\n')
+  expect(isUsageLimitChoice(scrolled)).toBe(false)
+  expect(isUsageLimitChoice('Save changes?\n  1. Yes\n  2. No\n  Enter to confirm')).toBe(false)
 })
 
 test('detectLoginPrompt needs the menu live at the bottom (not scrolled up)', () => {

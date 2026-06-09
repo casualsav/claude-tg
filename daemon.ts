@@ -22,7 +22,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
@@ -334,6 +334,20 @@ async function driveOnboarding(paneId: string, stage: 'theme' | 'trust' | 'enter
   // theme / trust / enter → accept the highlighted default. Drive through the watcher so the
   // relay loop doesn't misread the keystroke as activity.
   process.stderr.write(`daemon: onboarding auto-advance (${stage})\n`)
+  if (focus.paneWatcher) await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
+  else await sendKeys(paneId, ['Enter'])
+}
+
+// Auto-confirm the usage-limit "What do you want to do?" menu on option 1 ("Stop and wait for limit
+// to reset", which is the highlighted default → Enter selects it). Without this the terminal wedges
+// on the menu and a scheduled/queued message can never inject. Deduped via a short window so the
+// menu repainting each poll doesn't fire Enter repeatedly. Driven through the watcher so the relay
+// loop doesn't misread the keystroke as activity.
+let usageChoiceDismissedAt = 0
+async function dismissUsageLimitChoice(paneId: string): Promise<void> {
+  if (Date.now() - usageChoiceDismissedAt < 4000) return   // same menu, just repainting
+  usageChoiceDismissedAt = Date.now()
+  process.stderr.write('daemon: auto-dismissing usage-limit choice (option 1: stop and wait)\n')
   if (focus.paneWatcher) await focus.paneWatcher.withInjection(async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
   else await sendKeys(paneId, ['Enter'])
 }
@@ -1358,6 +1372,13 @@ function onPaneEvent(text: string): void {
       void relayAuthUrlToTelegram(authUrl)
     }
   }
+
+  // Usage-limit "What do you want to do?" menu — auto-confirm option 1 ("Stop and wait for limit
+  // to reset", the highlighted default) so it can't wedge the terminal and block a queued/scheduled
+  // injection. Handled before everything else: it's a system stall, not a question for the user
+  // (the ⛔ limit note already went out on its own). Deduped via a short window so a repaint of the
+  // same menu doesn't fire Enter twice.
+  if (focus.activePaneId && isUsageLimitChoice(text)) { void dismissUsageLimitChoice(focus.activePaneId); return }
 
   // /login method menu — relay the actual options as buttons. Its footer is just "Esc to cancel"
   // (no select/permission wording), so the generic detectors below miss it, and it fires for BOTH

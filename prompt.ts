@@ -296,3 +296,28 @@ export function detectLoginPrompt(paneText: string): { options: PromptOption[] }
   }
   return opts.length >= 2 ? { options: opts } : null
 }
+
+// ---- Usage-limit "what do you want to do?" menu (auto-dismissed, never relayed) ----
+// When Claude hits a usage limit mid-turn it can pop a blocking menu:
+//   What do you want to do?
+//   _ 1. Stop and wait for limit to reset
+//     2. Upgrade your plan
+//     3. Upgrade to Team plan
+//   Enter to confirm • Esc to cancel
+// Its footer is "Enter to confirm" (not "Enter to select" / "· Tab to amend"), so neither prompt
+// detector matches it — and left alone it wedges the terminal, so a scheduled/queued message can
+// never inject. The daemon auto-confirms option 1 ("Stop and wait…", the highlighted default) to
+// clear it. We recognise it by its distinctive first option + a live "Enter to confirm" footer.
+const USAGE_CHOICE_OPT = /stop and wait for (?:the )?limit to reset/i
+export function isUsageLimitChoice(paneText: string): boolean {
+  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  let footerIdx = -1
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (/enter to confirm/i.test(lines[i])) { footerIdx = i; break }
+  }
+  if (footerIdx === -1) return false
+  let belowNonBlank = 0
+  for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
+  if (belowNonBlank > 1) return false   // scrolled-up past menu, not the live one
+  return lines.slice(0, footerIdx).some(l => USAGE_CHOICE_OPT.test(l))
+}
