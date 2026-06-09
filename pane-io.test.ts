@@ -126,6 +126,37 @@ test('waitForSettle returns once the capture hash is stable', async () => {
   expect(Date.now() - t0).toBeLessThan(1500)
 })
 
+// --- PaneWatcher ---
+
+test('PaneWatcher.withInjection runs the wrapped fn and returns its value', async () => {
+  execImpl = async () => ({ stdout: 'pane contents' })
+  const w = new pane.PaneWatcher('%1', () => {}, () => {})
+  const result = await w.withInjection(async () => 'done')
+  expect(result).toBe('done')
+})
+
+test('PaneWatcher.withInjection re-baselines the hash with a capture afterward', async () => {
+  execImpl = async () => ({ stdout: 'pane contents' })
+  const w = new pane.PaneWatcher('%2', () => {}, () => {})
+  await w.withInjection(async () => {})
+  // the finally block captures the pane to reset lastHash
+  expect(execCalls.some(([, a]) => a.includes('capture-pane') && a.includes('%2'))).toBe(true)
+})
+
+test('PaneWatcher.withInjection still resets injecting + returns even if the fn throws', async () => {
+  execImpl = async () => ({ stdout: 'x' })
+  const w = new pane.PaneWatcher('%3', () => {}, () => {})
+  await expect(w.withInjection(async () => { throw new Error('boom') })).rejects.toThrow('boom')
+  // a subsequent injection still works (injecting flag was cleared in finally)
+  expect(await w.withInjection(async () => 1)).toBe(1)
+})
+
+test('PaneWatcher start/stop lifecycle is safe', () => {
+  const w = new pane.PaneWatcher('%4', () => {}, () => {})
+  expect(() => { w.start(); w.stop() }).not.toThrow()
+  expect(() => w.stop()).not.toThrow()   // double stop is harmless
+})
+
 // --- proc.ts primitives (real implementations captured before the mock) ---
 
 test('proc.hashText is deterministic md5 hex', () => {

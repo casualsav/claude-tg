@@ -27,7 +27,7 @@ import { resolveTranscript, latestFinalReply, finalRepliesAfter, textEntriesAfte
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
-  windowHeightOf, resizeWindowOf, paneCommand, paneCwd,
+  windowHeightOf, resizeWindowOf, paneCommand, paneCwd, PaneWatcher,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -477,49 +477,6 @@ async function verifyPromptClosed(): Promise<void> {
   lastRelayedPromptHash = ''
   lastRelayedPermissionHash = ''
   notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.')
-}
-
-// PaneWatcher — ONE loop per active session (opus-direct Block C).
-class PaneWatcher {
-  private lastHash = ''
-  private injecting = false
-  private timer?: ReturnType<typeof setInterval>
-
-  constructor(
-    private paneId: string,
-    private onEvent: (text: string) => void,
-    private onDead: () => void,
-    private onPoll?: (text: string) => void,   // every tick (even when unchanged) — drives typing
-  ) {}
-
-  start(): void {
-    this.timer = setInterval(() => void this.tick(), 800)
-  }
-
-  stop(): void {
-    if (this.timer) clearInterval(this.timer)
-  }
-
-  async withInjection<T>(fn: () => Promise<T>): Promise<T> {
-    this.injecting = true
-    try { return await fn() }
-    finally {
-      try { this.lastHash = hashText(await capturePane(this.paneId)) } catch {}
-      this.injecting = false
-    }
-  }
-
-  private async tick(): Promise<void> {
-    if (this.injecting) return
-    let text: string
-    try { text = await capturePane(this.paneId) }
-    catch { this.stop(); this.onDead(); return }
-    this.onPoll?.(text)                 // every poll — a live working signal even when static
-    const h = hashText(text)
-    if (h === this.lastHash) return
-    this.lastHash = h
-    this.onEvent(text)
-  }
 }
 
 // ---- Mode detection ----

@@ -107,3 +107,49 @@ export async function paneCwd(paneId: string): Promise<string | null> {
     return cwd
   } catch { return null }
 }
+
+// PaneWatcher — ONE poll loop per active session (opus-direct Block C). Captures the pane every
+// 800ms; when the content hash changes it fires onEvent, and onPoll fires every tick (even when
+// unchanged) to drive a live working signal. All daemon coupling enters through the constructor
+// callbacks, so the loop itself depends only on the pane-io primitives.
+export class PaneWatcher {
+  private lastHash = ''
+  private injecting = false
+  private timer?: ReturnType<typeof setInterval>
+
+  constructor(
+    private paneId: string,
+    private onEvent: (text: string) => void,
+    private onDead: () => void,
+    private onPoll?: (text: string) => void,   // every tick (even when unchanged) — drives typing
+  ) {}
+
+  start(): void {
+    this.timer = setInterval(() => void this.tick(), 800)
+  }
+
+  stop(): void {
+    if (this.timer) clearInterval(this.timer)
+  }
+
+  async withInjection<T>(fn: () => Promise<T>): Promise<T> {
+    this.injecting = true
+    try { return await fn() }
+    finally {
+      try { this.lastHash = hashText(await capturePane(this.paneId)) } catch {}
+      this.injecting = false
+    }
+  }
+
+  private async tick(): Promise<void> {
+    if (this.injecting) return
+    let text: string
+    try { text = await capturePane(this.paneId) }
+    catch { this.stop(); this.onDead(); return }
+    this.onPoll?.(text)                 // every poll — a live working signal even when static
+    const h = hashText(text)
+    if (h === this.lastHash) return
+    this.lastHash = h
+    this.onEvent(text)
+  }
+}
