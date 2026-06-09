@@ -903,6 +903,12 @@ const ADOPTED_PANE_FILE = join(STATE_DIR, 'adopted-pane')
 
 function adoptPane(paneId: string): void {
   offMcpPanes.add(paneId)
+  // Stamp the adopt marker on the pane itself so it stays discoverable across daemon restarts and
+  // pane respawns — the discoverPanes rescan only adopts @tg_bridge-tagged panes, so a pane bound
+  // via the persisted adopted-pane file or the "Switch" button (not the claude-tg alias) would
+  // otherwise get dropped on the next rescan. Self-heals those, plus sessions launched before the
+  // tag convention existed. Fire-and-forget; idempotent.
+  void exec('tmux', ['set-option', '-p', '-t', paneId, BRIDGE_PANE_OPT, INSTANCE_ID], { timeout: 2000 }).catch(() => {})
   focusOffMcpPane(paneId)
   process.stderr.write(`daemon: adopted off-MCP pane ${paneId} (auto-discovery)\n`)
   // Only announce a genuinely NEW pane. A daemon restart (frequent during dev, or on reboot)
