@@ -279,21 +279,19 @@ function patchSettings(mode: Mode): void {
 
   if (mode === 'off-mcp') {
     const bashrc = join(homedir(), process.env.SHELL?.includes('zsh') ? '.zshrc' : '.bashrc')
-    // Two launch FUNCTIONS, each taking an optional instance slot (default 1): `claude-tg`,
-    // `claude-tg 2`, … The adopt marker is `tmux set -p @tg_bridge <slot>` — a tmux PANE option, so
-    // it never touches claude's args (decoupled from the autonomy flag, immune to claude rejecting
-    // unknown flags) and the slot routes the pane to the matching bridge daemon. The flag chooses
-    // the start mode: claude-tg → --allow-dangerously-skip-permissions (normal start, bypass on
-    // demand from /mode); claude-yolo → --dangerously-skip-permissions (full bypass from launch).
+    // One launch FUNCTION taking an optional instance slot (default 1): `claude-tg`, `claude-tg 2`,
+    // … The adopt marker is `tmux set -p @tg_bridge <slot>` — a tmux PANE option, so it never
+    // touches claude's args (decoupled from the autonomy flag, immune to claude rejecting unknown
+    // flags) and the slot routes the pane to the matching bridge daemon. `claude-tg` starts with
+    // --allow-dangerously-skip-permissions (normal start, bypass switchable on demand from /mode).
     const want: [string, string][] = [
       ['claude-tg', 'claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }'],
-      ['claude-yolo', 'claude-yolo() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --dangerously-skip-permissions; }'],
     ]
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
     // Match either the new function form or a legacy `alias claude-tg=` from an older install.
     const missing = want.filter(([n]) => !new RegExp(`(^|\\n)\\s*${n}\\s*\\(\\)|alias ${n}=`).test(cur)).map(([, a]) => a)
-    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launchers → ${bashrc} (claude-tg, claude-yolo)`)) }
-    else console.log(C.dim('  • claude-tg / claude-yolo launchers already present'))
+    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launcher → ${bashrc} (claude-tg)`)) }
+    else console.log(C.dim('  • claude-tg launcher already present'))
   }
 }
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -326,10 +324,9 @@ async function main(): Promise<void> {
     console.log(`  3. Message your bot — it should reply.${cfg.telegramId ? '' : ' (Approve your first DM\'s pairing code with /telegram:access pair <code>.)'}`)
   }
   if (mode === 'off-mcp') {
-    console.log(`\n${C.b('Launch aliases')} ${C.dim('(reload your shell or `source` the rc first):')}`)
+    console.log(`\n${C.b('Launch alias')} ${C.dim('(reload your shell or `source` the rc first):')}`)
     console.log(`  ${C.b('claude-tg')}    starts safe — permission prompts relay to Telegram; flip to full bypass on demand from /mode`)
-    console.log(`  ${C.b('claude-yolo')}  starts in full bypass — autonomy from the first action`)
-    console.log(C.dim('  Both bridge automatically (they tag the pane with the @tg_bridge tmux option). Run either inside tmux.'))
+    console.log(C.dim('  It bridges automatically (tags the pane with the @tg_bridge tmux option). Run inside tmux.'))
   }
   rl.close()
 }

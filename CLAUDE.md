@@ -22,7 +22,7 @@ Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is wri
 4. Launch a bridge session with `claude-tg` (auto-added shell function:
    `tmux set -p @tg_bridge "${1:-1}"; claude --allow-dangerously-skip-permissions` — the `@tg_bridge`
    tmux pane option, valued by instance slot, is the adopt marker (decoupled from claude's args);
-   bypass is switchable on demand; `claude-yolo` is the full-bypass variant. `claude-tg N` routes to
+   bypass is switchable on demand. `claude-tg N` routes to
    a second bridge — see multi-instance below) — the daemon finds it automatically.
 
 Don't guess config values — ask. The only non-automatable bits are getting the token from the

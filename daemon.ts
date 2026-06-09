@@ -753,7 +753,7 @@ function replyMode(): 'thoughts' | 'tools' | 'hybrid' | 'off' {
   if (v === 'tools' || v === 'final') return 'tools'
   if (v === 'off') return 'off'
   if (v === 'hybrid' || v === 'live') return 'hybrid'
-  return 'hybrid'   // default (unset)
+  return 'thoughts'   // default (unset) — new users start on /stream thoughts
 }
 
 
@@ -1055,8 +1055,7 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   await bot.api.sendMessage(chat,
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
     '<code>claude-tg</code>   — safe start, bypass on demand from /mode\n' +
-    '<code>claude-yolo</code> — full bypass from launch\n' +
-    'The daemon auto-discovers the pane (these aliases tag it with the <code>@tg_bridge</code> tmux option) and replays anything buffered.',
+    'The daemon auto-discovers the pane (the alias tags it with the <code>@tg_bridge</code> tmux option) and replays anything buffered.',
     { parse_mode: 'HTML' }).catch(() => {})
 }
 
@@ -2051,7 +2050,7 @@ async function handleModeCommand(
 
   if (reached === null) {
     const notAvailableMsg = target === 'bypassPermissions'
-      ? 'Not available — this session was launched without bypass enabled. Relaunch with claude-tg (bypass-on-demand) or claude-yolo (full bypass).'
+      ? 'Not available — this session was launched without bypass enabled. Relaunch with claude-tg (bypass-on-demand).'
       : target === 'auto'
       ? 'Not available — auto mode requires a qualifying plan or prior detection.'
       : `Could not switch to ${modeLabel(target)}.`
@@ -2629,7 +2628,7 @@ bot.command('compact', async ctx => {
 // ---- /update: pick what to update — the bridge or Claude itself ----
 // Bare /update opens a dashboard naming both current versions, a button each. The bridge path
 // reuses the detached self-updater (update.ts, with rollback). The Claude path runs the native
-// per-user `claude update` in the background, then — only if it actually moved the version —
+// per-user `claude install` in the background, then — only if it actually moved the version —
 // offers a button to restart the focused session so the running conversation picks it up.
 
 // This bridge's installed version (the cache dir we run from), read non-agentically.
@@ -2664,7 +2663,7 @@ async function restartFocusedSession(chat: string): Promise<void> {
   await focus.paneWatcher.withInjection(async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
-    await sendKeys(pane, [`claude --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
+    await sendKeys(pane, [`hash -r; claude --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
     await waitForSettle(pane, 400, 30_000)
   })
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
@@ -2676,7 +2675,10 @@ async function updateClaude(chat: string): Promise<void> {
     bot.api.sendMessage(chat, t, { parse_mode: 'HTML', ...(kb ? { reply_markup: kb } : {}) }).catch(() => {})
   await dm('🧠 Updating Claude in the background…')
   const before = await claudeVersion()
-  try { await exec('claude', ['update'], { timeout: 300_000 }) }
+  // `claude install` (not `claude update`): installs the native build into the user's own dir, so it
+  // works without root / a writable global npm prefix. The follow-up `hash -r` on session restart
+  // makes the pane's shell forget any cached path to the old binary.
+  try { await exec('claude', ['install'], { timeout: 300_000 }) }
   catch (e) { await dm(`❌ Claude update failed.\n<code>${escapeHtml(String((e as { stderr?: string })?.stderr || e).slice(0, 300))}</code>`); return }
   const after = await claudeVersion()
   if (after && after !== before) {

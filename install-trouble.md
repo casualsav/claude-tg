@@ -66,8 +66,8 @@ the first-use delay. Working as designed — documented here for completeness.
 a shell function `claude-tg() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }`
 (the `@tg_bridge` tmux pane option, valued by instance slot, is the daemon's adopt marker —
 decoupled from claude's args; the plugin's MCP ships disabled so the session is already plugin-less;
-`--allow-…` starts in a normal mode with bypass switchable on demand from `/mode`. The `claude-yolo`
-variant uses `--dangerously-skip-permissions` for full bypass; `claude-tg N` routes to bridge N).
+`--allow-…` starts in a normal mode with bypass switchable on demand from `/mode`;
+`claude-tg N` routes to bridge N).
 
 ## 6. Inbound delivery needs a bridge-signature tmux pane (most common "it's not working")
 **Symptom:** bot is paired and polling, but Telegram messages never reach a Claude session.

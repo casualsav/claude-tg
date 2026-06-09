@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 # One-time convenience: add the Telegram-bridge launchers to the user's shell rc. Mode-aware
 # (default off-MCP, the recommended mode):
-#   off-mcp -> two shell FUNCTIONS that take an optional instance slot (default 1):
+#   off-mcp -> a shell FUNCTION that takes an optional instance slot (default 1):
 #                claude-tg [slot]    -> tmux set -p @tg_bridge <slot> ; claude --allow-dangerously-skip-permissions
-#                claude-yolo [slot]  -> tmux set -p @tg_bridge <slot> ; claude --dangerously-skip-permissions
 #              The `@tg_bridge <slot>` tmux PANE option is the daemon's adopt marker (decoupled from
 #              claude's args). `claude-tg` = slot 1 (the default bridge); `claude-tg 2` routes to a
 #              second bridge (its own state dir/token, see /telegram:configure 2). --allow-… starts
-#              in a normal mode (prompts relay to Telegram), bypass switchable on demand from /mode;
-#              claude-yolo starts in full bypass.
+#              in a normal mode (prompts relay to Telegram), bypass switchable on demand from /mode.
 #   mcp     -> a single alias that loads the channel as a dev plugin (no pane marker needed — MCP
 #              sessions register over the socket).
 #
@@ -23,7 +21,6 @@ case "$MODE" in
   off-mcp)
     read -r -d '' DEFS <<'EOF' || true
 claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }
-claude-yolo() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --dangerously-skip-permissions; }
 EOF
     ;;
   mcp)
