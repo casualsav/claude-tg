@@ -29,6 +29,18 @@ import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   windowHeightOf, resizeWindowOf, paneCommand, paneCwd,
 } from './pane-io.ts'
+import type {
+  PendingEntry, GroupPolicy, Access, Session,
+  PendingMultiSelect, FreeTextPrompt, ChatPrompt, ScheduledMessage,
+} from './types.ts'
+import {
+  _accessFileCache, onboardedPanes, onboardingState, sessions, permissionOrigin,
+  pendingMultiSelect, freeTextPrompts, freeTextReplyTargets, chatPrompts, authUrlMessageIds,
+  lastRelayedByFile, unreadNotified, unreadNotifMsgs, mirrorMsgIds, offMcpPanes,
+  usageWarnState, voiceNudged, scheduledTimers, scheduleReplyTargets,
+  sessionNames, renameReplyTargets, nameReplyTargets, sessionPins, pinTextCache,
+  newSessionReplyTargets,
+} from './state.ts'
 
 // Load .env ourselves. The daemon is (re)launched by the SessionStart hook and the watchdog,
 // neither of which sources a shell — so without this, a post-reboot relaunch comes up with no
@@ -80,25 +92,6 @@ if (!TOKEN) {
 
 // ---- Access control ----
 
-type PendingEntry = { senderId: string; chatId: string; createdAt: number; expiresAt: number; replies: number }
-type GroupPolicy = { requireMention: boolean; allowFrom: string[] }
-type Access = {
-  dmPolicy: 'pairing' | 'allowlist' | 'disabled'
-  allowFrom: string[]
-  groups: Record<string, GroupPolicy>
-  pending: Record<string, PendingEntry>
-  mentionPatterns?: string[]
-  ackReaction?: string
-  replyToMode?: 'off' | 'first' | 'all'
-  textChunkLimit?: number
-  chunkMode?: 'length' | 'newline'
-  renderMarkdown?: boolean
-  autoContinue?: boolean
-  terminalMirror?: 'tools' | 'digest' | 'off' | boolean
-  sessionPin?: boolean
-  replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
-}
-
 function defaultAccess(): Access {
   return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {} }
 }
@@ -130,7 +123,6 @@ function readJsonAccess(path: string): Partial<Access> {
 // made it read+parse TWO files each call. Cache the parsed result keyed by mtime+size so we only
 // re-parse when a file actually changes (statSync is ~free next to readFileSync+JSON.parse).
 // saveAccess() invalidates explicitly, so same-millisecond writes are never missed.
-const _accessFileCache = new Map<string, { mtimeMs: number; size: number; data: Partial<Access> }>()
 function readJsonAccessCached(path: string): Partial<Access> {
   let st: { mtimeMs: number; size: number }
   try { st = statSync(path) } catch { _accessFileCache.delete(path); return {} }
@@ -551,8 +543,6 @@ function onNormalPrompt(paneText: string): boolean {
 // Walk Claude Code's setup (theme · folder trust · login) from Telegram instead of punting to
 // the terminal. Only ever runs on a freshly adopted pane that has NEVER reached the REPL
 // (onboardedPanes), so a genuine AskUserQuestion is never mistaken for a setup screen.
-const onboardedPanes = new Set<string>()
-const onboardingState = { tag: '', at: 0 }   // debounce: a screen repaints many times per second
 let loginChoiceSent = false
 
 // Which onboarding screen the pane is showing, or null. Theme is only matched with a live select
@@ -729,22 +719,12 @@ let paneWatcher: PaneWatcher | null = null
 // activeShim/activePaneId/paneWatcher above so the rest of the daemon is unchanged.
 // A new session never steals focus: the first/only session is focused, additional
 // ones are announced and switched to explicitly with /use.
-type Session = {
-  socket: net.Socket
-  write: (msg: DaemonToShim) => void
-  paneId: string | null
-  label: string
-  subscribedAt: number
-}
-const sessions = new Map<string, Session>()   // insertion-ordered; keyed by sessionId
 let currentSessionId: string | null = null
 let noTmuxSeq = 0
 
 // Permission requests awaiting a Telegram answer, keyed by request_id → the writer
 // of the session that asked, so allow/deny goes back to the session that requested
 // it rather than whichever happens to be focused.
-const permissionOrigin = new Map<string, (msg: DaemonToShim) => void>()
-
 function orderedSessions(): { id: string; s: Session }[] {
   return [...sessions.entries()].map(([id, s]) => ({ id, s }))
 }
@@ -811,20 +791,15 @@ let lastRelayedPermissionHash = ''
 // In-flight multi-select prompts, keyed by `${chatId}:${messageId}` of the relayed
 // Telegram message. Each tap toggles an index in `selected`; Submit replays the
 // selection into the pane as Space/Down keystrokes. Cleared on submit.
-type PendingMultiSelect = { paneId: string; options: PromptOption[]; selected: Set<number> }
-const pendingMultiSelect = new Map<string, PendingMultiSelect>()
 
 // Prompts that carry a "Type something" free-text option, keyed by the relayed
 // Telegram message `${chatId}:${messageId}`. Tapping its ✏️ button looks the prompt
 // up here to spawn a force-reply; `downCount` is how many Down presses reach the
 // free-text option (it sits just past the real options) and `tabbed` selects the
 // post-entry behaviour (advance-and-continue vs. resolve).
-type FreeTextPrompt = { paneId: string; downCount: number; tabbed: boolean; question: string }
-const freeTextPrompts = new Map<string, FreeTextPrompt>()
 
 // Force-reply messages awaiting the user's free-text answer, keyed by the
 // force-reply message id; a reply to one is typed into the pane's free-text field.
-const freeTextReplyTargets = new Map<string, Omit<FreeTextPrompt, 'question'>>()
 
 // Prompts that offer a "Chat about this" escape hatch, keyed by the relayed
 // Telegram message `${chatId}:${messageId}`. Tapping its 💬 button selects that
@@ -832,15 +807,12 @@ const freeTextReplyTargets = new Map<string, Omit<FreeTextPrompt, 'question'>>()
 // `downCount` is the Down presses to reach it — one past "Type something".
 // `useEscape` = the menu has no literal "Chat about this" option (e.g. AskUserQuestion), so the
 // 💬 button dismisses with Esc instead of navigating to and selecting that option.
-type ChatPrompt = { paneId: string; downCount: number; tabbed: boolean; useEscape: boolean }
-const chatPrompts = new Map<string, ChatPrompt>()
 
 // Auth/login URLs surfaced from the pane (e.g. /login's OAuth link), so the user
 // can open them in a browser and reply with the code. `lastRelayedAuthUrl` dedups
 // the same link across watcher ticks; `authUrlMessageIds` (`${chatId}:${msgId}`)
 // marks the relayed messages so a Telegram reply to one is injected into the pane.
 let lastRelayedAuthUrl = ''
-const authUrlMessageIds = new Set<string>()
 
 // Build the inbound block the agent reads. Bare minimum, short aliases — it lives in the
 // session's context, so every dropped field is saved tokens: tag name encodes the source,
@@ -992,11 +964,8 @@ let relayCursorPrimed = false
 // Last uuid relayed per transcript file, so switching back to a session can replay what it
 // said while unfocused. In-memory: a fresh daemon has no cursors, so it never replays a
 // backlog on the first focus of a session (or after a restart).
-const lastRelayedByFile = new Map<string, string>()
 // Cross-session unread pings: the latest uuid we've pinged about per file, and the live
 // ping message ids (file → chat → messageId) so a follow-up edits in place and a read clears.
-const unreadNotified = new Map<string, string>()
-const unreadNotifMsgs = new Map<string, Map<string, number>>()
 let relayIdleStreak = 0
 let relayLoopGen = 0   // bump to retire the running loop when focus moves
 
@@ -1012,7 +981,6 @@ let relayLoopGen = 0   // bump to retire the running loop when focus moves
 const MIRROR_THROTTLE_MS = 3000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
 const MIRROR_TOOLS = 5         // tools mode: max tool rows shown (newest replaces oldest until ✅ Done)
-const mirrorMsgIds = new Map<string, number>()   // chat_id → the live mirror message id
 let mirrorLastText = ''
 let mirrorLastEditAt = 0
 // Consecutive not-working ticks. The card is finalized (one ✅ Done, then a fresh card on the next
@@ -1357,7 +1325,6 @@ let adoptedPaneId: string | null = null
 
 // Every plugin-less pane we currently know about (the focused one plus any unfocused
 // siblings). A new pane is announced once, with a switch button, and does NOT steal focus.
-const offMcpPanes = new Set<string>()
 
 // Bridge opt-in marker: a tmux *pane* user-option set on panes that should be adopted. It lives at
 // the tmux layer, so it's fully decoupled from claude's CLI/argv (no fragile launch flag a claude
@@ -1642,7 +1609,6 @@ let lastLimitDebugLine = ''
 // already sent for the current reset period (`resetKey`), plus when it was sent
 // (`at`) so a width-clipped repaint of the same banner can't re-fire it within a
 // few hours, so 76/77/… and re-renders don't re-notify.
-const usageWarnState = new Map<string, { resetKey: string; threshold: number; at: number }>()
 
 // Normalize a reset descriptor (e.g. "Jun 7, 4pm (UTC)") to a width-stable dedup key.
 // Terminal truncation/wrapping clips the trailing "(UTC) · …", so key on the date/time
@@ -2308,7 +2274,6 @@ async function transcribeLocal(audioPath: string, model: string): Promise<string
 
 // Chats already nudged about disabled transcription (in-memory; one hint per
 // chat per daemon run is enough).
-const voiceNudged = new Set<string>()
 
 function nudgeTranscribeOff(ctx: Context): void {
   const chat_id = String(ctx.chat!.id)
@@ -3630,10 +3595,7 @@ bot.command('stream', async ctx => {
 // load. /schedule cancel removes one — or lists them with a button each when there are several.
 const SCHEDULED_MSGS_FILE = join(STATE_DIR, 'scheduled-messages.json')
 const MAX_TIMEOUT = 2_147_483_647   // setTimeout's ceiling (~24.8 days); longer waits re-arm
-type ScheduledMessage = { id: string; fireAt: number; chatId: string; paneId: string | null; sessionLabel: string; text: string }
 let scheduledMsgs: ScheduledMessage[] = []
-const scheduledTimers = new Map<string, ReturnType<typeof setTimeout>>()
-const scheduleReplyTargets = new Map<string, { fireAt: number; paneId: string | null; sessionLabel: string }>()
 
 // "12h" "1h30m" "90s" "2d" "1w" → ms (sum of every unit chunk), or null if nothing parsed.
 function parseDuration(s: string): number | null {
@@ -3759,13 +3721,10 @@ bot.command('schedule', async ctx => {
 // User-set session names (paneId → label), overriding the cwd-derived default. Persisted so
 // they survive a daemon restart (tmux pane ids are stable across one); a tmux restart re-derives.
 const SESSION_NAMES_FILE = join(STATE_DIR, 'session-names.json')
-const sessionNames = new Map<string, string>()
 try { for (const [k, v] of Object.entries(JSON.parse(readFileSync(SESSION_NAMES_FILE, 'utf8')) as Record<string, string>)) sessionNames.set(k, v) } catch {}
 function persistSessionNames(): void {
   try { writeFileSync(SESSION_NAMES_FILE, JSON.stringify(Object.fromEntries(sessionNames)), { mode: 0o600 }) } catch {}
 }
-const renameReplyTargets = new Set<string>()           // `${chatId}:${messageId}` of list "Rename" prompts
-const nameReplyTargets = new Map<string, string>()     // `${chatId}:${messageId}` → paneId of "Name" prompts
 
 // Name a specific pane. Returns the HTML confirmation / error.
 async function renamePane(paneId: string, label: string): Promise<string> {
@@ -3828,8 +3787,6 @@ async function sessionNumber(key: string): Promise<number | null> {
 // mode change; it stays even with a single session. Pin ids are persisted so a daemon restart
 // edits the existing pin instead of pinning a new one.
 const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
-const sessionPins = new Map<string, number>()
-const pinTextCache = new Map<string, string>()   // last rendered text per chat — skip no-op edits on the 10s refresh
 try { for (const [c, m] of Object.entries(JSON.parse(readFileSync(SESSION_PIN_FILE, 'utf8')) as Record<string, number>)) sessionPins.set(c, m) } catch {}
 function persistSessionPins(): void {
   try { writeFileSync(SESSION_PIN_FILE, JSON.stringify(Object.fromEntries(sessionPins)), { mode: 0o600 }) } catch {}
@@ -4152,7 +4109,6 @@ function sessionSwitchKeyboard(rows: SessionRow[]): InlineKeyboard {
 
 // New-session creation: spawn a plugin-less claude in a fresh tmux window; discovery then
 // announces it with a ▶️ Switch button. The folder comes from a force-reply (see below).
-const newSessionReplyTargets = new Set<string>()   // `${chatId}:${messageId}` of folder prompts
 
 async function resolveNewSessionDir(input: string): Promise<string> {
   const t = input.trim()
