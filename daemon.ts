@@ -2636,9 +2636,19 @@ function bridgeVersion(): string {
   try { return JSON.parse(readFileSync(join(import.meta.dir, '.claude-plugin', 'plugin.json'), 'utf8')).version ?? '?' } catch { return '?' }
 }
 
+// Resolve the claude binary `claude install` actually manages. The native installer writes
+// ~/.local/bin/claude (a symlink into ~/.local/share/claude/versions/<v>); a separately-installed
+// npm-global claude (e.g. /usr/bin/claude) can sit earlier on the daemon's PATH and shadow it, which
+// would make before/after version checks read a binary `claude install` never touches and report a
+// bogus "already up to date". Prefer the native path when present; fall back to PATH otherwise.
+function claudeBin(): string {
+  const native = join(homedir(), '.local', 'bin', 'claude')
+  return existsSync(native) ? native : 'claude'
+}
+
 // Installed Claude version — `claude --version` prints "2.1.168 (Claude Code)".
 async function claudeVersion(): Promise<string | null> {
-  try { const { stdout } = await exec('claude', ['--version'], { timeout: 8000 }); return stdout.trim().split(/\s+/)[0] || null } catch { return null }
+  try { const { stdout } = await exec(claudeBin(), ['--version'], { timeout: 8000 }); return stdout.trim().split(/\s+/)[0] || null } catch { return null }
 }
 
 // The focused off-MCP session's id — the newest transcript under the active pane's cwd, so we can
@@ -2678,7 +2688,7 @@ async function updateClaude(chat: string): Promise<void> {
   // `claude install` (not `claude update`): installs the native build into the user's own dir, so it
   // works without root / a writable global npm prefix. The follow-up `hash -r` on session restart
   // makes the pane's shell forget any cached path to the old binary.
-  try { await exec('claude', ['install'], { timeout: 300_000 }) }
+  try { await exec(claudeBin(), ['install'], { timeout: 300_000 }) }
   catch (e) { await dm(`❌ Claude update failed.\n<code>${escapeHtml(String((e as { stderr?: string })?.stderr || e).slice(0, 300))}</code>`); return }
   const after = await claudeVersion()
   if (after && after !== before) {
