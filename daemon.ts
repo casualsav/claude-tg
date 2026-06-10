@@ -394,16 +394,17 @@ function parseCurrentModel(pickerText: string): string | null {
     lines.find(l => isOption(l) && /[✔✓]/.test(l)) ??
     lines.find(l => /^\s*[❯►▶]\s*\d+[.)]\s/.test(l))
   if (!row) return null
-  // A family name + optional version — "Opus 4.8", "Sonnet 4.6", "Haiku". Prefer a
-  // match that carries a version number (more specific) over a bare family word.
-  const tokens = [...row.matchAll(/\b(?:Opus|Sonnet|Haiku)\b(?:\s+v?\d[\d.]*)?/gi)].map(m => m[0].trim())
+  // A family name + optional version — "Opus 4.8", "Sonnet 4.6", "Haiku", "Fable 5".
+  // We normalise to the bare family word via prettyModel so every display site (pin,
+  // /model, /new, /clear) shows the short name without the version number.
+  const tokens = [...row.matchAll(/\b(?:Opus|Sonnet|Haiku|Fable)\b(?:\s+v?\d[\d.]*)?/gi)].map(m => m[0].trim())
   const token = tokens.find(t => /\d/.test(t)) ?? tokens[0]
-  if (token && looksLikeModel(token)) return token
+  if (token && looksLikeModel(token)) return prettyModel(token)
   // Fallback for an unfamiliar layout: the label column (the text before the run of
   // 2+ spaces), filtered to model-shaped strings.
   const rest = row.replace(/^\s*[❯►▶]?\s*\d+[.)]\s*/, '').trim()
   const label = rest.split(/\s{2,}/)[0]?.replace(/[✔✓]/g, '').trim() ?? ''
-  return looksLikeModel(label) ? label : null
+  return looksLikeModel(label) ? prettyModel(label) : null
 }
 
 // Read the active model by briefly opening the /model picker, reading the marked
@@ -2254,7 +2255,7 @@ async function doModePicker(ctx: Context): Promise<void> {
 
 // Model picker — buttons for the common aliases plus a tip for any specific name. Shared by
 // /model (no arg) and the 🧠 Model button; the model:set:<alias> callback applies a choice.
-const MODEL_ALIASES = ['default', 'opus', 'sonnet', 'haiku']
+const MODEL_ALIASES = ['fable', 'opus', 'sonnet', 'haiku']
 const MODEL_TIP = '💡 Tip: <code>/model &lt;name&gt;</code> to set any specific model.'
 
 function modelPickerKeyboard(): InlineKeyboard {
@@ -3987,7 +3988,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Model picker — apply a tapped model alias
-  const modelSet = /^model:set:(default|opus|sonnet|haiku)$/.exec(data)
+  const modelSet = /^model:set:(fable|opus|sonnet|haiku)$/.exec(data)
   if (modelSet) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
