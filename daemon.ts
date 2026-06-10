@@ -3626,6 +3626,35 @@ async function resolveNewSessionDir(input: string): Promise<string> {
   return t
 }
 
+// The working dirs of every currently-running bridge session (focused + siblings). Two sessions in
+// the SAME dir share Claude Code's per-cwd project transcript, so the daemon can't tell them apart
+// and the second mirrors the first — see distinctSessionDir.
+async function activeSessionCwds(): Promise<Set<string>> {
+  const cwds = new Set<string>()
+  for (const r of await sessionRows()) {
+    if (!r.paneId) continue
+    const c = await paneCwd(r.paneId).catch(() => null)
+    if (c) cwds.add(c)
+  }
+  return cwds
+}
+
+// Pick a launch dir for a new session that won't mirror an existing one. If `desired` already hosts
+// a running bridge session, carve out a fresh sibling subfolder `<desired>/tg-N` (next slot not held
+// by a live session) so the new session is a distinct Claude Code project. Otherwise return `desired`
+// unchanged. Creates the subfolder so tmux's `-c <dir>` can cd into it.
+async function distinctSessionDir(desired: string): Promise<string> {
+  const cwds = await activeSessionCwds()
+  if (!cwds.has(desired)) return desired
+  for (let n = 2; n < 100; n++) {
+    const sub = join(desired, `tg-${n}`)
+    if (cwds.has(sub)) continue            // another live session already there — keep looking
+    try { mkdirSync(sub, { recursive: true }) } catch {}
+    return sub
+  }
+  return desired   // pathological (100 live siblings) — fall back rather than loop forever
+}
+
 // Claude Code refuses to start with the skip-permissions flag in an *untrusted* folder (one with
 // no `hasTrustDialogAccepted` entry under `projects` in ~/.claude.json) — it would show a trust
 // dialog, but a freshly-spawned pane isn't focused, so the daemon's onboarding driver can't answer
@@ -4326,10 +4355,12 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageReplyMarkup().catch(() => {})   // chooser is spent — strip its buttons
       return
     }
-    const dir = nsMatch[1] === 'home' ? homedir() : await resolveNewSessionDir('')
+    const desired = nsMatch[1] === 'home' ? homedir() : await resolveNewSessionDir('')
+    const dir = await distinctSessionDir(desired)   // divert to <dir>/tg-N if `desired` already runs a session (avoids mirroring)
+    const diverted = dir !== desired
     const ok = await spawnSession(dir)
     await ctx.editMessageText(ok
-      ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code> — it'll pop up here with a ▶️ Switch button shortly.`
+      ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${diverted ? ' (fresh subfolder — that folder already has a session)' : ''} — it'll pop up here with a ▶️ Switch button shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code> — does that folder exist?`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
@@ -4747,7 +4778,11 @@ bot.on('message:text', async ctx => {
     if (newSessionReplyTargets.has(nsKey)) {
       newSessionReplyTargets.delete(nsKey)
       if (!dmCommandGate(ctx)) return
-      const dir = await resolveNewSessionDir(text)
+      const desired = await resolveNewSessionDir(text)
+      // Divert to <desired>/tg-N if the typed folder already runs a session (avoids mirroring); this
+      // also creates the subfolder, so a diverted dir already exists below.
+      const dir = await distinctSessionDir(desired)
+      const diverted = dir !== desired
       // If the specified folder doesn't exist, create it (recursively) so a new session can start
       // in a fresh directory — the user asked for a path, so honour it rather than erroring out.
       let created = false
@@ -4759,8 +4794,9 @@ bot.on('message:text', async ctx => {
         }
       }
       const ok = await spawnSession(dir)
+      const note = diverted ? ' (fresh subfolder — that folder already has a session)' : created ? ' (📁 created it for you)' : ''
       await ctx.reply(ok
-        ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — it'll pop up here with a ▶️ Switch button shortly.`
+        ? `🚀 Starting a new session in <code>${escapeHtml(dir)}</code>${note} — it'll pop up here with a ▶️ Switch button shortly.`
         : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
         { parse_mode: 'HTML' })
       return
