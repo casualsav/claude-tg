@@ -75,3 +75,10 @@ export const nameReplyTargets = new Map<string, string>()      // `${chatId}:${m
 export const sessionPins = new Map<string, number>()
 export const pinTextCache = new Map<string, string>()   // last rendered text per chat — skip no-op edits on the 10s refresh
 export const newSessionReplyTargets = new Set<string>()   // `${chatId}:${messageId}` of folder prompts
+
+// ---- /md: create a markdown file via force-reply ----
+// `${chatId}:${messageId}` of the "send me the contents" prompt → the file to write.
+export const mdReplyTargets = new Map<string, { path: string; display: string }>()
+// When the target already exists we stash the typed contents under a short id and ask for an
+// overwrite confirmation (callback data can't carry the path/body, so it carries just the id).
+export const mdOverwritePending = new Map<string, { path: string; display: string; contents: string }>()

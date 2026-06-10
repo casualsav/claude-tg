@@ -7,7 +7,7 @@ import {
   statSync, renameSync, realpathSync, chmodSync, unlinkSync, existsSync, openSync, closeSync, copyFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, extname, basename, sep } from 'node:path'
+import { join, extname, basename, dirname, sep } from 'node:path'
 import { execFileSync, spawn } from 'node:child_process'
 import net from 'node:net'
 import {
@@ -40,7 +40,7 @@ import {
   lastRelayedByFile, unreadNotified, unreadNotifMsgs, offMcpPanes,
   usageWarnState, voiceNudged, scheduleReplyTargets, scheduleComposeTargets,
   sessionNames, renameReplyTargets, nameReplyTargets, sessionPins, pinTextCache,
-  newSessionReplyTargets,
+  newSessionReplyTargets, mdReplyTargets, mdOverwritePending,
 } from './state.ts'
 import { initMirror, updateTerminalMirror, respawnTerminalMirror, abandonMirror } from './mirror.ts'
 import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
@@ -3126,6 +3126,46 @@ bot.command('stream', async ctx => {
   await respawnTerminalMirror()   // a mode change shouldn't leave the old card stranded above this confirmation
 })
 
+// ---- /md: create a markdown file in the active session's working directory ----
+// `/md notes` or `/md notes.md` resolves <cwd>/notes.md, drops a force-reply asking for the
+// file's contents, then writes it when the user replies. The name is confined to the cwd (an
+// absolute path or a `..` escape is rejected) so a stray reply can't clobber files elsewhere.
+function resolveMdPath(cwd: string, name: string): { path: string; display: string } | null {
+  let n = name.trim()
+  if (!n) return null
+  if (!n.toLowerCase().endsWith('.md')) n += '.md'
+  const full = join(cwd, n)
+  if (full !== cwd && !full.startsWith(cwd + sep)) return null   // escaped the working dir
+  const display = full.startsWith(cwd + sep) ? full.slice(cwd.length + 1) : full
+  return { path: full, display }
+}
+
+// Write the contents to disk, creating parent dirs. Returns a result the caller turns into a reply.
+function writeMdFile(path: string, contents: string): { ok: true } | { ok: false; err: string } {
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, contents)
+    return { ok: true }
+  } catch (e) { return { ok: false, err: String((e as Error)?.message ?? e) } }
+}
+
+bot.command('md', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const raw = (ctx.match ?? '').toString().trim()
+  if (!raw) { await ctx.reply('Usage: <code>/md notes</code> or <code>/md notes.md</code> — then reply with the file contents.', { parse_mode: 'HTML' }); return }
+  if (!focus.activePaneId) { await ctx.reply('No active Claude Code session — open one first so I know where to write the file.'); return }
+  const cwd = await paneCwd(focus.activePaneId).catch(() => null)
+  if (!cwd) { await ctx.reply('Couldn\'t read the session\'s working directory.'); return }
+  const target = resolveMdPath(cwd, raw)
+  if (!target) { await ctx.reply('That name escapes the working directory — give a plain file name like <code>notes.md</code>.', { parse_mode: 'HTML' }); return }
+  const verb = existsSync(target.path) ? 'Overwriting' : 'Creating'
+  const sent = await ctx.reply(
+    `📝 ${verb} <code>${escapeHtml(target.display)}</code> in <code>${escapeHtml(cwd)}</code>.\n\nReply to this message with the file contents.`,
+    { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'File contents' } },
+  )
+  if (sent) mdReplyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, target)
+})
+
 // ---- /schedule: deferred messages into a chosen session ----
 // /schedule <dur> drops a force-reply; the reply's text is queued and, at fireAt, pasted into
 // the session that was focused when scheduled (pinned by paneId, so different messages can
@@ -4022,6 +4062,35 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Confirm/cancel overwriting an existing file from /md (the typed contents are stashed by id).
+  const mdOver = /^mdoverwrite:(yes|no):([0-9a-f]+)$/.exec(data)
+  if (mdOver) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const [, decision, id] = mdOver
+    const pending = mdOverwritePending.get(id)
+    mdOverwritePending.delete(id)
+    if (!pending) {
+      await ctx.answerCallbackQuery({ text: 'Expired.' }).catch(() => {})
+      await ctx.editMessageText('⌛ That overwrite prompt expired — run /md again.').catch(() => {})
+      return
+    }
+    if (decision === 'no') {
+      await ctx.answerCallbackQuery({ text: 'Kept.' }).catch(() => {})
+      await ctx.editMessageText(`✖️ Kept <code>${escapeHtml(pending.display)}</code> — not overwritten.`, { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    const res = writeMdFile(pending.path, pending.contents)
+    await ctx.answerCallbackQuery({ text: res.ok ? 'Overwritten.' : 'Failed.' }).catch(() => {})
+    await ctx.editMessageText(res.ok
+      ? `✅ Overwrote <code>${escapeHtml(pending.display)}</code> (${pending.contents.length} chars).`
+      : `❌ Couldn't write <code>${escapeHtml(pending.display)}</code>: ${escapeHtml(res.err)}`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   // Stop confirmation (Yes/No under the "Interrupt the current task?" prompt)
   if (data === 'stopconfirm:yes') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
@@ -4648,6 +4717,27 @@ bot.on('message:text', async ctx => {
       await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(compose.sessionLabel)}</b>:\n\n${escapeHtml(rest)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
       return
     }
+    // Reply to a "📝 /md" force-reply → write the file. If it already exists, stash the contents
+    // and ask for an overwrite confirmation instead of clobbering it outright.
+    const md = mdReplyTargets.get(replyKey)
+    if (md) {
+      mdReplyTargets.delete(replyKey)
+      if (!dmCommandGate(ctx)) return
+      const contents = text.endsWith('\n') ? text : text + '\n'
+      if (existsSync(md.path)) {
+        const id = randomBytes(4).toString('hex')
+        mdOverwritePending.set(id, { path: md.path, display: md.display, contents })
+        const kb = new InlineKeyboard().text('✅ Overwrite', `mdoverwrite:yes:${id}`).text('✖️ Cancel', `mdoverwrite:no:${id}`)
+        await ctx.reply(`⚠️ <code>${escapeHtml(md.display)}</code> already exists. Overwrite it?`, { parse_mode: 'HTML', reply_markup: kb })
+        return
+      }
+      const res = writeMdFile(md.path, contents)
+      await ctx.reply(res.ok
+        ? `✅ Wrote <code>${escapeHtml(md.display)}</code> (${contents.length} chars).`
+        : `❌ Couldn't write <code>${escapeHtml(md.display)}</code>: ${escapeHtml(res.err)}`,
+        { parse_mode: 'HTML' })
+      return
+    }
     const ft = freeTextReplyTargets.get(`${ctx.chat?.id}:${replyTo.message_id}`)
     if (ft) {
       freeTextReplyTargets.delete(`${ctx.chat?.id}:${replyTo.message_id}`)
@@ -5084,6 +5174,7 @@ void (async () => {
               { command: 'settings', description: 'Channel settings — mirror, pin, auto-continue, MCP, voice' },
               { command: 'sessions', description: 'List sessions (/sessions # switch, /sessions name # label)' },
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
+              { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
               { command: 'new', description: 'Start a new session' },
               { command: 'restart', description: 'Exit and resume the current session (picks up config changes)' },
