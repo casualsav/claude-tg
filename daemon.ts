@@ -50,7 +50,7 @@ import {
 } from './access.ts'
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics,
-  getTopicByCwd, setTopic, updateTopic,
+  getTopicByCwd, getCwdByThread, setTopic, updateTopic,
 } from './topics.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -799,6 +799,9 @@ async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: 
 const RELAY_POLL_MS = 1500
 let lastRelayedUuid = ''
 let relayCursorPrimed = false
+// Forum-topics: transcript files whose aux-relay cursor we've primed (so a pane's existing tail
+// isn't relayed when it's first seen by the non-focused relay loop).
+const auxRelayPrimed = new Set<string>()
 // Last uuid relayed per transcript file, so switching back to a session can replay what it
 // said while unfocused. In-memory: a fresh daemon has no cursors, so it never replays a
 // backlog on the first focus of a session (or after a restart).
@@ -915,6 +918,39 @@ function startRelayLoop(): void {
   void primeRelayCursor().finally(() => {
     if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
   })
+}
+
+// Forum-topics parallel relay (phase 3b). The focused pane is handled by the rich relayLoopTick
+// (mirror + typing + card). This lightweight loop covers every OTHER off-MCP pane, relaying each
+// session's concluded replies into its own topic — so sessions run in parallel without /sessions
+// switching. Cursors are shared via lastRelayedByFile (keyed by transcript file), and the focused
+// pane is skipped, so the two loops never double-send. No-op outside topic mode (single-focus
+// behavior is unchanged). Newly-seen panes are primed (skip their existing tail), relay from next tick.
+async function auxRelayTick(): Promise<void> {
+  if (TRANSCRIPT_OUTBOUND && isTopicMode()) {
+    for (const pane of [...offMcpPanes]) {
+      if (pane === focus.activePaneId) continue   // the rich relay loop owns the focused pane
+      try {
+        const cwd = await paneCwd(pane).catch(() => null)
+        const file = cwd ? resolveTranscript(cwd) : null
+        if (!file) continue
+        if (!auxRelayPrimed.has(file)) {
+          lastRelayedByFile.set(file, latestFinalReply(file)?.uuid ?? '')
+          auxRelayPrimed.add(file)
+          continue
+        }
+        if (turnInProgress(file)) continue        // relay only once the turn concludes
+        const cursor = lastRelayedByFile.get(file) ?? ''
+        for (const r of finalRepliesAfter(file, cursor)) {
+          if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
+          lastRelayedByFile.set(file, r.uuid)     // advance before the await so a fast tick can't double-send
+          const targets = await outboundTargetsFor(pane)
+          for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux relay send failed: ${e}\n`))
+        }
+      } catch { /* transient (tmux/transcript) — retry next tick */ }
+    }
+  }
+  setTimeout(() => void auxRelayTick(), RELAY_POLL_MS)
 }
 
 // ---- Off-MCP pane auto-discovery ----
@@ -1146,7 +1182,15 @@ async function discoverPanes(): Promise<void> {
 // <channel> block into its pane bypasses that consumer limit and works for any focused
 // session. No-tmux sessions (no pane to drive) fall back to the socket; with nothing
 // focused, buffer for replay when a session next takes focus.
-function emitInbound(params: InboundParams): void {
+function emitInbound(params: InboundParams, targetPane?: string | null): void {
+  // Forum-topics mode: a message typed in a session's topic is delivered to THAT session, not
+  // whichever is focused. The focused pane keeps the watcher (pause mirror during inject); any other
+  // pane gets a plain paste (no watcher to pause). See handleInbound for how targetPane is resolved.
+  if (targetPane) {
+    if (targetPane === focus.activePaneId && focus.paneWatcher) enqueueInboundInject(targetPane, focus.paneWatcher, params)
+    else pasteInbound(targetPane, params)
+    return
+  }
   if (focus.activePaneId && focus.paneWatcher) {
     enqueueInboundInject(focus.activePaneId, focus.paneWatcher, params)
   } else if (focus.activeShim) {
@@ -1155,6 +1199,29 @@ function emitInbound(params: InboundParams): void {
     bufferEvent(params)
     void hintNoSession(params)
   }
+}
+
+// Deliver inbound to a NON-focused topic pane: format the same channel block and paste it (no
+// watcher to pause), serialized through the shared inject chain so two messages can't interleave.
+function pasteInbound(paneId: string, params: InboundParams): void {
+  const block = formatChannelBlock(params)
+  const run = () => pasteToPane(paneId, block)
+    .then(ok => ok
+      ? process.stderr.write(`daemon: inbound pasted to topic pane ${paneId} chat=${params.meta.chat_id}\n`)
+      : (process.stderr.write(`daemon: topic pane ${paneId} gone — buffering\n`), bufferEvent(params)))
+    .catch(err => process.stderr.write(`daemon: topic inbound paste failed: ${err}\n`))
+  inboundInjectChain = inboundInjectChain.then(run, run)
+}
+
+// Resolve a forum topic's session to a live pane: thread id → cwd (the topic map) → the off-MCP pane
+// running in that cwd. Prefers the focused pane when it matches. Returns null if no live pane is in
+// that cwd (the session ended) — the caller buffers rather than misrouting to another session.
+async function paneForCwd(cwd: string): Promise<string | null> {
+  if (focus.activePaneId && (await paneCwd(focus.activePaneId).catch(() => null)) === cwd) return focus.activePaneId
+  for (const p of offMcpPanes) {
+    if ((await paneCwd(p).catch(() => null)) === cwd) return p
+  }
+  return null
 }
 
 // With nothing to deliver to, inbound just buffers silently — the most common "it's not
@@ -4780,7 +4847,18 @@ async function handleInbound(
     },
   }
 
-  emitInbound(params)
+  // Forum-topics routing: a message sent inside a session's topic carries its message_thread_id.
+  // Map it to the session (thread → cwd → live pane) so it drives THAT session. A topic whose
+  // session has ended resolves to no pane → buffer (don't misroute to the focused session). Messages
+  // in General (no thread id) fall through to the normal focused-session delivery.
+  let targetPane: string | null | undefined
+  const threadId = ctx.message?.message_thread_id
+  if (isTopicMode() && typeof threadId === 'number') {
+    const cwd = getCwdByThread(threadId)
+    targetPane = cwd ? await paneForCwd(cwd) : null
+    if (cwd && !targetPane) { bufferEvent(params); return }   // topic exists but its session is gone
+  }
+  emitInbound(params, targetPane)
 }
 
 bot.on('message:text', async ctx => {
@@ -5277,6 +5355,9 @@ setInterval(() => void updateSessionPin(), 10_000)
 // right after transcription; this clears photos/documents past the retention TTL (default 24h).
 sweepInbox()
 setInterval(sweepInbox, 3_600_000).unref()
+
+// Forum-topics: start the parallel relay for non-focused sessions (no-op outside topic mode).
+void auxRelayTick()
 
 // Make the `tg` CLI + ensure-daemon launcher available to plugin-less sessions, no setup.
 provisionOffMcpTooling()
