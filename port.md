@@ -1,78 +1,167 @@
-# Port plan — slash commands & outbound → per-topic sessions
+# Port plan — full DM→group (per-topic) functionality
 
-Status as of v0.1.11. Forum-topics mode works for the core loop (inbound by topic, parallel relay,
-eager topics, per-topic typing). What's left: make **slash commands** (and the remaining outbound
-paths) topic-aware. Today they act on `focus.activePaneId` and reply via direct
-`bot.api.sendMessage(chat_id, …)`, so e.g. `/terminal` in the `test` topic showed the *focused*
-session's terminal in **General**. See `docs/forum-topics.md` for the architecture.
+> **Sequencing (decided 2026-06-10).** Split into two tracks. **Track A — make the group fully
+> functional with one session per project** — is being implemented now: port every command, tap, and
+> relay to be topic-aware on the **existing cwd keying** (no schema change, no transcript change).
+> **Track B — multiple sessions in one project (`/new` sibling topics)** — is deferred: it needs the
+> session-id re-key (below) *and* per-session transcript resolution, because outbound is read from
+> `resolveTranscript(cwd)` (most-recent `.jsonl` in the project dir) — two same-cwd sessions would
+> cross-talk. Track B's cleanest fix: a hook that stamps each pane with `@tg_transcript=<path>`
+> (Claude Code hands hooks `transcript_path`). The "Topic keying" + `/new` sections below are Track B.
 
-## Goal
-A command sent inside a session's topic acts on **that** session and replies **in that topic**.
-In General (no thread) or DM, it acts on the focused session — today's behavior, unchanged.
+**Goal.** A new user can opt into **forum-topics mode**: one Telegram supergroup, one topic per
+Claude Code session. Everything that works in a DM works the same inside each session's topic — type
+to drive it, get replies, taps, prompts, status, all scoped to *that* session. **General** is the
+control channel (global/overview commands only). DM-only users are unaffected — every change is gated
+on `isTopicMode()`.
 
-## Build first (shared plumbing)
-1. **`commandTarget(ctx)` → `{ paneId, isFocused, replyThread? } | null`**
-   - topic mode + `ctx.message.message_thread_id` present → `getCwdByThread(thread)` → `paneForCwd(cwd)`;
-     `replyThread = thread`. If the topic's session is gone → reply in-thread "session isn't running", return null.
-   - General (no thread) or DM → `focus.activePaneId`; `replyThread = undefined`.
-2. **Thread-aware reply.** `ctx.reply()` already auto-threads to the source topic — the bug is commands
-   that call `bot.api.sendMessage(String(ctx.chat!.id), …)` directly (no thread). Audit + switch those
-   to `ctx.reply` or pass `{ message_thread_id: replyThread }`. (Grep: `sendMessage(String(ctx.chat`.)
-3. **`injectToPaneAny(paneId, text)`** = focused → `injectPaste(paneId, focus.paneWatcher, text)`,
-   else `pasteToPane(paneId, text)` (the scheduler already uses this pattern). Non-focused panes have
-   no `PaneWatcher`; pane-driving commands must use the paste path. Captures/readouts use
-   `capturePane(paneId)` directly (works on any pane; no watcher needed — nothing to pause off-focus).
+## Where we are (as of v0.1.14)
 
-## Commands to port (each: target the topic's session + reply in-thread)
-- **Read-only (easy):** `/terminal`, `/cost`, `/context` — capture the target pane; `/cost`/`/context`
-  type into the target pane (paste path off-focus) then capture. Reply in-thread.
-- **`/stop`** — send `Escape` to the target pane (not the focused one).
-- **Pane-driving (refactor to take a paneId, watcher optional):** `/mode` + aliases
+The **outbound** spine is built. These already route to the right topic via the existing helpers
+`outboundTargetsFor(paneId)` (→ `{chat, thread}[]`) and `topicThreadFor(paneId)`:
+
+- ✅ Inbound by topic — text / voice / photos / files map `message_thread_id → cwd → pane` and drive
+  that session (`emitInbound`, daemon ~4961). Topic whose session ended → buffered, not misrouted.
+- ✅ Agent reply text → the session's topic (`sendAgentText(..., t.thread)`, ~919/992).
+- ✅ Live activity / `/stream` card → the session's topic (v0.1.12).
+- ✅ Per-topic "typing…" (v0.1.11) and per-topic pinned status card (v0.1.14).
+- ✅ Eager per-session topic + "session started" notice on discovery (`ensureSessionTopic`).
+- ✅ `dmCommandGate` admits the bound group (v0.1.10) — commands *run* in the group.
+
+What's **left** is everything driven from a command/tap/prompt that still assumes a single global
+focus. The pattern to kill, repo-wide: handlers read `focus.activePaneId` / `focus.paneWatcher` and
+reply to `String(ctx.chat!.id)` (or `ctx.reply` with no thread). In a topic that means "drive the
+*focused* session, answer in *General*." Re-target each to the topic's session and reply in-thread.
+
+## Build first — shared command-side plumbing
+
+The outbound helpers exist; the **command/inbound-control** mirror does not. Build these once:
+
+0. **Re-key topics by session-instance id, not cwd** (foundational — see "Topic keying" below). A
+   project can now hold **multiple** sessions (via `/new`), each its own topic, so cwd is no longer a
+   unique key. `topics.json` becomes `{ sessionId → { threadId, cwd, name, closed, createdAt } }`;
+   `getCwdByThread` → `getSessionByThread`, `getTopicByCwd` → `getTopicBySession`, and `paneForCwd` →
+   `paneForSession` (resolve the live pane by its stamped session marker, not by cwd scan).
+1. **`commandTarget(ctx)` → `{ paneId, watcher, isFocused, replyThread? } | null`** — the inverse of
+   `outboundTargetsFor`. Works for both `bot.command` and `callback_query` (read the thread from
+   `ctx.message?.message_thread_id` ?? `ctx.callbackQuery?.message?.message_thread_id`).
+   - Topic mode + a thread id → `getSessionByThread(thread)` → `paneForSession(sessionId)`;
+     `replyThread = thread`; `isFocused = (paneId === focus.activePaneId)`;
+     `watcher = isFocused ? focus.paneWatcher : undefined`. Topic exists but its session is gone →
+     reply in-thread "session isn't running", return `null`.
+   - General (no thread) **or** DM → `focus.activePaneId` / `focus.paneWatcher`; `replyThread =
+     undefined`. This preserves today's behavior exactly.
+2. **`replyInThread(ctx, text, opts?)`** — `ctx.reply` already auto-threads to the source topic; the
+   bug is the handlers that bypass it with `bot.api.sendMessage(String(ctx.chat!.id), …)` (no thread).
+   Audit (`grep -n "sendMessage(String(ctx.chat"`) and switch each to `ctx.reply` or pass
+   `{ message_thread_id: replyThread }`. Same for the chunked readout sends inside `runReadout`.
+3. **`injectToPaneAny(paneId, watcher, text)`** — focused → `injectPaste(paneId, watcher, text)`;
+   non-focused → `pasteToPane(paneId, text)` (the scheduler/`outboundTargetsFor` pattern). Non-focused
+   panes have **no `PaneWatcher`** — pane-driving commands must use the paste path off-focus; captures
+   (`capturePane(paneId)`) work on any pane with no watcher.
+
+## Topic keying — session-instance id (data-model change)
+
+Topics move from cwd-keyed to **session-keyed** so one project can host several sessions, each its own
+topic (decided: `/new` in a topic spawns a same-project sibling session/topic).
+
+- **Stable id.** Pane ids churn; cwd isn't unique anymore. Stamp each adopted session with a generated
+  `sessionId` token written to a tmux pane option (e.g. `@tg_session`) at `claude-tg` adoption, and
+  store it in `topics.json`. It survives daemon restarts (the pane option persists); a tmux-server
+  restart drops every pane anyway, so nothing is orphaned.
+- **Resolver.** `paneForSession(sessionId)` finds the live pane whose `@tg_session` matches (replacing
+  the cwd scan in `paneForCwd`). Inbound (`getCwdByThread` at ~4968) and `outboundTargetsFor`/
+  `topicThreadFor` switch to the session key; `ensureSessionTopic`/`ensureTopicFor` create/look up by
+  sessionId, with cwd carried as a field for the title.
+- **Title.** First session in a cwd → project/branch name; subsequent → ` #2`, ` #3`. `editForumTopic`
+  on branch change as today.
+- **Migration.** Existing cwd-keyed `topics.json` entries map 1:1 to the first session in each cwd on
+  first load (synthesize a sessionId, stamp the matching pane). Tolerant loader already drops malformed
+  rows.
+
+## Slash commands to port
+
+Each: target the topic's session via `commandTarget`, drive via `injectToPaneAny`, reply in-thread.
+The blocker today is that the readout/mode/relay helpers take `focus.*` implicitly — generalize them
+to accept `(paneId, watcher?)`.
+
+- **Read-only (easy):** `/terminal`, `/cost`, `/context` — `doReadout`/`runReadout` (daemon ~2625) and
+  the `/terminal` handler (~3025) hardcode `focus.activePaneId`. Take the target pane; type into it via
+  the paste path off-focus, then `capturePane`; chunked reply in-thread.
+- **`/stop`** — `confirmStop` (~2367) → send `Escape` to the **target** pane, not the focused one.
+- **Pane-driving (refactor to take `paneId`, watcher optional):** `/mode` + aliases
   (`/plan` `/auto` `/default` `/acceptedits` `/bypass` `/yolo`), `/model`, `/effort`, `/compact`,
-  `/clear`/`/reset`, `/restart`. Today these call `switchToMode` / `readCurrentModel` /
-  `relaySlashCommand` with `focus.paneWatcher`; generalize them to accept the target pane and use the
-  paste path when it isn't focused.
-- **Force-reply commands:** `/md`, `/schedule`, session rename/name. The force-reply round-trip keys on
-  `${chatId}:${messageId}`; also store the **thread** so the follow-up prompt AND the result land back
-  in the right topic.
-- **Leave in General (control scope), no change:** `/sessions`, `/settings`, `/update`, `/bind`/`/unbind`,
-  `/start`, `/status`, `/resume`.
+  `/clear`/`/reset`, `/restart`, `/new`. These call `handleModeCommand`/`switchToMode`/`relaySlashCommand`
+  with `focus.paneWatcher` (~2256/480/2213); generalize to the target pane + paste path off-focus.
+  - **`/new` in a topic spawns a fresh session in that topic's project** (same cwd) and gives it its
+    **own new topic** — `createForumTopic` with a disambiguated title (`foo`, then `foo #2`, …). This
+    is why topics are re-keyed by session-instance id (step 0); two same-cwd sessions can't share one
+    topic. The "Add new session" path (`confirmNewSession`/`newsession` callback, ~2319) must, in topic
+    mode, launch in the originating topic's cwd and bind the new pane to a new topic. (`/new` in General
+    stays global — focused session's project, as today.)
+- **Force-reply round-trips:** `/md`, `/schedule`, `/rename`, session name. The reply key is
+  `${chatId}:${messageId}` (`renameReplyTargets`/`nameReplyTargets`/etc.); **also store the thread** so
+  both the force-reply prompt *and* its eventual result land back in the originating topic.
+- **Stay in General (global control), no per-topic change:** `/sessions`, `/settings`, `/update`,
+  `/bind`/`/unbind`, `/start`/`/help`, `/status`, `/resume`, `/autocontinue`, `/mcp`, `/pin`. (These act
+  on the whole bridge or list all sessions — General is their home. They may run in a topic too, but
+  they don't need a per-session target.)
 
-## Other outbound still single-focus → route to the session's topic
-- **Permission prompts** (`relayPermissionToTelegram`) → the requesting session's topic (it already
-  knows the origin pane via `permissionOrigin`). High value.
-- **Interactive prompts / select menus** (`relayPromptToTelegram`) → session's topic.
-- **Login / auth-URL prompts** (`relayAuthUrlToTelegram`) → session's topic.
-- **Usage-limit banners, unread pings, "new session" notify** → topic instead of `allowFrom`.
-- **Live activity mirror** (`updateTerminalMirror`) — currently one card on the focused pane; per-topic
-  cards are the biggest piece. Optional / last.
+## Button taps (callback_query) — currently single-focus
 
-## Per-topic status pin (the other requested feature, still TODO)
-Current pin = one all-sessions message pinned in the DM (`updateSessionPin`, `sessionPins` keyed by
-chat). For topics: one pin **per topic** showing just that session (cwd · branch · model · mode),
-pinned in-thread, refreshed on the 10s cadence. Key `sessionPins` by `${group}#${thread}`; add a
-single-session `sessionPinText`; pass `message_thread_id` to create/edit/`pinChatMessage`. Decide
-whether it carries per-session quick-action buttons (Model/Mode/Stop) — those buttons' callbacks must
-then target that topic's pane, not the focused one (ties into `commandTarget`).
+`bot.on('callback_query:data')` (~4060) and the `/compact` button (~4097) use `focus.activePaneId`.
+Route every per-session callback through `commandTarget(ctx)` so a tap on a **topic's** pin/card acts
+on that topic's pane:
+
+- Per-topic status-pin quick actions (Model / Mode / Stop) must target the pin's own topic pane.
+- Interactive-prompt taps (`freeTextPrompts` / `chatPrompts`, ~4728/4755/4784) key on
+  `${chat}:${message_id}` — already message-scoped, so they resolve correctly; just confirm the
+  follow-up reply threads back (it inherits the source message's thread via `ctx.reply`).
+
+## Remaining outbound relays → the session's topic
+
+Three still blast `loadAccess().allowFrom` with no thread; route each to the **originating** session's
+topic (fall back to `allowFrom`/General when no topic):
+
+- **Permission prompts** — `relayPermissionToTelegram` (~1842). The origin pane is known
+  (`permissionOrigin` by `request_id`) → `outboundTargetsFor(originPane)`. **Highest value.**
+- **Interactive prompts / select menus** — `relayPromptToTelegram` (~1772).
+- **Login / auth-URL prompts** — `relayAuthUrlToTelegram` (~1928).
+- **Usage-limit banners, unread pings, pre-flush sends** (~945/1768) → the session's topic.
+
+## Access / pairing in the group
+
+- `dmCommandGate` admits the bound group (v0.1.10). Confirm **per-sender** gating holds inside topics:
+  a non-allowlisted member posting in any topic is ignored / told to pair; the existing group policy in
+  `ACCESS.md` governs. Pairing replies should thread back to where they were sent.
+- Decision (from `docs/forum-topics.md`): **allowlist-only** drives sessions; group membership alone
+  doesn't. Keep that.
 
 ## Caveats
-- **Watcher/mirror are single-focus.** Non-focused panes have no watcher; drive them via `pasteToPane`
-  and capture directly. The rich mirror stays on the focused pane until per-topic cards are built.
-- **Keep DM mode identical** — gate every change on `isTopicMode()`.
-- `dmCommandGate` already admits the bound group (v0.1.10), so commands *run* in the group; they just
-  don't yet target the right session or reply in-thread.
+
+- **Watcher/mirror are single-focus.** Non-focused panes have no `PaneWatcher` → drive via
+  `pasteToPane`, capture directly. The rich activity mirror already follows the focused pane; per-topic
+  cards landed in v0.1.12/0.1.14.
+- **Keep DM mode byte-identical** — every branch gated on `isTopicMode()`; the General/no-thread path
+  must reduce to exactly today's `focus.*` behavior.
 
 ## Suggested order (each step deployable + testable on its own)
-1. `commandTarget` + thread-aware reply audit + `injectToPaneAny`.
+
+1. **Re-key topics by session-instance id** (topics.ts schema + resolver + migration) — the foundation
+   `/new` and multi-session topics depend on. Then `commandTarget` + `replyInThread` audit +
+   `injectToPaneAny`. (No behavior change in DM/General.)
 2. Read-only: `/terminal`, `/cost`, `/context`.
 3. `/stop`.
-4. Pane-driving: `/mode*`, `/model`, `/effort`, `/compact`, `/clear`, `/restart`.
-5. Force-reply thread persistence: `/md`, `/schedule`, rename/name.
-6. Permission + interactive + auth-URL prompts → topic.
-7. Per-topic status pin.
-8. Per-topic activity mirror (largest; optional).
+4. Pane-driving: `/mode*`, `/model`, `/effort`, `/compact`, `/clear`, `/restart`, and `/new` (spawns a
+   same-project sibling session + its own topic).
+5. Force-reply thread persistence: `/md`, `/schedule`, `/rename`, name.
+6. Button taps (callbacks) → `commandTarget`, incl. per-topic pin quick-actions.
+7. Relays → topic: permission (first), interactive prompt, auth-URL, banners/pings.
+8. Access/pairing-in-topic confirmation pass.
 
 ## Test harness
-Two sessions (`projects` + `test`). For each ported command: run in the **test** topic → acts on the
-test session, reply lands in the test topic; run in **General** → acts on the focused session; run in
-**DM** → unchanged. Watch especially: non-focused pane injection (paste path) and reply threading.
+
+Two sessions (`projects` + `test`). For each ported path: run in the **test** topic → acts on the test
+session, reply lands in the test topic; run in **General** → acts on the focused session (unchanged);
+run in **DM** → unchanged. Watch especially: non-focused pane injection (paste path, no watcher),
+reply threading, and permission/prompt taps landing in the right topic.
