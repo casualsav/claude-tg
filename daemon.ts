@@ -914,25 +914,73 @@ function resolveInstanceId(): string {
 const INSTANCE_ID = resolveInstanceId()
 if (INSTANCE_ID !== '1') process.stderr.write(`daemon: bridge instance id = ${INSTANCE_ID} (state dir ${STATE_DIR})\n`)
 
-// Scan tmux for every adoptable bridge-marked pane (registered MCP sessions excluded). Reads the
-// pane option straight off list-panes — no process-tree walk, no argv parsing.
+// A `claude remote-control` instance (a local session being driven from claude.ai web/mobile)
+// presents in the process tree as `claude remote-control`, spawning a `claude.exe --print
+// --sdk-url …/v1/code/sessions/cse_…` child. The bridge must NOT drive such a pane: it's already
+// owned by another controller, so typing into it would fight claude.ai for the same session.
+// The @tg_bridge tag can't gate this on its own — the tag lives on the *pane* and outlives the
+// claude that set it (it's sticky: claude-tg sets it, adoptPane re-stamps it). So a pane launched
+// via claude-tg, then reused to run `claude remote-control` after that first claude exits, is still
+// tagged and would be adopted. We detect the live remote-control process instead. Returns the set
+// of every ancestor pid of any remote-control process, so a pane whose pane_pid is in the set is
+// hosting one. Linux /proc-based; any failure yields an empty set (no exclusion — fail open to the
+// pre-existing tag-only behaviour rather than dropping legitimate panes).
+function remoteControlAncestorPids(): Set<number> {
+  const ancestors = new Set<number>()
+  let pids: string[]
+  try { pids = readdirSync('/proc').filter(n => /^\d+$/.test(n)) } catch { return ancestors }
+  const ppidOf = new Map<number, number>()
+  const isRC: number[] = []
+  for (const name of pids) {
+    const pid = Number(name)
+    let cmdline = ''
+    try { cmdline = readFileSync(`/proc/${pid}/cmdline`, 'utf8') } catch { continue }  // exited; skip
+    // argv is NUL-delimited; `claude\0remote-control` is the parent, the `…/v1/code/sessions/` url
+    // is the SDK child. Either is a definitive remote-control marker.
+    const argv = cmdline.replace(/\0/g, ' ')
+    if (/(^|\/)claude\b.*\bremote-control\b/.test(argv) || argv.includes('/v1/code/sessions/')) isRC.push(pid)
+    let ppid = 0
+    try {
+      // /proc/<pid>/stat: `pid (comm) state ppid …` — comm can contain spaces/parens, so split on
+      // the LAST ')' to land cleanly on the state+ppid fields.
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ')
+      ppid = Number(fields[1])  // fields[0]=state, fields[1]=ppid
+    } catch {}
+    ppidOf.set(pid, ppid)
+  }
+  for (const start of isRC) {
+    for (let p: number | undefined = start; p && p > 1 && !ancestors.has(p); p = ppidOf.get(p)) {
+      ancestors.add(p)
+    }
+  }
+  return ancestors
+}
+
+// Scan tmux for every adoptable bridge-marked pane (registered MCP + remote-control sessions
+// excluded). Reads the pane option straight off list-panes; the remote-control filter is the only
+// process-tree walk, gated to tagged candidates so it costs nothing when no bridge panes exist.
 async function findOffMcpPanes(): Promise<string[]> {
   let out = ''
   try {
     const { stdout } = await exec('tmux',
-      ['list-panes', '-a', '-F', `#{pane_id}\t#{${BRIDGE_PANE_OPT}}`], { timeout: 3000 })
+      ['list-panes', '-a', '-F', `#{pane_id}\t#{${BRIDGE_PANE_OPT}}\t#{pane_pid}`], { timeout: 3000 })
     out = stdout
   } catch { return [] }
 
-  const candidates: string[] = []
+  const tagged: { paneId: string; panePid: number }[] = []
   for (const line of out.split('\n')) {
     if (!line.trim()) continue
-    const [paneId, mark] = line.split('\t')
+    const [paneId, mark, panePid] = line.split('\t')
     if (mark !== INSTANCE_ID) continue    // not opted in for THIS instance (blank, or another daemon's)
     if (sessions.has(paneId)) continue    // a registered (plugin/MCP) session — never adopt
-    candidates.push(paneId)
+    tagged.push({ paneId, panePid: Number(panePid) })
   }
-  return candidates
+  if (!tagged.length) return []
+
+  // Drop any tagged pane that's actually hosting a `claude remote-control` session (see above).
+  const rc = remoteControlAncestorPids()
+  return tagged.filter(t => !rc.has(t.panePid)).map(t => t.paneId)
 }
 
 // Mirror the FORCE_PANE binding for an auto-discovered pane: drive it directly, no Session
