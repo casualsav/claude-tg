@@ -27,7 +27,7 @@ import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress,
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
-  autoSizeWindowOf, paneCommand, paneCwd, lastKnownPaneCwd, PaneWatcher,
+  autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
 } from './pane-io.ts'
 import type {
   PendingEntry, GroupPolicy, Access, Session,
@@ -49,8 +49,8 @@ import {
   pruneExpired, defaultAccess, type GateResult,
 } from './access.ts'
 import {
-  setGroupChatId, getGroupChatId, isTopicMode, loadTopics,
-  getTopicByCwd, getCwdByThread, setTopic, updateTopic, removeTopic, listTopics,
+  setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
+  getTopicBySession, getSessionByThread, findTopicByCwd, setTopic, updateTopic, removeTopic, listTopics,
 } from './topics.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -759,22 +759,76 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
   }
 }
 
+// ---- Session-instance identity (Track B foundation) ----
+// Every pane gets a generated sessionId stamped as a tmux pane option, so the identity survives
+// daemon restarts (tmux holds it) and one project can host several sessions, each its own topic.
+// The cache also remembers ids for panes that have DIED — that's how close-on-end finds the topic.
+const SESSION_PANE_OPT = '@tg_session'
+const paneSessionCache = new Map<string, string>()   // paneId → sessionId (kept after pane death)
+
+// The pane's session id: cache → pane option → mint/adopt + stamp. An unstamped pane first tries
+// to adopt an existing topic entry for its cwd that no other live pane has claimed (this is the
+// lazy migration of pre-Track-B cwd-keyed entries and the tmux-restart re-attach); otherwise a
+// fresh id is minted. `stampIfMissing: false` is the read-only probe (no mint, no stamp).
+async function sessionForPane(pane: string, stampIfMissing = true): Promise<string | null> {
+  const hit = paneSessionCache.get(pane)
+  if (hit) return hit
+  try {
+    const { stdout } = await exec('tmux', ['show-options', '-pqv', '-t', pane, SESSION_PANE_OPT], { timeout: 2000 })
+    const stamped = stdout.trim()
+    if (stamped) { paneSessionCache.set(pane, stamped); return stamped }
+  } catch { return null }   // pane gone — only the cache could answer, and it didn't
+  if (!stampIfMissing) return null
+  const cwd = await paneCwd(pane).catch(() => null)
+  const cand = cwd ? findTopicByCwd(cwd) : undefined
+  const claimed = cand && [...paneSessionCache.entries()].some(([p, s]) => s === cand.sessionId && p !== pane)
+  const sid = cand && !claimed ? cand.sessionId : genSessionId()
+  try { await exec('tmux', ['set-option', '-p', '-t', pane, SESSION_PANE_OPT, sid], { timeout: 2000 }) } catch { return null }
+  paneSessionCache.set(pane, sid)
+  return sid
+}
+
+// The live pane carrying `sessionId` — cache first, then the live panes' stamps (covers a daemon
+// restart), then the entry's cwd as a last resort (a tmux restart drops pane options; only an
+// unstamped pane may be adopted that way, so a sibling's pane is never grabbed).
+async function paneForSession(sessionId: string): Promise<string | null> {
+  for (const [p, s] of paneSessionCache) {
+    if (s === sessionId) {
+      if (await paneAlive(p)) return p
+      break   // recorded pane is dead — fall through to the scans
+    }
+  }
+  for (const p of [...offMcpPanes]) {
+    if ((await sessionForPane(p, false)) === sessionId) return p
+  }
+  const t = getTopicBySession(sessionId)
+  if (t) {
+    const p = await paneForCwd(t.cwd)
+    if (p && !(await sessionForPane(p, false))) {
+      try { await exec('tmux', ['set-option', '-p', '-t', p, SESSION_PANE_OPT, sessionId], { timeout: 2000 }) } catch {}
+      paneSessionCache.set(p, sessionId)
+      return p
+    }
+  }
+  return null
+}
+
 // ---- Forum-topics outbound routing (phase 2b) ----
-// Map a session (keyed by its cwd) to a forum topic, creating it on first use. Returns the topic's
-// thread id, or undefined if creation failed (caller falls back to the General topic).
-async function ensureTopicFor(group: string, cwd: string): Promise<number | undefined> {
-  const existing = getTopicByCwd(cwd)
+// Map a session to its forum topic, creating it on first use. Returns the topic's thread id, or
+// undefined if creation failed (caller falls back to the General topic).
+async function ensureTopicFor(group: string, sessionId: string, cwd: string): Promise<number | undefined> {
+  const existing = getTopicBySession(sessionId)
   if (existing) {
     if (existing.closed) {
-      try { await bot.api.reopenForumTopic(group, existing.threadId); updateTopic(cwd, { closed: false }) } catch {}
+      try { await bot.api.reopenForumTopic(group, existing.threadId); updateTopic(sessionId, { closed: false }) } catch {}
     }
     return existing.threadId
   }
   const name = basename(cwd) || 'session'
   try {
     const t = await bot.api.createForumTopic(group, name)
-    setTopic(cwd, { threadId: t.message_thread_id, name, closed: false, createdAt: Date.now() })
-    process.stderr.write(`daemon: created topic "${name}" (thread ${t.message_thread_id}) for ${cwd}\n`)
+    setTopic(sessionId, { threadId: t.message_thread_id, cwd, name, closed: false, createdAt: Date.now() })
+    process.stderr.write(`daemon: created topic "${name}" (thread ${t.message_thread_id}) for ${cwd} [${sessionId}]\n`)
     return t.message_thread_id
   } catch (e) {
     process.stderr.write(`daemon: createForumTopic failed for ${cwd}: ${e}\n`)
@@ -783,15 +837,16 @@ async function ensureTopicFor(group: string, cwd: string): Promise<number | unde
 }
 
 // Where a session's outbound should go. DM mode → the allowlisted DM chats (no thread). Topic mode →
-// the bound group, threaded to the session's own topic (created on first use; General if no cwd).
+// the bound group, threaded to the session's own topic (created on first use; General if unresolvable).
 async function outboundTargetsFor(paneId: string | null): Promise<Array<{ chat: string; thread?: number }>> {
   const dmTargets = () => loadAccess().allowFrom.map(chat => ({ chat }))
   if (!isTopicMode()) return dmTargets()
   const group = getGroupChatId()
   if (!group) return dmTargets()
+  const sid = paneId ? await sessionForPane(paneId) : null
   const cwd = paneId ? await paneCwd(paneId).catch(() => null) : null
-  if (!cwd) return [{ chat: group }]
-  return [{ chat: group, thread: await ensureTopicFor(group, cwd) }]
+  if (!sid || !cwd) return [{ chat: group }]
+  return [{ chat: group, thread: await ensureTopicFor(group, sid, cwd) }]
 }
 
 // Eagerly give a freshly-discovered session its topic (don't wait for its first reply) and post a
@@ -803,48 +858,46 @@ async function ensureSessionTopic(paneId: string): Promise<void> {
   if (!isTopicMode()) return
   const group = getGroupChatId()
   if (!group) return
+  const sid = await sessionForPane(paneId)
   const cwd = await paneCwd(paneId).catch(() => null)
-  if (!cwd) return
-  if (getTopicByCwd(cwd) || topicEnsureInFlight.has(cwd)) return   // already have it / creating it
-  topicEnsureInFlight.add(cwd)
+  if (!sid || !cwd) return
+  if (getTopicBySession(sid) || topicEnsureInFlight.has(sid)) return   // already have it / creating it
+  topicEnsureInFlight.add(sid)
   try {
-    const thread = await ensureTopicFor(group, cwd)
+    const thread = await ensureTopicFor(group, sid, cwd)
     if (thread) await bot.api.sendMessage(group,
       `🆕 <b>Session started</b>\n<code>${escapeHtml(cwd)}</code>\n\nType in this topic to drive this session.`,
       { parse_mode: 'HTML', message_thread_id: thread }).catch(() => {})
   } finally {
-    topicEnsureInFlight.delete(cwd)
+    topicEnsureInFlight.delete(sid)
   }
 }
 
 // Session ended → close its topic (history stays; ensureTopicFor reopens it if the session
-// returns). The pane is already gone, so its cwd comes from the last-known cache. Same-cwd
-// siblings share one topic — only the LAST pane out closes it. The paneAlive re-check guards
-// against a transient tmux blip mass-pruning the registry and close/reopen-flapping topics.
+// returns). The pane is already gone, so its id comes from the session cache (entries persist
+// after death for exactly this). The paneAlive re-check guards against a transient tmux blip
+// mass-pruning the registry and close/reopen-flapping topics.
 async function closeTopicForPane(pane: string): Promise<void> {
   if (!isTopicMode()) return
   const group = getGroupChatId()
   if (!group) return
   if (await paneAlive(pane)) return   // transient registry miss, not a real death
-  const cwd = lastKnownPaneCwd(pane)
-  if (!cwd) return
-  const t = getTopicByCwd(cwd)
+  const sid = paneSessionCache.get(pane)
+  if (!sid) return
+  const t = getTopicBySession(sid)
   if (!t || t.closed) return
-  for (const p of [...offMcpPanes]) {
-    if (p !== pane && lastKnownPaneCwd(p) === cwd && await paneAlive(p)) return   // a sibling still lives here
-  }
-  await closeTopicEntry(group, cwd, t)
+  await closeTopicEntry(group, sid, t)
 }
 
-async function closeTopicEntry(group: string, cwd: string, t: { threadId: number; name: string }): Promise<void> {
+async function closeTopicEntry(group: string, sessionId: string, t: { threadId: number; cwd: string; name: string }): Promise<void> {
   // Opt-in auto-delete: the tab disappears entirely (Telegram has no "hide" for bots — delete is
   // the only way off the list, and it erases the topic's history). Default keeps close+reopen.
   if (loadAccess().topicOnEnd === 'delete') {
     try {
       await bot.api.deleteForumTopic(group, t.threadId)
-      removeTopic(cwd)
-      process.stderr.write(`daemon: deleted topic "${t.name}" for ${cwd} (topicOnEnd=delete)\n`)
-    } catch (e) { process.stderr.write(`daemon: deleteForumTopic failed for ${cwd}: ${e}\n`) }
+      removeTopic(sessionId)
+      process.stderr.write(`daemon: deleted topic "${t.name}" for ${t.cwd} (topicOnEnd=delete)\n`)
+    } catch (e) { process.stderr.write(`daemon: deleteForumTopic failed for ${t.cwd}: ${e}\n`) }
     return
   }
   const kb = new InlineKeyboard()
@@ -854,9 +907,9 @@ async function closeTopicEntry(group: string, cwd: string, t: { threadId: number
     { parse_mode: 'HTML', message_thread_id: t.threadId, reply_markup: kb }).catch(() => {})
   try {
     await bot.api.closeForumTopic(group, t.threadId)
-    updateTopic(cwd, { closed: true })
-    process.stderr.write(`daemon: closed topic "${t.name}" for ${cwd}\n`)
-  } catch (e) { process.stderr.write(`daemon: closeForumTopic failed for ${cwd}: ${e}\n`) }
+    updateTopic(sessionId, { closed: true })
+    process.stderr.write(`daemon: closed topic "${t.name}" for ${t.cwd}\n`)
+  } catch (e) { process.stderr.write(`daemon: closeForumTopic failed for ${t.cwd}: ${e}\n`) }
 }
 
 // Backstop for deaths the event path can't see: a session that exits while the daemon is down or
@@ -869,61 +922,60 @@ async function reconcileTopics(panes: string[]): Promise<void> {
   if (!isTopicMode()) return
   const group = getGroupChatId()
   if (!group) return
-  const liveCwds = new Set<string>()
+  const liveSids = new Set<string>()
   for (const p of panes) {
-    const cwd = await paneCwd(p).catch(() => null)
-    if (cwd) liveCwds.add(cwd)
+    const sid = await sessionForPane(p)   // stamps unstamped panes as a side effect — idempotent
+    if (sid) liveSids.add(sid)
   }
   for (const { s } of orderedSessions()) {   // MCP-shim sessions hold topics too — don't close theirs
-    if (s.paneId) { const cwd = await paneCwd(s.paneId).catch(() => null); if (cwd) liveCwds.add(cwd) }
+    if (s.paneId) { const sid = await sessionForPane(s.paneId); if (sid) liveSids.add(sid) }
   }
   for (const t of listTopics()) {
-    if (t.closed || liveCwds.has(t.cwd)) { topicMissCounts.delete(t.cwd); continue }
-    const misses = (topicMissCounts.get(t.cwd) ?? 0) + 1
-    if (misses < 2) { topicMissCounts.set(t.cwd, misses); continue }
-    topicMissCounts.delete(t.cwd)
-    await closeTopicEntry(group, t.cwd, t)
+    if (t.closed || liveSids.has(t.sessionId)) { topicMissCounts.delete(t.sessionId); continue }
+    const misses = (topicMissCounts.get(t.sessionId) ?? 0) + 1
+    if (misses < 2) { topicMissCounts.set(t.sessionId, misses); continue }
+    topicMissCounts.delete(t.sessionId)
+    await closeTopicEntry(group, t.sessionId, t)
   }
 }
 
 // Keep topic titles in step with the working tree: "dir" on the default branch, "dir · branch"
 // elsewhere, renamed via editForumTopic when the branch changes (checked on the slow discovery
 // tick; the per-cwd cache means one git call per project per tick and an edit only on change).
-const topicBranchCache = new Map<string, string>()
+const topicBranchCache = new Map<string, string>()   // sessionId → last branch we titled with
 async function refreshTopicTitles(panes: string[]): Promise<void> {
   if (!isTopicMode()) return
   const group = getGroupChatId()
   if (!group) return
-  const seen = new Set<string>()
   for (const pane of panes) {
-    const cwd = await paneCwd(pane).catch(() => null)
-    if (!cwd || seen.has(cwd)) continue
-    seen.add(cwd)
-    const t = getTopicByCwd(cwd)
+    const sid = await sessionForPane(pane, false)
+    if (!sid) continue
+    const t = getTopicBySession(sid)
     if (!t || t.closed) continue
+    const cwd = (await paneCwd(pane).catch(() => null)) ?? t.cwd
     let branch = ''
     try { branch = (await exec('git', ['-C', cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim() } catch { /* not a git repo */ }
-    if (topicBranchCache.get(cwd) === branch) continue
-    topicBranchCache.set(cwd, branch)
+    if (topicBranchCache.get(sid) === branch) continue
+    topicBranchCache.set(sid, branch)
     const base = basename(cwd) || 'session'
     const want = branch && !['main', 'master', 'HEAD'].includes(branch) ? `${base} · ${branch}` : base
     if (want === t.name) continue
     try {
       await bot.api.editForumTopic(group, t.threadId, { name: want })
-      updateTopic(cwd, { name: want })
+      updateTopic(sid, { name: want })
       process.stderr.write(`daemon: renamed topic for ${cwd} → "${want}"\n`)
     } catch (e) { process.stderr.write(`daemon: editForumTopic failed for ${cwd}: ${e}\n`) }
   }
 }
 
-// The existing topic thread for a pane's cwd (no creation) — for per-topic typing/pins.
+// The existing topic thread for a pane's session (no creation) — for per-topic typing/pins.
 async function topicThreadFor(paneId: string | null): Promise<{ group: string; thread: number } | null> {
   if (!isTopicMode() || !paneId) return null
   const group = getGroupChatId()
   if (!group) return null
-  const cwd = await paneCwd(paneId).catch(() => null)
-  if (!cwd) return null
-  const t = getTopicByCwd(cwd)
+  const sid = await sessionForPane(paneId, false)
+  if (!sid) return null
+  const t = getTopicBySession(sid)
   if (!t || t.closed) return null
   return { group, thread: t.threadId }
 }
@@ -1508,8 +1560,8 @@ type CommandTarget = { paneId: string; watcher: PaneWatcher | null; isFocused: b
 async function targetPaneOf(ctx: Context): Promise<{ paneId: string | null; thread?: number }> {
   const thread = ctx.message?.message_thread_id ?? ctx.callbackQuery?.message?.message_thread_id
   if (isTopicMode() && typeof thread === 'number') {
-    const cwd = getCwdByThread(thread)
-    return { paneId: cwd ? await paneForCwd(cwd) : null, thread }
+    const sid = getSessionByThread(thread)
+    return { paneId: sid ? await paneForSession(sid) : null, thread }
   }
   return { paneId: focus.activePaneId }
 }
@@ -4056,7 +4108,7 @@ async function updateTopicPins(): Promise<void> {
   if (!group) return
   for (const t of listTopics()) {
     if (t.closed) continue
-    const paneId = await paneForCwd(t.cwd)
+    const paneId = await paneForSession(t.sessionId)
     if (!paneId) continue
     const text = await sessionPinTextFor(paneId)
     const key = `topic:${t.threadId}`
@@ -4251,7 +4303,7 @@ function ensureFolderTrusted(dir: string): void {
   } catch (e) { process.stderr.write(`daemon: ensureFolderTrusted(${dir}) failed: ${e}\n`) }
 }
 
-async function spawnSession(dir: string, extra = ''): Promise<boolean> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string): Promise<boolean> {
   try {
     ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
     let target: string[] = []
@@ -4271,6 +4323,11 @@ async function spawnSession(dir: string, extra = ''): Promise<boolean> {
     const newPane = stdout.trim()
     if (newPane) {
       try { await exec('tmux', ['set-option', '-p', '-t', newPane, BRIDGE_PANE_OPT, INSTANCE_ID], { timeout: 2000 }) } catch {}
+      // Pre-bound topic (user-created tab): stamp its sessionId at birth so discovery resolves
+      // the pane straight to that topic instead of minting a fresh id + duplicate topic.
+      if (presetSessionId) {
+        try { await exec('tmux', ['set-option', '-p', '-t', newPane, SESSION_PANE_OPT, presetSessionId], { timeout: 2000 }); paneSessionCache.set(newPane, presetSessionId) } catch {}
+      }
       registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
     }
     return true
@@ -4401,7 +4458,7 @@ bot.on('message:forum_topic_created', async ctx => {
   if (ctx.from?.id === ctx.me.id) return
   if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return
   const thread = ctx.message.message_thread_id
-  if (!thread || getCwdByThread(thread)) return
+  if (!thread || getSessionByThread(thread)) return
   const name = ctx.message.forum_topic_created.name
   const sent = await ctx.reply(
     `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
@@ -4842,8 +4899,8 @@ bot.on('callback_query:data', async ctx => {
     const thread = Number(topicDel[2])
     try {
       await bot.api.deleteForumTopic(group, thread)
-      const cwd = getCwdByThread(thread)
-      if (cwd) removeTopic(cwd)
+      const sid = getSessionByThread(thread)
+      if (sid) removeTopic(sid)
       await ctx.answerCallbackQuery({ text: topicDel[1] ? 'Deleted — auto-delete is on.' : 'Topic deleted.' }).catch(() => {})
     } catch {
       await ctx.answerCallbackQuery({ text: 'Couldn’t delete — the bot needs the Delete Messages admin right.' }).catch(() => {})
@@ -5341,10 +5398,10 @@ async function handleInbound(
   let targetPane: string | null | undefined
   const threadId = ctx.message?.message_thread_id
   if (isTopicMode() && typeof threadId === 'number') {
-    const cwd = getCwdByThread(threadId)
-    targetPane = cwd ? await paneForCwd(cwd) : null
-    if (cwd && !targetPane) { bufferEvent(params); return }   // topic exists but its session is gone
-    if (!cwd) { void offerTopicBind(ctx, threadId); return }  // unbound (user-created) topic → set it up, never misroute to focused
+    const sid = getSessionByThread(threadId)
+    targetPane = sid ? await paneForSession(sid) : null
+    if (sid && !targetPane) { bufferEvent(params); return }   // topic exists but its session is gone
+    if (!sid) { void offerTopicBind(ctx, threadId); return }  // unbound (user-created) topic → set it up, never misroute to focused
   }
   emitInbound(params, targetPane)
 }
@@ -5428,13 +5485,14 @@ bot.on('message:text', async ctx => {
           return
         }
       }
-      setTopic(dir, { threadId: tc.threadId, name: tc.name || basename(dir), closed: false, createdAt: Date.now() })
+      const sid = genSessionId()
+      setTopic(sid, { threadId: tc.threadId, cwd: dir, name: tc.name || basename(dir), closed: false, createdAt: Date.now() })
       // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
       // first pass — it only renames on an actual branch CHANGE from here on.
-      try { topicBranchCache.set(dir, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
-      catch { topicBranchCache.set(dir, '') }
-      const ok = await spawnSession(dir)
-      if (!ok) removeTopic(dir)
+      try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+      catch { topicBranchCache.set(sid, '') }
+      const ok = await spawnSession(dir, '', sid)
+      if (!ok) removeTopic(sid)
       const note = diverted ? ' (fresh subfolder — that folder already has a session)' : created ? ' (📁 created it for you)' : ''
       await ctx.reply(ok
         ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${note} — type here to drive it once it's up.`

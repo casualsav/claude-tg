@@ -122,12 +122,6 @@ export async function paneCwd(paneId: string): Promise<string | null> {
   } catch { return null }
 }
 
-// Last cwd ever resolved for a pane, ignoring the TTL — for death-time cleanup (closing the
-// session's forum topic), when the tmux pane is already gone and a live query can't succeed.
-export function lastKnownPaneCwd(paneId: string): string | null {
-  return _paneCwdCache.get(paneId)?.cwd ?? null
-}
-
 // PaneWatcher — ONE poll loop per active session (opus-direct Block C). Captures the pane every
 // 800ms; when the content hash changes it fires onEvent, and onPoll fires every tick (even when
 // unchanged) to drive a live working signal. All daemon coupling enters through the constructor
