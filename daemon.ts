@@ -2596,12 +2596,14 @@ async function resolveActivePane(): Promise<string | null> {
   return null
 }
 
-// stopconfirm handler). Shared by /stop and the 🛑 Stop button.
+// /stop — interrupt immediately, no confirm step (an Esc is non-destructive; the extra tap cost
+// more than a mis-tap would). The stopconfirm:yes callback below stays only so confirm cards sent
+// by older versions still work when tapped.
 async function confirmStop(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  if (!(await commandTarget(ctx))) return   // replies with the reason (in-thread) when no session
-  const keyboard = new InlineKeyboard().text('🛑 Yes, interrupt', 'stopconfirm:yes')
-  await ctx.reply('🛑 Interrupt the current task?\n\nTap to confirm:', { reply_markup: keyboard })
+  const t = await commandTarget(ctx)
+  if (!t) return   // commandTarget replies with the reason (in-thread) when no session
+  await ctx.reply(await performStop(t))
 }
 
 // The actual interrupt — Esc into the target pane. Returns the status line for the caller to show.
@@ -4416,9 +4418,61 @@ function ensureFolderTrusted(dir: string): void {
   } catch (e) { process.stderr.write(`daemon: ensureFolderTrusted(${dir}) failed: ${e}\n`) }
 }
 
+// Carry the previously-focused session's dials (model / effort / mode) onto a freshly spawned
+// one, so a session started from the group works like the one the user was just driving. Read
+// BEFORE the spawn (the source's state is current and can't race the new pane), applied once the
+// new pane reaches the REPL. Fresh sessions only — --resume/-c sessions carry their own settings.
+type InheritedSettings = { model: string | null; effort: string | null; mode: CcMode }
+
+async function captureInheritedSettings(paneId: string, watcher: PaneWatcher | null): Promise<InheritedSettings | null> {
+  try {
+    const cap = await capturePane(paneId)
+    return {
+      // Mode/effort read from the live capture (cheap). detectCurrentMode falls through to
+      // 'default' on a non-prompt screen, which inherits as a no-op — fine.
+      mode: detectCurrentMode(cap),
+      effort: parseStatusline(cap)?.effort ?? null,
+      // Model needs the /model picker flash on the source pane; readCurrentModel skips it
+      // mid-turn and falls back to the last known read.
+      model: await readCurrentModel(paneId, watcher),
+    }
+  } catch { return null }
+}
+
+async function applyInheritedSettings(paneId: string, inherit: InheritedSettings): Promise<void> {
+  try {
+    // Wait for the REPL (trust is pre-recorded so boot is normally a few seconds; give up after
+    // 30 — a login screen or crash loop shouldn't get settings typed into it).
+    let ready = false
+    for (let i = 0; i < 30 && !ready; i++) {
+      await new Promise(r => setTimeout(r, 1000))
+      if (!(await paneAlive(paneId))) return
+      ready = onNormalPrompt(await capturePane(paneId).catch(() => ''))
+    }
+    if (!ready) return
+    // The spawned pane is normally unfocused (no watcher); if it DID take focus, pause its mirror.
+    const watcher = focus.activePaneId === paneId ? focus.paneWatcher : null
+    const alias = inherit.model?.split(/\s+/)[0]?.toLowerCase()
+    if (alias && MODEL_ALIASES.includes(alias)) await injectSlash(paneId, watcher, `/model ${alias}`)
+    if (inherit.effort && EFFORT_LEVELS.includes(inherit.effort)) {
+      await injectSlash(paneId, watcher, `/effort ${inherit.effort}`)
+      // A fresh session applies effort without the mid-conversation confirm; if one shows up
+      // anyway, Enter accepts it (the inherited level IS what the user wants).
+      const cap = await capturePane(paneId).catch(() => '')
+      if (cap && isEffortConfirm(cap)) await sendKeys(paneId, ['Enter'])
+    }
+    if (inherit.mode !== 'default') await switchToMode(paneId, inherit.mode, watcher)
+    process.stderr.write(`daemon: applied inherited settings to ${paneId} (${inherit.model ?? '—'} · ${inherit.effort ?? '—'} · ${inherit.mode})\n`)
+  } catch (e) { process.stderr.write(`daemon: inherit settings for ${paneId} failed: ${e}\n`) }
+}
+
 async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT): Promise<boolean> {
   try {
     ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
+    // A brand-new session (not --resume/-c) inherits the focused session's model/effort/mode.
+    const inherit = !extra && focus.activePaneId
+      ? await captureInheritedSettings(focus.activePaneId, focus.paneWatcher)
+      : null
     let target: string[] = []
     if (focus.activePaneId) {
       try {
@@ -4442,6 +4496,7 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       // the pane straight to that topic instead of minting a fresh id + duplicate topic.
       if (presetSessionId) await stampPaneSession(newPane, presetSessionId)
       registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
+      if (inherit) void applyInheritedSettings(newPane, inherit)
     }
     return true
   } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
@@ -5234,7 +5289,8 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Stop confirmation (Yes/No under the "Interrupt the current task?" prompt)
+  // Legacy stop confirmation — /stop now interrupts immediately, but confirm cards sent by
+  // older versions may still be tapped.
   if (data === 'stopconfirm:yes') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
