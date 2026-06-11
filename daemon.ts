@@ -2982,7 +2982,7 @@ bot.command('status', async ctx => {
         sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins()
       }
       const text = await statusCardText(paneId)
-      const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true }).catch(() => null)
+      const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', message_thread_id: thread, disable_notification: true, reply_markup: topicPinKeyboard() }).catch(() => null)
       if (m) {
         await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
         sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
@@ -4256,7 +4256,12 @@ function statusKeyboard(): InlineKeyboard {
     .text('⚙️ Settings', 'st:settings').text('🧠 Model', 'st:model').row()
     .text('🕹️ Mode', 'st:mode').text('💾 Context', 'st:context').row()
     .text('🗜️ Compact', 'st:compact').text('💰 Cost', 'st:cost').row()
-    .text('🧹 Clear', 'st:clear')
+    .text('🧹 Clear', 'st:clear').text('📌 Pin off', 'st:pinoff')
+}
+
+// Topic cards carry only the pin kill switch — per-topic commands already cover the rest.
+function topicPinKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text('📌 Pin off', 'st:pinoff')
 }
 
 // Context-fill heads-up poll: lift ctxPct from the focused pane's statusline and feed
@@ -4313,14 +4318,15 @@ async function updateTopicPins(): Promise<void> {
     const existing = sessionPins.get(key)
     if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
     if (existing) {
-      try { await bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML' }); pinTextCache.set(key, text); continue }
+      // reply_markup must ride along on every edit — an edit without it strips the keyboard.
+      try { await bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: topicPinKeyboard() }); pinTextCache.set(key, text); continue }
       catch (e) {
         if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
         else { pinTextCache.set(key, text); continue }   // "not modified" → already current
       }
     }
     try {
-      const m = await bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true })
+      const m = await bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true, reply_markup: topicPinKeyboard() })
       await bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
       sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
     } catch (e) { process.stderr.write(`daemon: topic pin create failed: ${e}\n`) }
@@ -4752,6 +4758,20 @@ bot.on('callback_query:data', async ctx => {
     if (data === 'st:model') await doModelPicker(ctx)
     else if (data === 'st:mode') await doModePicker(ctx)
     else await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
+    return
+  }
+
+  // Pinned-card kill switch — same as /pin off (recoverable with /pin on).
+  if (data === 'st:pinoff') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const access = loadAccess()
+    access.sessionPin = false
+    saveAccess(access)
+    await removeSessionPins()
+    await ctx.answerCallbackQuery({ text: '📌 Pinned status card is off — /pin on brings it back.' }).catch(() => {})
     return
   }
 
