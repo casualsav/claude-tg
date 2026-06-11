@@ -2970,12 +2970,13 @@ function startHelpText(paired: boolean): string {
     `✦ <b>Claude Command Center</b>\n` +
     `Drive your Claude Code sessions from Telegram.\n\n` +
     `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
-    `👥 <code>/bind</code> a forum group — one topic per session, create a topic to spawn one\n` +
+    `👥 <code>/bind</code> a forum group — create a topic to spawn a session (📁 folder or 🌿 worktree)\n` +
     `🧠 <code>/model</code> · 🕹️ <code>/mode</code> · 🎚️ <code>/effort</code> · 📡 <code>/stream</code> live activity\n` +
-    `✅ Permission prompts arrive as Allow / Deny taps\n` +
+    `✅ Permission taps — ⚡ or allow all this turn\n` +
     `📝 <code>/diff</code> + Commit · Push · PR buttons — ship without a terminal\n` +
-    `🔎 <code>/find</code> any session · ⏰ <code>/queue</code> &amp; <code>/schedule</code> · ⏪ <code>/rewind</code>\n` +
-    `🌅 <code>/digest</code> daily report · 💸 <code>/budget</code> daily cap · 👤 <code>/account</code> multi-account\n` +
+    `🔎 <code>/find</code> any session · ⏰ <code>/queue @reset</code> · 🔁 <code>/schedule every 09:00</code> · ⏪ <code>/rewind</code>\n` +
+    `🌅 <code>/digest</code> daily report · 💸 <code>/budget</code> cap · 👤 <code>/account</code> · 🩺 <code>/health</code>\n` +
+    `🔊 Voice replies (free local TTS) · ✏️ edit your last message to correct it\n` +
     `🛑 <code>/stop</code> to interrupt · ⚙️ <code>/settings</code> for the rest\n\n` +
     `🖼️ Set this image as my profile picture — save it, then @BotFather → Edit Bot → Botpic.`
 
@@ -4033,22 +4034,22 @@ function voiceModelKeyboard(): InlineKeyboard {
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
-    `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
-    `💬 Stream — <b>${replyMode()}</b>\n` +
-    `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `👤 Accounts — <b>${listAccounts().length}</b>\n` +
-    `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
-    `🗞 Daily digest — <b>${a.digestAt ?? 'off'}</b>\n` +
+    `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
-    `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n\n` +
+    `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
+    `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
+    `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
+    `💬 Stream — <b>${replyMode()}</b>\n` +
+    `🗞 Daily digest — <b>${a.digestAt ?? 'off'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('📌 Pin', 'set:pin').text('💬 Stream', 'set:replymode').row()
-    .text('🎙️ Voice transcription', 'set:voice').text('👤 Accounts', 'acct:panel').row()
-    .text('🚢 Ship buttons', 'set:ship').text('🗞 Daily digest', 'set:digest').row()
-    .text('⚡ Batch allow', 'set:batch').text('🔊 Voice replies', 'set:tts')
+    .text('👤 Accounts', 'acct:panel').text('📌 Pin', 'set:pin').row()
+    .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
+    .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
+    .text('💬 Stream', 'set:replymode').text('🗞 Daily digest', 'set:digest')
 }
 
 // Voice-replies sub-panel (ROADMAP #15): mode off/digest/all + engine piper/openai/elevenlabs.
