@@ -54,7 +54,7 @@ import {
 } from './access.ts'
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
-  getSessionByThread, setTopic, removeTopic, updateTopic, listTopics,
+  getSessionByThread, getTopicBySession, setTopic, removeTopic, updateTopic, listTopics,
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
@@ -5733,6 +5733,17 @@ async function handleInbound(
   const inThreadId = ctx.message?.message_thread_id
   if (isTopicMode()) { if (typeof inThreadId === 'number') void bot.api.sendChatAction(chat_id, 'typing', { message_thread_id: inThreadId }).catch(() => {}) }
   else typingPresence.arm(chat_id)
+
+  // Telegram auto-pins the first message a user sends in a freshly created topic (a forum
+  // behavior with no off switch). Unpin it once per topic so the status card stays the only pin.
+  if (isTopicMode() && typeof inThreadId === 'number' && msgId != null) {
+    const sweepSid = getSessionByThread(inThreadId)
+    const sweepTopic = sweepSid ? getTopicBySession(sweepSid) : undefined
+    if (sweepSid && sweepTopic && !sweepTopic.firstMsgSwept) {
+      updateTopic(sweepSid, { firstMsgSwept: true })
+      void bot.api.unpinChatMessage(chat_id, msgId).catch(() => {})   // no-op error if it wasn't auto-pinned
+    }
+  }
 
   if (access.ackReaction && msgId != null) {
     void bot.api.setMessageReaction(chat_id, msgId, [
