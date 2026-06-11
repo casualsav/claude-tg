@@ -3794,13 +3794,13 @@ async function statusCardText(paneId: string | null): Promise<string> {
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
-  // Head badges: model · effort · session (5h) · weekly (7d) · context · mode · think.
+  // Head badges: model · effort · mode · session (5h) · weekly (7d) · context. Think lives in
+  // the body — with it up top the collapsed pin preview ellipsized.
   const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
   const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
   const weekly = status?.d7 ? `  📅 ${status.d7.pct}%` : ''
   const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
-  const thinkBadge = status?.think ? '  ✻ think' : ''
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${usage}${weekly}${ctxBadge}  ${escapeHtml(mode)}${thinkBadge}`
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}  ${escapeHtml(mode)}${usage}${weekly}${ctxBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
@@ -3812,6 +3812,7 @@ async function statusCardText(paneId: string | null): Promise<string> {
     if (status.cost) ct.push(`💰 ${status.cost}`)
     if (status.sessionTime) ct.push(`⏱ ${status.sessionTime}`)
     if (status.apiTime) ct.push(`⚡ api ${status.apiTime}`)
+    if (status.think) ct.push('✻ think')
     if (ct.length) lim.push(ct.join('  ·  '))
     if (lim.length) groups.push(lim.join('\n'))
     // Context group: the context bar + token data.
