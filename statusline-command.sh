@@ -70,7 +70,13 @@ input=$(cat)
 
 # Mirror the rate-limit data to a file the telegram daemon reads as its authoritative
 # usage source (path tracks common.ts STATE_DIR). Best-effort; never blocks the draw.
+# Multi-account: a session on an alternate CLAUDE_CONFIG_DIR keys its own snapshot file
+# (usage-<dirname>.json), so two accounts' statuslines never interleave one file and the
+# daemon can track each account's limits separately (path tracks daemon.ts usageSnapshotFile).
 usage_file="${TELEGRAM_STATE_DIR:-$HOME/.claude/channels/telegram}/usage.json"
+if [ -n "$CLAUDE_CONFIG_DIR" ] && [ "$CLAUDE_CONFIG_DIR" != "$HOME/.claude" ]; then
+  usage_file="${usage_file%.json}-$(basename "$CLAUDE_CONFIG_DIR").json"
+fi
 
 parsed=$(STATUSLINE_JSON="$input" TELEGRAM_USAGE_FILE="$usage_file" python3 - 2>/dev/null <<'PY'
 import os, sys, json, shlex

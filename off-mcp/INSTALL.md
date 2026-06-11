@@ -130,6 +130,14 @@ live in the state dir, and the daemon reads them on first start.
    self-heals on the first voice note as a backstop, but provisioning at install is better: it
    makes the first note instant instead of carrying a ~1–3 min install, and the daemon can't
    `sudo apt-get install python3-venv` if `ensurepip` is missing — you can.)
+4. **More than one Claude account?** (default no.) If they have e.g. a personal and a work
+   account, collect short names for the extra ones (`work`, lowercase letters/digits/dashes,
+   ≤16 chars; the default account is `main` = `~/.claude`). Each maps to its own config dir
+   `~/.claude-<name>`. After setup they can launch sessions on any account straight from
+   Telegram (/settings → 👤 Accounts → 🚀, or `/account`) — the one-time login link relays into
+   the chat, so they never need the terminal for it. Accounts can also be added later with
+   `/account add <name>`.
+
 Markdown rendering is **always on** — Claude's replies are rendered as Telegram formatting; it
 isn't a prompt.
 
@@ -153,6 +161,13 @@ use pairing instead if they didn't give an ID):
 ```json
 { "dmPolicy": "allowlist", "allowFrom": ["<their-telegram-id>"], "groups": {}, "pending": {},
   "renderMarkdown": true }
+```
+
+**If they registered extra accounts**, also write `~/.claude/channels/telegram/accounts.json`
+(name → config dir) and `mkdir -p` each dir — the daemon seeds each one's `settings.json`
+(statusline + hooks) at startup:
+```json
+{ "work": "/home/<user>/.claude-work" }
 ```
 
 **If `local`: provision the engine AND download the model now — so it's fully ready before the
@@ -317,9 +332,10 @@ a bridge session. The signature the daemon scans for is the **`@tg_bridge` tmux 
 (immune to claude rejecting unknown flags, and decoupled from autonomy mode). **Auto-add the
 launcher function that tags the pane then launches** — append to the user's `~/.bashrc` (or
 `~/.zshrc`). It takes an optional slot (default `1`), so `claude-tg` is the default bridge and
-`claude-tg 2` routes to a second one:
+`claude-tg 2` routes to a second one; an optional second arg pins the session to an alternate
+Claude account (`claude-tg 1 work` → `CLAUDE_CONFIG_DIR=~/.claude-work`, see `/account`):
 ```sh
-claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }  # safe start, bypass on demand
+claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }  # safe start, bypass on demand
 ```
 Then **tell the user:** launch work sessions with **`claude-tg`**. The `@tg_bridge` pane option is
 the bridge marker; the launch flag is the autonomy choice:

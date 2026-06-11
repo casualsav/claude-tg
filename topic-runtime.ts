@@ -238,7 +238,13 @@ export async function refreshTopicTitles(panes: string[]): Promise<void> {
     if (topicBranchCache.get(sid) === branch) continue
     topicBranchCache.set(sid, branch)
     const num = / #(\d+)/.exec(t.name)?.[1]   // keep a sibling's "#2" through branch renames
-    const base = (basename(cwd) || 'session') + (num ? ` #${num}` : '')
+    const folder = basename(cwd) || 'session'
+    // Preserve the user's capitalization: a topic named "Brains" over folder …/brains (the
+    // folder is the lowercased+dashed form of the typed topic name) keeps its name through
+    // branch renames and daemon restarts — only a real folder change replaces the base.
+    const curBase = t.name.replace(/ · [^·]*$/, '').replace(/ #\d+$/, '')
+    const norm = (s: string) => s.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')
+    const base = (norm(curBase) === folder.toLowerCase() ? curBase : folder) + (num ? ` #${num}` : '')
     const want = branch && !['main', 'master', 'HEAD'].includes(branch) ? `${base} · ${branch}` : base
     if (want === t.name) continue
     try {

@@ -149,3 +149,22 @@ test('currentTurnFeed: an injected meta user entry does not reset the feed', () 
   const f = fixture([user('go', 'u1'), narr('before skill', 'a1'), meta, narr('after skill', 'a2')])
   expect(currentTurnFeed(f).map(i => i.kind === 'text' ? i.text : i.tool)).toEqual(['before skill', 'after skill'])
 })
+
+test('multi-root: resolveTranscript picks the newest across roots; find/list carry the root', () => {
+  const { mkdtempSync, mkdirSync, utimesSync } = require('node:fs')
+  const rootA = mkdtempSync(join(tmpdir(), 'tg-rootA-'))
+  const rootB = mkdtempSync(join(tmpdir(), 'tg-rootB-'))
+  const proj = '-projects-x'
+  mkdirSync(join(rootA, proj)); mkdirSync(join(rootB, proj))
+  const fa = join(rootA, proj, 'aaa.jsonl'), fb = join(rootB, proj, 'bbb.jsonl')
+  writeFileSync(fa, JSON.stringify({ type: 'user', cwd: '/projects/x', message: { content: 'hi a' } }) + '\n')
+  writeFileSync(fb, JSON.stringify({ type: 'user', cwd: '/projects/x', message: { content: 'hi b' } }) + '\n')
+  const old = (Date.now() - 60_000) / 1000
+  utimesSync(fa, old, old)   // make rootA's file older so rootB's wins
+
+  const { resolveTranscript, findSessionCwd, listRecentSessions } = require('./transcript.ts')
+  expect(resolveTranscript('/projects/x', [rootA, rootB])).toBe(fb)
+  expect(findSessionCwd('aaa', [rootA, rootB])).toEqual({ cwd: '/projects/x', root: rootA })
+  const recents = listRecentSessions(10, [rootA, rootB])
+  expect(recents.map((r: { sessionId: string; root: string }) => [r.sessionId, r.root])).toEqual([['bbb', rootB], ['aaa', rootA]])
+})

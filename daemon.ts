@@ -23,7 +23,12 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, type Activity, type FeedItem } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts, type Activity, type FeedItem } from './transcript.ts'
+import {
+  initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
+  allProjectsDirs, addAccount, removeAccount, accountLoggedIn, healAccountConfigs,
+  MAIN_ACCOUNT, type Account,
+} from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
@@ -49,7 +54,7 @@ import {
 } from './access.ts'
 import {
   setGroupChatId, getGroupChatId, isTopicMode, loadTopics, genSessionId,
-  getSessionByThread, setTopic, removeTopic, listTopics,
+  getSessionByThread, setTopic, removeTopic, updateTopic, listTopics,
 } from './topics.ts'
 import {
   initTopicRuntime, sessionForPane, paneForSession, ensureSessionTopic, closeTopicForPane,
@@ -196,6 +201,8 @@ initTopicRuntime(bot)
 let botUsername = ''
 // access.ts's isMentioned needs the live bot username (set after the daemon connects).
 initAccess({ getBotUsername: () => botUsername })
+initAccounts(STATE_DIR)
+healAccountConfigs()   // accounts registered before main settings.json had hooks get them now
 
 // ---- Typing presence ----
 // Telegram's "typing…" chat action auto-expires after ~5s, so to keep it lit for a whole
@@ -473,6 +480,18 @@ function detectLimited(paneText: string): boolean {
   // Only the actual-frozen state (100% / "hit your … limit") — NOT sub-100% warnings,
   // which persist for days at the weekly limit while Claude keeps working fine.
   return /used 100% of your [\w-]+ limit|hit your [\w-]+ limit/i.test(tail)
+}
+
+// Compact head-badge form of a mode — one 🛡 (permission posture) + short lowercase word, sized
+// for the pin preview. The per-mode emojis live on in modeLabel (pickers/buttons).
+function modeBadge(mode: CcMode): string {
+  switch (mode) {
+    case 'default': return '🛡default'
+    case 'acceptEdits': return '🛡edits'
+    case 'plan': return '🛡plan'
+    case 'auto': return '🛡auto'
+    case 'bypassPermissions': return '🛡yolo'
+  }
 }
 
 function modeLabel(mode: CcMode): string {
@@ -781,7 +800,7 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
     }
     if (path && existsSync(path)) return path
   }
-  const fb = cwd ? resolveTranscript(cwd) : null
+  const fb = cwd ? resolveTranscript(cwd, allProjectsDirs()) : null
   if (!fb) return null
   // Never cross-relay a sibling's transcript: if another pane has STAMPED this exact file, an
   // unstamped (pre-hook) pane gets nothing rather than the sibling's replies. Restarting the
@@ -790,6 +809,16 @@ async function transcriptForPane(pane: string | null, cwd: string | null): Promi
     if (p !== pane && v.path === fb) return null
   }
   return fb
+}
+
+// The account a pane's session runs under, derived from its stamped transcript path (the
+// transcript lives under <configDir>/projects/). Unstamped panes read as main — correct for
+// every pre-multi-account session, and alt accounts always stamp (their seeded settings.json
+// carries the hook).
+async function paneAccount(pane: string | null): Promise<Account> {
+  if (!pane) return MAIN_ACCOUNT
+  const file = await transcriptForPane(pane, null)   // stamp only — null cwd skips the fallback
+  return file ? accountForTranscript(file) : MAIN_ACCOUNT
 }
 
 // After injecting a message, wait for the agent's turn to settle, then read its reply
@@ -885,6 +914,7 @@ async function relayLoopTick(gen: number): Promise<void> {
         for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: relay send failed: ${e}\n`))
       }
       typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
+      if (!isBanner(r.text) && paneId) void maybeShipFooter(paneId)   // opt-in ship buttons when the turn dirtied the tree
     }
   }
   if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
@@ -1032,7 +1062,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // Limit banners can show ONLY here — an idle focused pane never renders them — so without this
   // an aux-only limit hit would never schedule the reset ping. Dedup inside is account-global
   // (keyed on the reset minute), so several panes showing the same banner relay/schedule once.
-  handleUsageLimit(text, pane)
+  void handleUsageLimit(text, pane)
 
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
@@ -1521,8 +1551,9 @@ const RESET_TIME_RE = /\bresets\s+(\d{1,2}):(\d{2})\s*([ap])m?\b/i
 const USAGE_WARN_RE = /used (\d+)% of your ([\w-]+) limit\b.{0,12}resets\s+([^·\n]+?)\s*(?:·|$)/i
 const USAGE_CAPTURE_FILE = join(STATE_DIR, 'usage-limit-capture.log')
 const RESET_RELOCK_MS = (11 * 60 + 59) * 60_000
-let lastActedResetKey = ''
-let lastActedResetAt = 0
+// Per ACCOUNT: the last limit hit acted on (dedup key + when). Per-account because two accounts
+// can be limited at once — a single slot would let their alternating polls re-fire each other.
+const usageHitState = new Map<string, { key: string; at: number }>()
 // Highest context-fill threshold (50/75) already warned for the current fill; re-armed to 0 when
 // context drops back under 50% (a /clear or /compact), so each fresh fill warns again.
 let ctxWarnThreshold = 0
@@ -1546,9 +1577,15 @@ function normResetKey(descr: string): string {
 // cause of repeated 75% alerts during development (each restart re-armed them).
 const USAGE_NOTIF_STATE_FILE = join(STATE_DIR, 'usage-notif-state.json')
 {
-  const s = readJsonFile<Record<string, unknown> & { warn?: Record<string, unknown> }>(USAGE_NOTIF_STATE_FILE, {})
-  if (typeof s.lastActedResetKey === 'string') lastActedResetKey = s.lastActedResetKey
-  if (typeof s.lastActedResetAt === 'number') lastActedResetAt = s.lastActedResetAt
+  const s = readJsonFile<Record<string, unknown> & { warn?: Record<string, unknown>; hits?: Record<string, unknown> }>(USAGE_NOTIF_STATE_FILE, {})
+  // Legacy single-slot hit state (pre multi-account) migrates to the main account's slot.
+  if (typeof s.lastActedResetKey === 'string' && s.lastActedResetKey) {
+    usageHitState.set('main', { key: s.lastActedResetKey, at: typeof s.lastActedResetAt === 'number' ? s.lastActedResetAt : 0 })
+  }
+  for (const [k, v] of Object.entries(s.hits ?? {})) {
+    const e = v as { key?: unknown; at?: unknown }
+    if (e && typeof e.key === 'string') usageHitState.set(k, { key: e.key, at: typeof e.at === 'number' ? e.at : 0 })
+  }
   if (typeof s.ctxWarnThreshold === 'number') ctxWarnThreshold = s.ctxWarnThreshold
   for (const [k, v] of Object.entries(s.warn ?? {})) {
     const e = v as { resetKey?: unknown; threshold?: unknown; at?: unknown }
@@ -1561,7 +1598,7 @@ const USAGE_NOTIF_STATE_FILE = join(STATE_DIR, 'usage-notif-state.json')
   }
 }
 function saveUsageNotifState(): void {
-  writeJsonFile(USAGE_NOTIF_STATE_FILE, { lastActedResetKey, lastActedResetAt, ctxWarnThreshold, warn: Object.fromEntries(usageWarnState) })
+  writeJsonFile(USAGE_NOTIF_STATE_FILE, { hits: Object.fromEntries(usageHitState), ctxWarnThreshold, warn: Object.fromEntries(usageWarnState) })
 }
 
 // ── Statusline-sourced usage snapshot ────────────────────────────────────────
@@ -1573,9 +1610,14 @@ const USAGE_SNAPSHOT_FILE = join(STATE_DIR, 'usage.json')
 const USAGE_POLL_MS = 20_000
 type RateWindow = { pct: number; resetsAt: number }   // resetsAt in ms (0 = unknown)
 type UsageSnapshot = { fiveHour?: RateWindow; sevenDay?: RateWindow }
-function readUsageSnapshot(maxAgeMs = 120_000): UsageSnapshot | null {
+// Each account's statusline writes its own snapshot: main → usage.json, an alternate config dir →
+// usage-<dirname>.json (path convention shared with statusline-command.sh).
+function usageSnapshotFile(account: Account): string {
+  return account.name === 'main' ? USAGE_SNAPSHOT_FILE : join(STATE_DIR, `usage-${basename(account.configDir)}.json`)
+}
+function readUsageSnapshot(maxAgeMs = 120_000, account: Account = MAIN_ACCOUNT): UsageSnapshot | null {
   let raw: { ts?: unknown; five_hour?: unknown; seven_day?: unknown }
-  try { raw = JSON.parse(readFileSync(USAGE_SNAPSHOT_FILE, 'utf8')) } catch { return null }
+  try { raw = JSON.parse(readFileSync(usageSnapshotFile(account), 'utf8')) } catch { return null }
   const ts = typeof raw.ts === 'number' ? raw.ts * 1000 : 0
   if (!ts || Date.now() - ts > maxAgeMs) return null
   const win = (w: unknown): RateWindow | undefined => {
@@ -1603,23 +1645,26 @@ function parseResetTime(line: string): number | null {
 // Send one usage heads-up per threshold (50/75/90) per reset period for a limit type,
 // deduped via usageWarnState. `resetKey` identifies the reset period (epoch-derived from
 // the snapshot, descriptor-derived from a pane banner) so a fresh period re-arms the alerts.
-function maybeWarn(type: string, pct: number, resetKey: string): void {
+function maybeWarn(type: string, pct: number, resetKey: string, account: Account = MAIN_ACCOUNT): void {
   if (pct < 50 || pct >= 100) return   // <50 not notable; 100 is a hit (actOnLimitHit)
   const threshold = pct >= 90 ? 90 : pct >= 75 ? 75 : 50
-  const prev = usageWarnState.get(type)
+  // Warn ladder is per account+type; main keeps the bare-type key so persisted state carries over.
+  const stateKey = account.name === 'main' ? type : `${account.name}:${type}`
+  const prev = usageWarnState.get(stateKey)
   // Ladder dedup scoped to THIS reset period: only fire a threshold higher than the highest
   // already sent for this resetKey. A new period (different resetKey) re-arms all thresholds,
   // so 50 fires again next window — no cross-period lockout that could swallow it.
   const firedThisPeriod = prev && prev.resetKey === resetKey ? prev.threshold : 0
   if (threshold <= firedThisPeriod) return
-  usageWarnState.set(type, { resetKey, threshold, at: Date.now() })
+  usageWarnState.set(stateKey, { resetKey, threshold, at: Date.now() })
   saveUsageNotifState()
-  process.stderr.write(`daemon: usage warn fired type=${type} threshold=${threshold} key="${resetKey}"\n`)
+  process.stderr.write(`daemon: usage warn fired type=${stateKey} threshold=${threshold} key="${resetKey}"\n`)
   const emoji = threshold >= 90 ? '🚨' : threshold >= 75 ? '⚠️' : 'ℹ️'
+  const who = account.name === 'main' ? '' : ` (<b>${escapeHtml(account.name)}</b> account)`
   // The snapshot tracks the focused session, so route the heads-up to its topic (forum mode); DM → allowlist.
   void (async () => {
     for (const { chat, thread } of await outboundTargetsFor(focus.activePaneId)) {
-      await bot.api.sendMessage(chat, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit`, { disable_notification: threshold < 90, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await bot.api.sendMessage(chat, `${emoji} You've used ${threshold}% of your ${escapeHtml(type)} limit${who}`, { parse_mode: 'HTML', disable_notification: threshold < 90, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
     }
   })()
 }
@@ -1651,43 +1696,53 @@ function maybeWarnContext(pct: number | null): void {
 // The ⛔ message carries one "▶️ Auto-continue" button — the per-hit choice: tapped → the
 // scheduled reset is armed to type "continue" automatically; untapped → the reset ping
 // arrives with a manual Continue button instead. (Replaces the old global /autocontinue toggle.)
-function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: string | null = focus.activePaneId): void {
+function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: string | null = focus.activePaneId, account: Account = MAIN_ACCOUNT): void {
   const key = `hit:${Math.round(fireAt / 60_000)}`
-  if (key === lastActedResetKey && Date.now() < fireAt) return
-  lastActedResetKey = key
-  lastActedResetAt = Date.now()
+  const prev = usageHitState.get(account.name)
+  if (key === prev?.key && Date.now() < fireAt) return
+  usageHitState.set(account.name, { key, at: Date.now() })
   saveUsageNotifState()
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
+  const who = account.name === 'main' ? '' : ` (<b>${escapeHtml(account.name)}</b> account)`
   const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\nI'll ping you when it resets — or tap below and I'll continue automatically.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
-  const kb = new InlineKeyboard().text('▶️ Auto-continue when it resets', 'usage:arm')
+  const kb = new InlineKeyboard().text('▶️ Auto-continue when it resets', `usage:arm:${account.name}`)
   // Route the immediate banner to the session that hit the limit (its topic in forum mode).
   void (async () => {
     for (const { chat, thread } of await outboundTargetsFor(origin)) {
-      await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit.</b>\n${head}${note}`, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit${who ? '</b>' + who + '<b>' : ''}.</b>\n${head}${note}`, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
     }
   })()
-  scheduleReset(fireAt + RESET_GRACE_MS, chats)
+  scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats)
 }
 
-// Poll the statusline snapshot: drive warnings + limit auto-continue off exact numbers.
-// While it's fresh it owns usage handling and handleUsageLimit stands down (its early return).
+// Poll each account's statusline snapshot: drive warnings + limit handling off exact numbers.
+// While an account's snapshot is fresh it owns that account's usage handling and the pane-scrape
+// fallback (handleUsageLimit) stands down for panes on it.
 function checkUsageSnapshot(): void {
-  const snap = readUsageSnapshot()
-  if (!snap) return
-  for (const [win, type] of [['fiveHour', 'session'], ['sevenDay', 'weekly']] as const) {
-    const w = snap[win]
-    if (!w) continue
-    if (w.pct >= 100 && w.resetsAt > Date.now()) actOnLimitHit(w.resetsAt, type)
-    else maybeWarn(type, w.pct, w.resetsAt ? `e${Math.round(w.resetsAt / 60_000)}` : `p:${type}`)
+  for (const account of listAccounts()) {
+    const snap = readUsageSnapshot(undefined, account)
+    if (!snap) continue
+    // Route the banner to the focused session's topic only when it's on this account.
+    for (const [win, type] of [['fiveHour', 'session'], ['sevenDay', 'weekly']] as const) {
+      const w = snap[win]
+      if (!w) continue
+      if (w.pct >= 100 && w.resetsAt > Date.now()) {
+        void (async () => {
+          const origin = (await paneAccount(focus.activePaneId)).name === account.name ? focus.activePaneId : null
+          actOnLimitHit(w.resetsAt, type, undefined, origin, account)
+        })()
+      } else maybeWarn(type, w.pct, w.resetsAt ? `e${Math.round(w.resetsAt / 60_000)}` : `p:${type}`, account)
+    }
   }
 }
 
-function handleUsageLimit(text: string, origin: string | null = focus.activePaneId): void {
-  // Statusline snapshot is the authoritative source — when it's fresh, checkUsageSnapshot
-  // owns usage handling and this pane-scrape fallback stands down to avoid double-firing.
-  if (readUsageSnapshot()) return
+async function handleUsageLimit(text: string, origin: string | null = focus.activePaneId): Promise<void> {
+  const account = await paneAccount(origin)
+  // Statusline snapshot is the authoritative source — when this account's is fresh,
+  // checkUsageSnapshot owns its usage handling and this pane-scrape fallback stands down.
+  if (readUsageSnapshot(undefined, account)) return
   // Mark lines inside an assistant block ("● …" + its indented continuation), so we
   // ignore the banner text when WE quote it in a message — only a real, free-standing
   // status line counts. (A transcript quote of the banner lives inside a ● block.)
@@ -1728,12 +1783,12 @@ function handleUsageLimit(text: string, origin: string | null = focus.activePane
 
     const type = limitLine.match(/(?:hit your|used 100% of your)\s+([\w-]+)\s+limit/i)?.[1]?.toLowerCase() ?? 'usage'
     const fireAt = parseResetTime(limitLine)
-    if (fireAt) { actOnLimitHit(fireAt, type, limitLine, origin); return }
+    if (fireAt) { actOnLimitHit(fireAt, type, limitLine, origin, account); return }
     // No parseable reset time — relay once (deduped on the banner line), no schedule.
     const key = `hit:${limitLine}`
-    if (key === lastActedResetKey && Date.now() - lastActedResetAt < RESET_RELOCK_MS) return
-    lastActedResetKey = key
-    lastActedResetAt = Date.now()
+    const prev = usageHitState.get(account.name)
+    if (key === prev?.key && Date.now() - (prev?.at ?? 0) < RESET_RELOCK_MS) return
+    usageHitState.set(account.name, { key, at: Date.now() })
     saveUsageNotifState()
     void (async () => {
       for (const { chat, thread } of await outboundTargetsFor(origin)) {
@@ -1747,11 +1802,11 @@ function handleUsageLimit(text: string, origin: string | null = focus.activePane
   const warnIdx = bottom.find(i => !inBlock[i] && USAGE_WARN_RE.test(lines[i]))
   if (warnIdx === undefined) return
   const wm = lines[warnIdx].match(USAGE_WARN_RE)!
-  maybeWarn(wm[2].toLowerCase(), parseInt(wm[1], 10), normResetKey(wm[3]))
+  maybeWarn(wm[2].toLowerCase(), parseInt(wm[1], 10), normResetKey(wm[3]), account)
 }
 
 function onPaneEvent(text: string): void {
-  handleUsageLimit(text)
+  void handleUsageLimit(text)
   // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
   // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
   // against the exact rendering. Off by default; no effect on normal operation.
@@ -2472,27 +2527,19 @@ async function performReset(t: CommandTarget, command: string): Promise<string> 
 // fresh conversation in place (same Yes/No confirm as /clear, via confirmResetSession).
 async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
-  const t = await commandTarget(ctx)
-  if (!t) return
-  // /new inside a session's topic: ask — reset this conversation in place, or spawn a sibling
-  // session in this project (fresh pre-stamped sessionId → its own topic, "proj #2").
-  if (typeof t.replyThread === 'number') {
-    const keyboard = new InlineKeyboard()
-      .text('♻️ Reset this chat', 'newtopic:reset')
-      .text('🆕 New session', 'newtopic:spawn')
-    await ctx.reply(
-      '🆕 <b>New</b> — what do you mean?\n\n' +
-      '• <b>Reset this chat</b> — clear this session\'s conversation in place\n' +
-      '• <b>New session</b> — start a sibling session in this project (it gets its own topic)',
-      { parse_mode: 'HTML', reply_markup: keyboard })
+  // /new in GENERAL (group mode): start a new session — it gets its own topic. One-tap the
+  // focused session's folder, or specify another. (No commandTarget gate here: creating a
+  // session must work even when none is running.)
+  if (isTopicMode() && String(ctx.chat?.id) === getGroupChatId() && typeof ctx.message?.message_thread_id !== 'number') {
+    const base = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
+    const kb = new InlineKeyboard()
+    if (base) kb.text(`📁 ${base.length > 48 ? '…' + base.slice(-47) : base}`, 'newgo').row()
+    kb.text('✏️ Specify folder', 'newask')
+    await ctx.reply('🆕 <b>New session</b> — which folder should it run in? It gets its own topic.',
+      { parse_mode: 'HTML', reply_markup: kb })
     return
   }
-  // General: new sessions are new topics there. DM drives a single session, so "new" means a
-  // fresh conversation in place — same confirm as /clear.
-  if (isTopicMode()) {
-    await ctx.reply('In group mode a new session = a new topic — create one with Telegram\'s ➕ topic button, or run /new inside a session\'s topic for a sibling in that project.')
-    return
-  }
+  // Inside a session's topic, or DM: /new = clear THIS conversation in place, one confirm.
   await confirmResetSession(ctx)
 }
 
@@ -3200,6 +3247,182 @@ function cleanPaneTail(raw: string, maxLines: number): string {
 
 // /terminal [N] — dump the last N lines of the terminal (default 40, capped) so you can
 // catch up on recent session activity. Read-only: just captures the pane scrollback.
+// ---- Cross-session search (ROADMAP #5) ----
+// /find <text> — grep every transcript (all accounts), newest first; tap a hit to resume that
+// session (reuses the /resume callback, so a live session just gets a fresh pane... or in topic
+// mode its own topic).
+bot.command('find', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const q = (ctx.match ?? '').toString().trim()
+  if (!q) { await ctx.reply('Usage: <code>/find &lt;text&gt;</code> — searches every session\'s conversation.', { parse_mode: 'HTML' }); return }
+  const hits = searchTranscripts(q, allProjectsDirs())
+  if (!hits.length) { await ctx.reply(`🔍 No session mentions “${escapeHtml(q.slice(0, 60))}”.`, { parse_mode: 'HTML' }); return }
+  const kb = new InlineKeyboard()
+  const lines = hits.map((h, i) => {
+    const folder = h.cwd.split('/').filter(Boolean).pop() || h.cwd || '—'
+    const acct = accountForProjectsDir(h.root)
+    kb.text(`${i + 1}`, `resume:${h.sessionId}`)
+    return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtAgo(h.mtime)}${acct.name === 'main' ? '' : ` · 👤 ${escapeHtml(acct.name)}`}\n   <i>…${escapeHtml(h.snippet)}…</i>`
+  })
+  await ctx.reply(`🔍 <b>Sessions mentioning “${escapeHtml(q.slice(0, 60))}”</b>\n\n${lines.join('\n')}\n\nTap a number to resume that session.`,
+    { parse_mode: 'HTML', reply_markup: kb })
+})
+
+// ---- Queue for later (ROADMAP #3) ----
+// /later <prompt> — a per-session backlog injected when the session goes idle ("when you're
+// free", complementing /schedule's "at 3pm"). Persisted so a daemon restart keeps the queue;
+// a 15s sweep injects the next item whenever a queued session sits at a normal prompt.
+const LATER_FILE = join(STATE_DIR, 'later.json')
+type LaterItem = { text: string; queuedAt: number }
+function readLater(): Record<string, LaterItem[]> {
+  const raw = readJsonFile<Record<string, unknown> | null>(LATER_FILE, null)
+  if (!raw) return {}
+  const out: Record<string, LaterItem[]> = {}
+  for (const [k, v] of Object.entries(raw)) {
+    if (!Array.isArray(v)) continue
+    const items = v.filter((i): i is LaterItem => !!i && typeof (i as LaterItem).text === 'string')
+    if (items.length) out[k] = items
+  }
+  return out
+}
+function writeLater(map: Record<string, LaterItem[]>): void {
+  for (const k of Object.keys(map)) if (!map[k].length) delete map[k]
+  if (Object.keys(map).length === 0) { try { unlinkSync(LATER_FILE) } catch {}; return }
+  writeJsonFile(LATER_FILE, map)
+}
+
+bot.command(['queue', 'later'], async ctx => {   // /later kept as a hidden alias
+  if (!dmCommandGate(ctx)) return
+  const t = await commandTarget(ctx)
+  if (!t) return
+  const sid = (await sessionForPane(t.paneId)) ?? 'focused'
+  const arg = (ctx.match ?? '').toString().trim()
+  const map = readLater()
+  if (arg === 'clear') {
+    const n = map[sid]?.length ?? 0
+    delete map[sid]; writeLater(map)
+    await ctx.reply(n ? `🗑 Cleared ${n} queued task${n === 1 ? '' : 's'}.` : 'Queue is already empty.')
+    return
+  }
+  if (!arg) {
+    const items = map[sid] ?? []
+    await ctx.reply(items.length
+      ? `🗒 <b>Queued for this session</b> (runs when idle):\n${items.map((i, n) => `${n + 1}. ${escapeHtml(i.text.slice(0, 120))}`).join('\n')}\n\n<code>/queue clear</code> to empty it.`
+      : 'Queue is empty — <code>/queue &lt;prompt&gt;</code> to add a task for when this session is idle.',
+      { parse_mode: 'HTML' })
+    return
+  }
+  ;(map[sid] ??= []).push({ text: arg, queuedAt: Date.now() })
+  writeLater(map)
+  await ctx.reply(`🗒 Queued (#${map[sid].length}) — runs when the session goes idle.`)
+})
+
+// Inject the next queued item into any session sitting at a normal prompt. One item per session
+// per sweep; the injected turn keeps the session busy, so the next item waits for it to settle.
+async function sweepLaterQueues(): Promise<void> {
+  const map = readLater()
+  if (Object.keys(map).length === 0) return
+  for (const [sid, items] of Object.entries(map)) {
+    try {
+      const pane = sid === 'focused' ? focus.activePaneId : await paneForSession(sid)
+      if (!pane || !items.length) continue
+      const cap = await capturePane(pane).catch(() => '')
+      if (!cap || !onNormalPrompt(cap)) continue   // busy / menu up → not yet
+      const item = items.shift()!
+      writeLater(map)
+      const ok = pane === focus.activePaneId && focus.paneWatcher
+        ? await injectText(pane, focus.paneWatcher, item.text)
+        : await pasteToPane(pane, item.text)
+      if (!ok) { items.unshift(item); writeLater(map); continue }   // pane wedged — retry next sweep
+      for (const tg of await outboundTargetsFor(pane)) {
+        await bot.api.sendMessage(tg.chat, `▶️ Queued task started: <i>${escapeHtml(item.text.slice(0, 160))}</i>`,
+          { parse_mode: 'HTML', disable_notification: true, ...(tg.thread ? { message_thread_id: tg.thread } : {}) }).catch(() => {})
+      }
+    } catch { /* pane vanished mid-sweep — next pass */ }
+  }
+}
+const LATER_SWEEP_MS = 15_000
+
+// ---- Ship the work (ROADMAP #1) ----
+// Close the "code is edited but not landed" gap from the phone. /diff is always available;
+// the post-turn footer with Commit/Push/PR buttons is opt-in (settings → 🚢 Ship buttons),
+// because agent-managed-git users land changes by just asking the session.
+
+// Dirty-tree summary for a session cwd; null = clean tree or not a git repo.
+async function gitDirtyStat(cwd: string): Promise<{ files: number; add: number; del: number } | null> {
+  try {
+    const { stdout: por } = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 })
+    if (!por.trim()) return null
+    const files = por.trim().split('\n').length
+    const { stdout: stat } = await exec('git', ['-C', cwd, 'diff', 'HEAD', '--shortstat'], { timeout: 4000 }).catch(() => ({ stdout: '' }))
+    const add = parseInt(/(\d+) insertion/.exec(stat)?.[1] ?? '0', 10)
+    const del = parseInt(/(\d+) deletion/.exec(stat)?.[1] ?? '0', 10)
+    return { files, add, del }
+  } catch { return null }
+}
+
+// Send the working-tree diff: --stat summary first, then the patch in chunked <pre> blocks.
+// Untracked files are listed by name (git diff HEAD doesn't show their contents).
+const DIFF_SEND_CAP = 16_000   // chars of patch relayed before truncating (≈4–5 messages)
+async function sendDiff(chat: string, paneId: string, thread?: number): Promise<void> {
+  const extra = thread ? { message_thread_id: thread } : {}
+  const cwd = await paneCwd(paneId).catch(() => null)
+  if (!cwd) { await bot.api.sendMessage(chat, 'Could not read the session folder.', extra).catch(() => {}); return }
+  try {
+    const { stdout: por } = await exec('git', ['-C', cwd, 'status', '--porcelain'], { timeout: 4000 })
+    if (!por.trim()) { await bot.api.sendMessage(chat, '✨ Working tree clean — nothing to diff.', extra).catch(() => {}); return }
+    const { stdout: stat } = await exec('git', ['-C', cwd, 'diff', 'HEAD', '--stat'], { timeout: 6000 }).catch(() => ({ stdout: '' }))
+    let { stdout: diff } = await exec('git', ['-C', cwd, 'diff', 'HEAD'], { timeout: 10000, maxBuffer: 32 * 1024 * 1024 }).catch(() => ({ stdout: '' }))
+    const untracked = por.split('\n').filter(l => l.startsWith('??')).map(l => l.slice(3).trim()).filter(Boolean)
+    let head = `📄 <b>Diff</b> — <code>${escapeHtml(cwd)}</code>`
+    if (stat.trim()) head += `\n<pre>${escapeHtml(stat.trim().slice(0, 3000))}</pre>`
+    if (untracked.length) head += `\n🆕 untracked: ${untracked.slice(0, 10).map(f => `<code>${escapeHtml(f)}</code>`).join(', ')}${untracked.length > 10 ? ` +${untracked.length - 10} more` : ''}`
+    await bot.api.sendMessage(chat, head, { parse_mode: 'HTML', ...extra }).catch(() => {})
+    if (!diff.trim()) return
+    const truncated = diff.length > DIFF_SEND_CAP
+    if (truncated) diff = diff.slice(0, DIFF_SEND_CAP)
+    const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+    for (const c of chunkHtml(`<pre><code class="language-diff">${escapeHtml(diff)}</code></pre>`, limit)) {
+      await bot.api.sendMessage(chat, c, { parse_mode: 'HTML', ...extra }).catch(() => {})
+    }
+    if (truncated) await bot.api.sendMessage(chat, `✂️ Diff truncated (large change) — full diff: <code>git diff HEAD</code> in <code>${escapeHtml(cwd)}</code>.`, { parse_mode: 'HTML', ...extra }).catch(() => {})
+  } catch (e) {
+    const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e)
+    await bot.api.sendMessage(chat, /not a git repository/i.test(msg)
+      ? `📂 <code>${escapeHtml(cwd)}</code> isn't a git repository — nothing to diff.`
+      : `❌ Couldn't diff: <pre>${escapeHtml(msg.slice(0, 600))}</pre>`, { parse_mode: 'HTML', ...extra }).catch(() => {})
+  }
+}
+
+// Post-turn ship footer (opt-in): when the turn left the tree dirty, one quiet line with the
+// land-it buttons. Fingerprinted per pane so an unchanged tree doesn't repost every turn.
+const shipFooterFp = new Map<string, string>()
+async function maybeShipFooter(paneId: string): Promise<void> {
+  if (loadAccess().shipButtons !== true) return
+  const cwd = await paneCwd(paneId).catch(() => null)
+  if (!cwd) return
+  const s = await gitDirtyStat(cwd)
+  if (!s) { shipFooterFp.delete(paneId); return }
+  const fp = `${cwd}:${s.files}:${s.add}:${s.del}`
+  if (shipFooterFp.get(paneId) === fp) return
+  shipFooterFp.set(paneId, fp)
+  const kb = new InlineKeyboard()
+    .text('📄 Diff', 'ship:diff').text('✅ Commit', 'ship:commit')
+    .text('⬆️ Push', 'ship:push').text('🔀 PR', 'ship:pr')
+  const note = `📝 ${s.files} file${s.files === 1 ? '' : 's'} changed  <b>+${s.add} −${s.del}</b>`
+  for (const t of await outboundTargetsFor(paneId)) {
+    await bot.api.sendMessage(t.chat, note, { parse_mode: 'HTML', disable_notification: true, reply_markup: kb, ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+  }
+}
+
+// /diff — the session's uncommitted changes (always available, toggle-independent).
+bot.command('diff', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const t = await commandTarget(ctx)
+  if (!t) return
+  await sendDiff(String(ctx.chat!.id), t.paneId, typeof t.replyThread === 'number' ? t.replyThread : undefined)
+})
+
 bot.command('terminal', async ctx => {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
@@ -3225,7 +3448,10 @@ bot.command('terminal', async ctx => {
 // while Claude is frozen at the limit, since the daemon is a separate process. The
 // schedule is persisted so it survives a daemon restart (re-armed on startup).
 const SCHEDULED_RESET_FILE = join(STATE_DIR, 'scheduled-reset.json')
-let resetTimer: ReturnType<typeof setTimeout> | null = null
+// Per ACCOUNT: one pending reset timer each (two accounts can be limited at once). Persisted
+// as a name-keyed map in SCHEDULED_RESET_FILE so a daemon restart re-arms them all.
+const resetTimers = new Map<string, ReturnType<typeof setTimeout>>()
+type ResetSchedule = { fireAt: number; chats: string[]; attempt?: number; auto?: boolean }
 
 // Claude prints a ROUNDED reset time ("resets 9:30am"), so the real reset can land a little
 // later — firing "continue" exactly then re-hits the limit. Fire a touch after the printed
@@ -3235,41 +3461,73 @@ const CONTINUE_VERIFY_MS = 12_000
 const CONTINUE_RETRY_MS = 3 * 60_000
 const CONTINUE_MAX_ATTEMPTS = 5
 
-function fireResetNotification(chats: string[], attempt = 0, auto = false): void {
-  // Account-wide limits freeze EVERY session, not just the focused one. In topic mode, also
-  // continue each non-focused pane that's actually showing the frozen banner (gated on
-  // detectLimited — blind injection would type "continue" into healthy sessions), reporting
-  // into its own topic. First pass only: the retry attempts below re-drive the focused pane.
-  if (attempt === 0 && auto && isTopicMode()) {
-    void continueAuxLimitedPanes()
+function readResetSchedules(): Record<string, ResetSchedule> {
+  const data = readJsonFile<Record<string, unknown> | null>(SCHEDULED_RESET_FILE, null)
+  if (!data) return {}
+  // Legacy single-schedule shape ({ fireAt, chats, … } at top level) → the main account's slot.
+  if (typeof (data as { fireAt?: unknown }).fireAt === 'number') {
+    const e = data as unknown as ResetSchedule
+    return Array.isArray(e.chats) ? { main: e } : {}
   }
-  // Auto-continue (armed per hit via the ⛔ message's button): type "continue" into the session
-  // automatically. Falls back to the manual Continue button when unarmed or no live session.
-  if (auto && focus.activePaneId && focus.paneWatcher) {
+  const out: Record<string, ResetSchedule> = {}
+  for (const [k, v] of Object.entries(data)) {
+    const e = v as ResetSchedule
+    if (e && typeof e.fireAt === 'number' && Array.isArray(e.chats)) out[k] = e
+  }
+  return out
+}
+function writeResetSchedules(map: Record<string, ResetSchedule>): void {
+  if (Object.keys(map).length === 0) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }
+  writeJsonFile(SCHEDULED_RESET_FILE, map)
+}
+function clearScheduledReset(account: string): void {
+  const t = resetTimers.get(account)
+  if (t) { clearTimeout(t); resetTimers.delete(account) }
+  const map = readResetSchedules()
+  if (map[account]) { delete map[account]; writeResetSchedules(map) }
+}
+
+async function fireResetNotification(account: string, chats: string[], attempt = 0, auto = false): Promise<void> {
+  const who = account === 'main' ? '' : ` (${account})`
+  // Account-wide limits freeze EVERY session of that account, not just the focused one. In topic
+  // mode, also continue each non-focused pane OF THE ACCOUNT that's actually showing the frozen
+  // banner (gated on detectLimited — blind injection would type "continue" into healthy
+  // sessions), reporting into its own topic. First pass only: the retry attempts below re-drive
+  // the focused pane.
+  if (attempt === 0 && auto && isTopicMode()) {
+    void continueAuxLimitedPanes(account)
+  }
+  // Auto-continue (armed per hit via the ⛔ message's button): type "continue" into the focused
+  // session — but only when it actually runs on the limited account. Falls back to the manual
+  // Continue button when unarmed or no live session on the account.
+  const focusedMatches = focus.activePaneId && focus.paneWatcher
+    && (await paneAccount(focus.activePaneId)).name === account
+  if (auto && focusedMatches) {
     const msg = attempt === 0
-      ? '🕛 Usage limit reset — ▶️ auto-continuing…'
-      : `🔁 Still limited — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
+      ? `🕛 Usage limit reset${who} — ▶️ auto-continuing…`
+      : `🔁 Still limited${who} — retrying continue (attempt ${attempt + 1}/${CONTINUE_MAX_ATTEMPTS})…`
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, msg).catch(() => {})
     void (async () => {
       const ok = await injectText(focus.activePaneId!, focus.paneWatcher!, 'continue')
-      setTimeout(() => void verifyAutoContinue(chats, attempt, ok), CONTINUE_VERIFY_MS)
+      setTimeout(() => void verifyAutoContinue(account, chats, attempt, ok), CONTINUE_VERIFY_MS)
     })()
     return
   }
-  try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+  clearScheduledReset(account)
   const keyboard = new InlineKeyboard().text('▶️ Continue', 'usage:continue')
   for (const chat_id of chats) {
-    void bot.api.sendMessage(chat_id, '🕛 Usage limit reset — continue?', { reply_markup: keyboard }).catch(() => {})
+    void bot.api.sendMessage(chat_id, `🕛 Usage limit reset${who} — continue?`, { reply_markup: keyboard }).catch(() => {})
   }
 }
 
-// Continue every non-focused off-MCP pane frozen at the limit, each reporting to its own topic.
-// One delayed re-check per pane; if still frozen, leave a manual Continue button in its topic
-// (the persistent multi-attempt retry track belongs to the focused session above).
-async function continueAuxLimitedPanes(): Promise<void> {
+// Continue every non-focused off-MCP pane OF THIS ACCOUNT frozen at the limit, each reporting to
+// its own topic. One delayed re-check per pane; if still frozen, leave a manual Continue button in
+// its topic (the persistent multi-attempt retry track belongs to the focused session above).
+async function continueAuxLimitedPanes(account: string): Promise<void> {
   for (const pane of [...offMcpPanes]) {
     if (pane === focus.activePaneId) continue
     try {
+      if ((await paneAccount(pane)).name !== account) continue   // another account — not limited by this reset
       const cap = await capturePane(pane).catch(() => '')
       if (!cap || !detectLimited(cap)) continue
       const ok = await pasteToPane(pane, 'continue')
@@ -3296,48 +3554,50 @@ async function verifyAuxContinue(pane: string): Promise<void> {
 // After auto-continue types "continue", confirm the session actually resumed. If it's still
 // showing the frozen limit banner (the reset hadn't really landed yet), reschedule a retry a
 // few minutes out — persisted + capped — instead of giving up after one early attempt.
-async function verifyAutoContinue(chats: string[], attempt: number, injected: boolean): Promise<void> {
+async function verifyAutoContinue(account: string, chats: string[], attempt: number, injected: boolean): Promise<void> {
   const cap = focus.activePaneId ? await capturePane(focus.activePaneId).catch(() => '') : ''
   const resumed = injected && !!cap && !detectLimited(cap)
   if (resumed) {
-    try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+    clearScheduledReset(account)
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, '✅ Session resumed.').catch(() => {})
     return
   }
   if (attempt + 1 >= CONTINUE_MAX_ATTEMPTS) {
-    try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}
+    clearScheduledReset(account)
     for (const chat_id of chats) void bot.api.sendMessage(chat_id, '⚠️ Still limited after several tries — stopping auto-retry. Send "continue" once it lifts.').catch(() => {})
     return
   }
-  scheduleReset(Date.now() + CONTINUE_RETRY_MS, chats, attempt + 1, true)   // a retry exists only on the armed path
+  scheduleReset(account, Date.now() + CONTINUE_RETRY_MS, chats, attempt + 1, true)   // a retry exists only on the armed path
 }
 
 // `auto` = the user armed auto-continue for this hit (the ⛔ message's button); persisted with
 // the schedule so a daemon restart keeps the choice, and carried through retry attempts.
-function scheduleReset(fireAt: number, chats: string[], attempt = 0, auto = false): void {
-  if (resetTimer) { clearTimeout(resetTimer); resetTimer = null }
-  writeJsonFile(SCHEDULED_RESET_FILE, { fireAt, chats, attempt, auto })
+function scheduleReset(account: string, fireAt: number, chats: string[], attempt = 0, auto = false): void {
+  const t = resetTimers.get(account)
+  if (t) { clearTimeout(t); resetTimers.delete(account) }
+  const map = readResetSchedules()
+  map[account] = { fireAt, chats, attempt, auto }
+  writeResetSchedules(map)
   const delay = fireAt - Date.now()
-  if (delay <= 0) { fireResetNotification(chats, attempt, auto); return }
-  resetTimer = setTimeout(() => { resetTimer = null; fireResetNotification(chats, attempt, auto) }, delay)
+  if (delay <= 0) { void fireResetNotification(account, chats, attempt, auto); return }
+  resetTimers.set(account, setTimeout(() => { resetTimers.delete(account); void fireResetNotification(account, chats, attempt, auto) }, delay))
 }
 
-// Arm auto-continue on the pending scheduled reset (the ⛔ button's action). Returns the
-// fire time when armed, or null if no reset is pending (already fired / never scheduled).
-function armScheduledReset(): number | null {
-  const data = readJsonFile<{ fireAt: number; chats: string[]; attempt?: number; auto?: boolean } | null>(SCHEDULED_RESET_FILE, null)
-  if (!data?.fireAt || !Array.isArray(data.chats) || data.fireAt <= Date.now()) return null
-  scheduleReset(data.fireAt, data.chats, data.attempt ?? 0, true)
-  return data.fireAt
+// Arm auto-continue on an account's pending scheduled reset (the ⛔ button's action). Returns
+// the fire time when armed, or null if no reset is pending (already fired / never scheduled).
+function armScheduledReset(account: string): number | null {
+  const e = readResetSchedules()[account]
+  if (!e || e.fireAt <= Date.now()) return null
+  scheduleReset(account, e.fireAt, e.chats, e.attempt ?? 0, true)
+  return e.fireAt
 }
 
-// Re-arm a persisted reminder on daemon startup (or fire it if it just came due).
+// Re-arm every persisted reminder on daemon startup (or fire one that just came due).
 function loadScheduledReset(): void {
-  const data = readJsonFile<{ fireAt: number; chats: string[]; attempt?: number; auto?: boolean } | null>(SCHEDULED_RESET_FILE, null)
-  if (!data) return
-  if (!data?.fireAt || !Array.isArray(data.chats)) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }
-  if (data.fireAt < Date.now() - 10 * 60_000) { try { unlinkSync(SCHEDULED_RESET_FILE) } catch {}; return }  // missed long ago
-  scheduleReset(data.fireAt, data.chats, data.attempt ?? 0, data.auto === true)
+  for (const [account, e] of Object.entries(readResetSchedules())) {
+    if (e.fireAt < Date.now() - 10 * 60_000) { clearScheduledReset(account); continue }  // missed long ago
+    scheduleReset(account, e.fireAt, e.chats, e.attempt ?? 0, e.auto === true)
+  }
 }
 
 
@@ -3527,13 +3787,16 @@ function settingsText(): string {
   return `⚙️ <b>Settings</b>\n\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
-    `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n\n` +
+    `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
+    `👤 Accounts — <b>${listAccounts().length}</b>\n` +
+    `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin').row()
-    .text('🎙️ Voice transcription', 'set:voice')
+    .text('🎙️ Voice transcription', 'set:voice').text('👤 Accounts', 'acct:panel').row()
+    .text('🚢 Ship buttons', 'set:ship')
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -3772,9 +4035,9 @@ async function statusCardText(paneId: string | null): Promise<string> {
   let status: StatuslineData | null = null
   try {
     const cap = await capturePane(paneId)
-    // Emoji only (modeLabel's leading glyph): 🏠 default · ✏️ acceptEdits · 📋 plan · 🪄 auto ·
-    // 🚨 bypass — the full name made the collapsed pin preview truncate.
-    if (onNormalPrompt(cap)) mode = modeLabel(detectCurrentMode(cap)).split(' ')[0]
+    // Emoji + a SHORT lowercase word (🚨 bypass), matching the "⚡ high" badge grammar — the full
+    // modeLabel name made the collapsed pin preview truncate.
+    if (onNormalPrompt(cap)) mode = modeBadge(detectCurrentMode(cap))
     status = parseStatusline(cap)
   } catch {}
   try {
@@ -3784,21 +4047,25 @@ async function statusCardText(paneId: string | null): Promise<string> {
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
 
-  // Head badges: model · effort, then session (5h) · weekly (7d) · context, mode last. Think
-  // lives in the body — with it up top the collapsed pin preview ellipsized.
-  const effortBadge = status?.effort ? `  ⚡ ${escapeHtml(status.effort)}` : ''
+  // Head badges: model · effort · mode, then session (5h) · weekly (7d) · context. Mode sits in
+  // the identity cluster (emoji + short word, same grammar as "⚡ high") rather than dangling as
+  // a bare emoji at the end. Think lives in the body — with it up top the collapsed pin preview
+  // ellipsized.
+  // Single-space packing throughout — double spacing pushed the context % off the preview.
+  const effortBadge = status?.effort ? ` ⚡${escapeHtml(status.effort)}` : ''
+  const modeBadgeStr = mode === '—' ? '' : ` ${escapeHtml(mode)}`
   const stats = [
-    status?.h5 ? `📈 ${status.h5.pct}%` : '',
+    status?.h5 ? `🕒 ${status.h5.pct}%` : '',
     status?.d7 ? `📅 ${status.d7.pct}%` : '',
     status?.ctxPct != null ? `💾 ${status.ctxPct}%` : '',
-  ].filter(Boolean).join('  ')
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${stats ? `  ${stats}` : ''}  ${escapeHtml(mode)}`
+  ].filter(Boolean).join(' ')
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${modeBadgeStr}${stats ? ` • ${stats}` : ''}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
     // Usage group: the 5h/7d limit bars, then the cost/time data.
     const lim: string[] = []
-    if (status.h5) lim.push(`📈 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
+    if (status.h5) lim.push(`🕒 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
     if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
     const ct: string[] = []
     if (status.cost) ct.push(`💰 ${status.cost}`)
@@ -3982,7 +4249,7 @@ function ensureFolderTrusted(dir: string): void {
   } catch (e) { process.stderr.write(`daemon: ensureFolderTrusted(${dir}) failed: ${e}\n`) }
 }
 
-async function spawnSession(dir: string, extra = '', presetSessionId?: string): Promise<boolean> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT): Promise<boolean> {
   try {
     ensureFolderTrusted(dir)   // so claude doesn't hit a trust dialog it can't answer on a new pane
     let target: string[] = []
@@ -3996,8 +4263,10 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string): 
     }
     // The adopt marker is a tmux pane option set below — NOT a claude flag. We keep
     // --allow-dangerously-skip-permissions purely for the bypass-on-demand UX (switchable from
-    // /mode), which is unrelated to adoption. extra e.g. "--resume <id>".
-    const cmd = `claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}`
+    // /mode), which is unrelated to adoption. extra e.g. "--resume <id>". An alt account pins
+    // the session to its config dir (tmux runs the command through sh -c, so the env prefix works).
+    const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
+    const cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}`
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
     if (newPane) {
@@ -4033,20 +4302,74 @@ bot.command('resume', async ctx => {
     await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.')
     return
   }
-  const recents = listRecentSessions(10)
+  const recents = listRecentSessions(10, allProjectsDirs())
   if (recents.length === 0) { await ctx.reply('No recent sessions found.'); return }
   const kb = new InlineKeyboard()
   const lines = recents.map((s, i) => {
     const folder = s.cwd.split('/').filter(Boolean).pop() || s.cwd || '—'
+    const acct = accountForProjectsDir(s.root)
+    const who = acct.name === 'main' ? '' : ` · 👤 ${escapeHtml(acct.name)}`
     const title = s.title ? ` — <i>${escapeHtml(s.title)}</i>` : ''
     kb.text(`${i + 1}`, `resume:${s.sessionId}`)
     if ((i + 1) % 5 === 0) kb.row()
-    return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtAgo(s.mtime)}${title}`
+    return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtAgo(s.mtime)}${who}${title}`
   })
   await ctx.reply(
     `🕘 <b>Recent sessions</b>\n${lines.join('\n')}\n\nTap a number to resume it in a new pane.`,
     { parse_mode: 'HTML', reply_markup: kb })
 })
+
+// /account — multi-account management. Bare: list the registered Claude accounts (config dirs)
+// with login + usage state. `add <name>` registers ~/.claude-<name> and seeds its settings.json
+// (statusline + hooks) so bridge sessions on it work out of the box; `remove <name>` unregisters
+// (files kept). Sessions pin to an account at launch: `claude-tg 1 <name>`.
+bot.command('account', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const [sub, name] = (ctx.match ?? '').toString().trim().split(/\s+/)
+  if (sub === 'add' && name) {
+    const r = addAccount(name.toLowerCase())
+    if (!r.ok) { await ctx.reply(`❌ ${r.error}`); return }
+    await ctx.reply(
+      `✅ Account <b>${escapeHtml(r.account.name)}</b> registered → <code>${escapeHtml(r.account.configDir)}</code>\n\n` +
+      `Tap below to start a session on it — Claude will ask you to log in once (the sign-in link relays here). ` +
+      `After that, sessions, /resume, and usage limits all track this account on their own.`,
+      { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🚀 Start a ${r.account.name} session`, `acct:launch:${r.account.name}`) })
+    return
+  }
+  if (sub === 'remove' && name) {
+    await ctx.reply(removeAccount(name)
+      ? `🗑 Account <b>${escapeHtml(name)}</b> unregistered (its files are kept on disk).`
+      : `❌ No registered account "${escapeHtml(name)}".`, { parse_mode: 'HTML' })
+    return
+  }
+  if (sub) { await ctx.reply('Usage: <code>/account</code> | <code>/account add &lt;name&gt;</code> | <code>/account remove &lt;name&gt;</code>', { parse_mode: 'HTML' }); return }
+  await ctx.reply(await accountsPanelText(), { parse_mode: 'HTML', reply_markup: accountsPanelKeyboard() })
+})
+
+// The accounts panel — shared by /account and the /settings → 👤 Accounts sub-panel.
+async function accountsPanelText(): Promise<string> {
+  const focusedAcct = await paneAccount(focus.activePaneId)
+  const lines = listAccounts().map(a => {
+    const snap = readUsageSnapshot(undefined, a)
+    const pct = snap?.fiveHour ? ` · ${Math.round(snap.fiveHour.pct)}% of 5h` : ''
+    const login = accountLoggedIn(a) ? '' : ' · ⚠️ not logged in'
+    const focused = a.name === focusedAcct.name && focus.activePaneId ? ' ← focused session' : ''
+    return `👤 <b>${escapeHtml(a.name)}</b> — <code>${escapeHtml(a.configDir)}</code>${pct}${login}${focused}`
+  })
+  return `<b>Claude accounts</b>\n\n${lines.join('\n')}\n\n` +
+    `🚀 starts a session on that account${isTopicMode() ? ' (it gets its own topic)' : ''} — ` +
+    `a first-time account asks you to log in once; the sign-in link relays here.`
+}
+function accountsPanelKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  for (const a of listAccounts()) {
+    kb.text(`🚀 ${a.name}`, `acct:launch:${a.name}`)
+    if (a.name !== 'main') kb.text(`🗑 ${a.name}`, `acct:rm:${a.name}`)
+    kb.row()
+  }
+  kb.text('➕ Add account', 'acct:add').text('‹ Back', 'acct:back')
+  return kb
+}
 
 // /restart — exit the focused Claude session and relaunch it resuming the same conversation
 // (claude -c), reusing the same pane. Useful to pick up a CLAUDE.md / plugin / config change that
@@ -4063,8 +4386,12 @@ bot.command('restart', async ctx => {
   }
   await ctx.reply('♻️ Restarting the session — <code>/exit</code> then resume…', { parse_mode: 'HTML' })
   // Preserve bypass-on-demand: relaunch with the same flag the claude-tg alias uses. `-c` continues
-  // the most recent conversation in the cwd — i.e. the one we just exited.
-  const relaunch = 'claude --allow-dangerously-skip-permissions -c'
+  // the most recent conversation in the cwd — i.e. the one we just exited. The relaunch is typed
+  // into the pane's SHELL (which doesn't export CLAUDE_CONFIG_DIR — claude-tg env-prefixes it),
+  // so an alt-account session must carry its config dir explicitly or it'd restart under main.
+  const acct = await paneAccount(paneId)
+  const envPrefix = acct.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${acct.configDir.replace(/'/g, `'\\''`)}' `
+  const relaunch = `${envPrefix}claude --allow-dangerously-skip-permissions -c`
   const drive = async () => {
     await sendKeys(paneId, ['/exit', 'Enter'])
     await waitForSettle(paneId, 800, 12_000)   // Claude tears down → shell prompt returns
@@ -4132,6 +4459,64 @@ bot.on('message:forum_topic_created', async ctx => {
   if (sent) replyTargets.set(`${ctx.chat.id}:${sent.message_id}`, { kind: 'topiccreate', threadId: thread, name })
 })
 
+// User closed a session's topic from the Telegram UI → exit that session. The reverse of
+// "session ends → topic closes" (closeTopicForPane); the from-bot guard keeps the daemon's own
+// closes (which raise the same service message) from looping back in here.
+bot.on('message:forum_topic_closed', async ctx => {
+  if (!isTopicMode() || String(ctx.chat.id) !== getGroupChatId()) return
+  if (ctx.from?.id === ctx.me.id) return                                  // our own session-ended close
+  if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return
+  const thread = ctx.message.message_thread_id
+  const sid = thread ? getSessionByThread(thread) : undefined
+  if (!sid) return
+  updateTopic(sid, { closed: true })   // record it, so a daemon-side close doesn't re-close
+  const pane = await paneForSession(sid)
+  if (!pane || !(await paneAlive(pane))) return                           // session already gone
+  await injectSlash(pane, pane === focus.activePaneId ? focus.paneWatcher : null, '/exit')
+  await ctx.reply('🏁 Topic closed — exiting its session.').catch(() => {})
+  process.stderr.write(`daemon: user closed topic ${thread} → exited session ${sid} (pane ${pane})\n`)
+})
+
+// ---- Deleted-topic detection ----
+// Telegram sends bots NO event when a forum topic is deleted, so an idle session whose topic the
+// user deleted would linger forever. Detect it with an INVISIBLE probe: editMessageReplyMarkup on
+// the topic's creation service message (message_id == threadId) answers "message can't be edited"
+// while the topic exists, but "message to edit not found" once the topic (and so all its
+// messages) is deleted — and the probe never changes anything the user can see. Validated against
+// the live API; sendChatAction is NOT usable here (it returns ok:true for bogus threads).
+// 'gone' = message no longer exists; 'alive' = it does (any other error included — fail safe).
+async function probeMessageGone(group: string, messageId: number): Promise<'gone' | 'alive'> {
+  try { await bot.api.editMessageReplyMarkup(group, messageId); return 'alive' }
+  catch (e) {
+    return /message to edit not found/i.test(String((e as { description?: string })?.description ?? e)) ? 'gone' : 'alive'
+  }
+}
+
+// Sweep every known topic; a deleted one exits its session (if still alive) and drops the
+// mapping + pin tracking. Double-probe: the service message AND the topic's status pin must both
+// be gone, so someone deleting just the "created topic" service message can't kill a session.
+async function sweepDeletedTopics(): Promise<void> {
+  if (!isTopicMode()) return
+  const group = getGroupChatId()
+  if (!group) return
+  for (const t of listTopics()) {
+    try {
+      if (await probeMessageGone(group, t.threadId) === 'alive') continue
+      const pinId = sessionPins.get(`topic:${t.threadId}`)
+      if (pinId && await probeMessageGone(group, pinId) === 'alive') continue   // pin survives → topic exists
+      const pane = await paneForSession(t.sessionId)
+      removeTopic(t.sessionId)
+      sessionPins.delete(`topic:${t.threadId}`); pinTextCache.delete(`topic:${t.threadId}`); persistSessionPins()
+      process.stderr.write(`daemon: topic ${t.threadId} ("${t.name}") deleted by user → cleaning up session ${t.sessionId}\n`)
+      if (pane && await paneAlive(pane)) {
+        await injectSlash(pane, pane === focus.activePaneId ? focus.paneWatcher : null, '/exit')
+        await bot.api.sendMessage(group, `🗑 Topic “${escapeHtml(t.name)}” was deleted — exited its session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
+      }
+    } catch { /* probe hiccup — next sweep retries */ }
+  }
+}
+const TOPIC_SWEEP_MS = 2 * 60_000
+
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
@@ -4174,7 +4559,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4192,8 +4577,62 @@ bot.on('callback_query:data', async ctx => {
       a.sessionPin = a.sessionPin === false                 // flip
       saveAccess(a)
       if (a.sessionPin) await updateSessionPin(); else await removeSessionPins()
+    } else if (setMatch[1] === 'ship') {
+      a.shipButtons = a.shipButtons !== true                // flip (default off)
+      saveAccess(a)
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+    return
+  }
+
+  // Accounts sub-panel (settings → 👤 Accounts, or the /account command's buttons).
+  const acctMatch = /^acct:(panel|back|add|rm:([A-Za-z0-9_-]+)|launch:([A-Za-z0-9_-]+))$/.exec(data)
+  if (acctMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (acctMatch[1] === 'back') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      return
+    }
+    if (acctMatch[1] === 'add') {
+      // Buttons can't collect free text — follow up with a force-reply prompt; the reply
+      // (handled via replyTargets, kind 'acctname') creates the account.
+      await ctx.answerCallbackQuery().catch(() => {})
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      const sent = await bot.api.sendMessage(String(ctx.chat!.id),
+        '👤 Name the new account — short and simple, e.g. <code>work</code> (it gets its own config dir <code>~/.claude-&lt;name&gt;</code>).',
+        { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}), reply_markup: { force_reply: true, input_field_placeholder: 'work' } }).catch(() => null)
+      if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'acctname', thread })
+      return
+    }
+    if (acctMatch[3]) {
+      // 🚀 Launch a session on this account — the from-Telegram path (the terminal is launch-once;
+      // claude-tg 1 <name> stays as the terminal equivalent). Spawned in the focused session's
+      // folder (else $HOME); a first-time account hits the login screen, whose URL relays here.
+      const acct = accountByName(acctMatch[3])
+      if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }
+      const dir = (focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null) ?? homedir()
+      await ctx.answerCallbackQuery({ text: `Starting a ${acct.name} session…` }).catch(() => {})
+      const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined, acct)
+      const note = ok
+        ? `🚀 Starting a <b>${escapeHtml(acct.name)}</b> session in <code>${escapeHtml(dir)}</code>` +
+          `${isTopicMode() ? ' — it gets its own topic shortly' : ''}.` +
+          (accountLoggedIn(acct) ? '' : '\n🔑 First run on this account — a sign-in link will appear here; tap it, then send the code back with /reply.')
+        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      await bot.api.sendMessage(String(ctx.chat!.id), note, { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      return
+    }
+    if (acctMatch[2]) {
+      const removed = removeAccount(acctMatch[2])
+      await ctx.answerCallbackQuery({ text: removed ? `Account "${acctMatch[2]}" unregistered (files kept).` : 'Already gone.' }).catch(() => {})
+    } else {
+      await ctx.answerCallbackQuery().catch(() => {})
+    }
+    await ctx.editMessageText(await accountsPanelText(), { parse_mode: 'HTML', reply_markup: accountsPanelKeyboard() }).catch(() => {})
     return
   }
 
@@ -4253,14 +4692,70 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // "Auto-continue" button on the ⛔ limit-hit message → arm the pending scheduled reset to
-  // type "continue" automatically, drop the button, and confirm.
-  if (data === 'usage:arm') {
+  // Ship buttons (📝 footer / future entry points): Diff relays the patch; Commit asks the
+  // session's own Claude to commit (it has the context for the message, and repo hooks/convention
+  // run as usual); Push/PR run directly in the session cwd and report the result.
+  const shipMatch = /^ship:(diff|commit|push|pr)$/.exec(data)
+  if (shipMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
-    const fireAt = armScheduledReset()
+    const { paneId } = await targetPaneOf(ctx)
+    if (!paneId) { await ctx.answerCallbackQuery({ text: 'No active session.' }).catch(() => {}); return }
+    const chat = String(ctx.chat!.id)
+    const thread = ctx.callbackQuery.message?.message_thread_id
+    const extra = { parse_mode: 'HTML' as const, ...(thread ? { message_thread_id: thread } : {}) }
+    const cwd = await paneCwd(paneId).catch(() => null)
+    if (shipMatch[1] === 'diff') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await sendDiff(chat, paneId, thread)
+      return
+    }
+    if (shipMatch[1] === 'commit') {
+      await ctx.answerCallbackQuery({ text: 'Asking Claude to commit…' }).catch(() => {})
+      const prompt = 'Commit the current changes with an appropriate commit message. Commit only — do not push.'
+      const ok = paneId === focus.activePaneId && focus.paneWatcher
+        ? await injectText(paneId, focus.paneWatcher, prompt)
+        : await pasteToPane(paneId, prompt)
+      if (!ok) await bot.api.sendMessage(chat, '❌ Couldn\'t reach the session to commit.', extra).catch(() => {})
+      return
+    }
+    if (!cwd) { await ctx.answerCallbackQuery({ text: 'Could not read the session folder.' }).catch(() => {}); return }
+    if (shipMatch[1] === 'push') {
+      await ctx.answerCallbackQuery({ text: 'Pushing…' }).catch(() => {})
+      try {
+        const { stderr } = await exec('git', ['-C', cwd, 'push'], { timeout: 60_000 })
+        const tail = (stderr || '').trim().split('\n').slice(-2).join(' ').slice(0, 300)
+        await bot.api.sendMessage(chat, `⬆️ Pushed.${tail ? ` <i>${escapeHtml(tail)}</i>` : ''}`, extra).catch(() => {})
+      } catch (e) {
+        await bot.api.sendMessage(chat, `❌ Push failed: <pre>${escapeHtml(String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e).slice(0, 800))}</pre>`, extra).catch(() => {})
+      }
+      return
+    }
+    // pr
+    await ctx.answerCallbackQuery({ text: 'Opening PR…' }).catch(() => {})
+    try {
+      const { stdout } = await exec('gh', ['pr', 'create', '--fill'], { cwd, timeout: 60_000 })
+      const url = stdout.trim().split('\n').pop() ?? ''
+      await bot.api.sendMessage(chat, `🔀 PR opened: ${escapeHtml(url)}`, extra).catch(() => {})
+    } catch (e) {
+      const msg = String((e as { stderr?: string })?.stderr ?? (e as Error)?.message ?? e).slice(0, 800)
+      await bot.api.sendMessage(chat, `❌ PR failed: <pre>${escapeHtml(msg)}</pre>`, extra).catch(() => {})
+    }
+    return
+  }
+
+  // "Auto-continue" button on the ⛔ limit-hit message → arm that account's pending scheduled
+  // reset to type "continue" automatically, drop the button, and confirm. Bare "usage:arm"
+  // (pre-multi-account messages) reads as main.
+  const armMatch = /^usage:arm(?::([A-Za-z0-9_-]+))?$/.exec(data)
+  if (armMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const fireAt = armScheduledReset(armMatch[1] || 'main')
     if (!fireAt) {
       await ctx.answerCallbackQuery({ text: 'No pending reset — the limit may have already reset. Send "continue" to resume.', show_alert: true }).catch(() => {})
       await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
@@ -4432,6 +4927,31 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /new in a topic → Reset this chat / New session (sibling in this project).
+  // /new-in-General buttons: spawn a session (own topic) in the offered folder, or prompt for one.
+  if (data === 'newgo' || data === 'newask') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (data === 'newask') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageReplyMarkup().catch(() => {})
+      const sent = await bot.api.sendMessage(String(ctx.chat!.id),
+        '📂 Which folder should the new session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).',
+        { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+      if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'newsession' })
+      return
+    }
+    const dir = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
+    if (!dir) { await ctx.answerCallbackQuery({ text: 'No folder to offer — use ✏️ Specify folder.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
+    const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId))
+    await ctx.editMessageText(ok
+      ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code> — it gets its own topic shortly.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   if (data === 'newtopic:reset' || data === 'newtopic:spawn') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4449,7 +4969,7 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
     const cwd = await paneCwd(t.paneId).catch(() => null)
     if (!cwd) { await ctx.editMessageText('Couldn\'t read this session\'s folder.').catch(() => {}); return }
-    const ok = await spawnSession(cwd, '', genSessionId())
+    const ok = await spawnSession(cwd, '', genSessionId(), await paneAccount(t.paneId))   // sibling stays on this session's account
     await ctx.editMessageText(ok
       ? `🚀 Starting a sibling session in <code>${escapeHtml(cwd)}</code> — it gets its own topic shortly.`
       : `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`,
@@ -4697,8 +5217,10 @@ bot.on('callback_query:data', async ctx => {
     }
     await ctx.answerCallbackQuery().catch(() => {})
     const id = resumeMatch[1]
-    const dir = findSessionCwd(id) ?? homedir()
-    const ok = await spawnSession(dir, `--resume ${id}`)
+    const hit = findSessionCwd(id, allProjectsDirs())
+    const dir = hit?.cwd ?? homedir()
+    // Resume under the account the session was recorded in (its projects root names it).
+    const ok = await spawnSession(dir, `--resume ${id}`, undefined, hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT)
     await ctx.reply(ok
       ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — connecting to it shortly.`
       : `❌ Couldn't resume that session in <code>${escapeHtml(dir)}</code>.`,
@@ -5030,10 +5552,47 @@ async function handleInbound(
   if (isTopicMode() && typeof threadId === 'number') {
     const sid = getSessionByThread(threadId)
     targetPane = sid ? await paneForSession(sid) : null
-    if (sid && !targetPane) { bufferEvent(params); return }   // topic exists but its session is gone
+    if (sid && !targetPane) { void reviveTopicSession(ctx, sid, params); return }   // session died → revive it and deliver (ROADMAP #2)
     if (!sid) { void offerTopicBind(ctx, threadId); return }  // unbound (user-created) topic → set it up, never misroute to focused
   }
   emitInbound(params, targetPane)
+}
+
+// ---- Dead-session revival (ROADMAP #2) ----
+// A topic whose session died (reboot, crash, deploy window) revives on message: respawn
+// `claude -c` in the topic's folder (continues that cwd's most recent conversation — i.e. the
+// one that died), wait for the prompt, then deliver the message that woke it. Messages arriving
+// during the boot join a per-session queue so nothing is lost or misrouted.
+const revivalQueues = new Map<string, InboundParams[]>()
+async function reviveTopicSession(ctx: Context, sid: string, params: InboundParams): Promise<void> {
+  const queued = revivalQueues.get(sid)
+  if (queued) { queued.push(params); return }   // revival already booting — deliver with it
+  const t = getTopicBySession(sid)
+  if (!t) { bufferEvent(params); return }
+  revivalQueues.set(sid, [params])
+  try {
+    await ctx.reply('💤 This session was down — reviving it; your message will be delivered.').catch(() => {})
+    const ok = await spawnSession(t.cwd, '-c', sid)
+    if (!ok) {
+      await ctx.reply(`❌ Couldn't revive the session in <code>${escapeHtml(t.cwd)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    if (t.closed) { try { updateTopic(sid, { closed: false }) } catch {} }
+    const deadline = Date.now() + 90_000
+    while (Date.now() < deadline) {
+      await sleep(2000)
+      const pane = await paneForSession(sid)
+      if (!pane) continue
+      const cap = await capturePane(pane).catch(() => '')
+      if (cap && onNormalPrompt(cap)) {
+        const q = revivalQueues.get(sid) ?? []
+        for (const p of q) pasteInbound(pane, p)
+        process.stderr.write(`daemon: revived session ${sid} in ${t.cwd} (pane ${pane}) — delivered ${q.length} queued message(s)\n`)
+        return
+      }
+    }
+    await ctx.reply('⚠️ Session revived but didn\'t reach a prompt in time — resend your message once it settles.').catch(() => {})
+  } finally { revivalQueues.delete(sid) }
 }
 
 // Typing in a topic with no bound folder (a user-created tab whose setup prompt was missed or
@@ -5148,6 +5707,44 @@ bot.on('message:text', async ctx => {
             ? `✅ Wrote <code>${escapeHtml(target.display)}</code> (${contents.length} chars).`
             : `❌ Couldn't write <code>${escapeHtml(target.display)}</code>: ${escapeHtml(res.err)}`,
             { parse_mode: 'HTML' })
+          return
+        }
+        // Folder for /new in General → spawn a session there (it creates its own topic).
+        case 'newsession': {
+          const dir = await resolveNewSessionDir(text)
+          let created = false
+          if (!existsSync(dir)) {
+            try { mkdirSync(dir, { recursive: true }); created = true }
+            catch (e) {
+              const again = await ctx.reply(
+                `❌ Couldn't create <code>${escapeHtml(dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}\n\nReply with another path.`,
+                { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } }).catch(() => null)
+              if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+              return
+            }
+          }
+          const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId))
+          await ctx.reply(ok
+            ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — it gets its own topic shortly.`
+            : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' })
+          return
+        }
+        // Name for a new Claude account (settings → Accounts → ➕): register it and offer to
+        // launch a session on it right away. A bad name re-arms the prompt instead of stranding
+        // the flow.
+        case 'acctname': {
+          const name = text.trim().toLowerCase()
+          const r = addAccount(name)
+          if (!r.ok) {
+            const again = await ctx.reply(`❌ ${escapeHtml(r.error)}\n\nReply with another name (e.g. <code>work</code>).`,
+              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'work' } }).catch(() => null)
+            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+            return
+          }
+          await ctx.reply(
+            `✅ Account <b>${escapeHtml(r.account.name)}</b> registered → <code>${escapeHtml(r.account.configDir)}</code>\n\n` +
+            `Tap below to start a session on it — Claude will ask you to log in once (the sign-in link relays here).`,
+            { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text(`🚀 Start a ${r.account.name} session`, `acct:launch:${r.account.name}`) })
           return
         }
         // "✏️ Type something" → type the answer into the prompt's free-text field: move the cursor
@@ -5564,12 +6161,19 @@ initMirror({
   replyMode,
   getActivePaneId: () => focus.activePaneId,
   retriggerTyping: () => typingPresence.retrigger(),
+  resolveTranscriptForPane: async pane => transcriptForPane(pane, await paneCwd(pane)),
   outboundTargets: () => outboundTargetsFor(focus.activePaneId),   // focused session's topic in forum mode, else DM
 })
 
 // Drive usage alerts + limit auto-continue (session + weekly) from the statusline snapshot.
 checkUsageSnapshot()
 setInterval(checkUsageSnapshot, USAGE_POLL_MS).unref()
+
+// Catch user-deleted topics (no Telegram event exists for it) via the invisible message probe.
+setInterval(() => void sweepDeletedTopics(), TOPIC_SWEEP_MS).unref()
+
+// Inject /later queue items whenever their session goes idle.
+setInterval(() => void sweepLaterQueues(), LATER_SWEEP_MS).unref()
 
 // ---- Bot startup loop (retry with backoff, daemon persists forever) ----
 
@@ -5594,14 +6198,18 @@ void (async () => {
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
               { command: 'schedule', description: 'Schedule a message into a session (/schedule 12h · /schedule cancel)' },
+              { command: 'queue', description: 'Queue a prompt for when the session is idle (/queue clear)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },
               { command: 'resume', description: 'Resume a recent session (lists them with times)' },
+              { command: 'find', description: 'Search all sessions\' conversations (/find <text>)' },
+              { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
               { command: 'restart', description: 'Exit and resume the current session (picks up config changes)' },
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
               { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
               { command: 'cost', description: 'Show the session cost readout' },
               { command: 'context', description: 'Show the token-context usage' },
+              { command: 'diff', description: 'Show the session\'s uncommitted changes' },
               { command: 'terminal', description: 'Dump the last N lines of the terminal (default 40)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },

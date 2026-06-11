@@ -7,7 +7,10 @@ import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
-const PROJECTS_DIR = join(homedir(), '.claude', 'projects')
+// The default (main-account) projects root. Multi-account: every reader below takes an optional
+// `roots` list so the daemon can scan each registered account's <configDir>/projects too.
+export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
+const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
 type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null } }
 
@@ -70,23 +73,26 @@ function isCommandNoise(text: string): boolean {
   return /^no response requested\.?$/i.test(text.trim())
 }
 
-// A resumable session: id, its working dir, last-activity time, and a short title (the
-// first real user message). For the /resume picker.
-export type RecentSession = { sessionId: string; cwd: string; mtime: number; title: string }
+// A resumable session: id, its working dir, last-activity time, a short title (the first real
+// user message), and the projects root it was found under (identifies its account). For the
+// /resume picker.
+export type RecentSession = { sessionId: string; cwd: string; mtime: number; title: string; root: string }
 
-// The most-recently-active sessions across every project, newest first. Stat is cheap, so we
-// stat them all to sort, then read only the top `limit` for cwd + title.
-export function listRecentSessions(limit: number): RecentSession[] {
-  let projectDirs: string[]
-  try { projectDirs = readdirSync(PROJECTS_DIR) } catch { return [] }
-  const files: { path: string; sessionId: string; mtime: number }[] = []
-  for (const d of projectDirs) {
-    let names: string[]
-    try { names = readdirSync(join(PROJECTS_DIR, d)) } catch { continue }
-    for (const n of names) {
-      if (!n.endsWith('.jsonl')) continue
-      const path = join(PROJECTS_DIR, d, n)
-      try { files.push({ path, sessionId: n.slice(0, -6), mtime: statSync(path).mtimeMs }) } catch {}
+// The most-recently-active sessions across every project (across all `roots`), newest first.
+// Stat is cheap, so we stat them all to sort, then read only the top `limit` for cwd + title.
+export function listRecentSessions(limit: number, roots: string[] = [PROJECTS_DIR]): RecentSession[] {
+  const files: { path: string; sessionId: string; mtime: number; root: string }[] = []
+  for (const root of roots) {
+    let projectDirs: string[]
+    try { projectDirs = readdirSync(root) } catch { continue }
+    for (const d of projectDirs) {
+      let names: string[]
+      try { names = readdirSync(join(root, d)) } catch { continue }
+      for (const n of names) {
+        if (!n.endsWith('.jsonl')) continue
+        const path = join(root, d, n)
+        try { files.push({ path, sessionId: n.slice(0, -6), mtime: statSync(path).mtimeMs, root }) } catch {}
+      }
     }
   }
   files.sort((a, b) => b.mtime - a.mtime)
@@ -107,43 +113,48 @@ export function listRecentSessions(limit: number): RecentSession[] {
         if (cwd && title) break
       }
     } catch {}
-    return { sessionId: f.sessionId, cwd, mtime: f.mtime, title }
+    return { sessionId: f.sessionId, cwd, mtime: f.mtime, title, root: f.root }
   })
 }
 
-// The working dir a session was recorded in (read from its transcript), for relaunching it
-// with `claude --resume <id>` in the right folder. Null if the session can't be found.
-export function findSessionCwd(sessionId: string): string | null {
-  let projectDirs: string[]
-  try { projectDirs = readdirSync(PROJECTS_DIR) } catch { return null }
-  for (const d of projectDirs) {
-    const path = join(PROJECTS_DIR, d, `${sessionId}.jsonl`)
-    if (!existsSync(path)) continue
-    try {
-      for (const l of readFileSync(path, 'utf8').split('\n')) {
-        if (!l.trim()) continue
-        try { const e = JSON.parse(l) as Entry; if (e.cwd) return e.cwd } catch {}
-      }
-    } catch {}
-    return null
+// The working dir a session was recorded in (read from its transcript) + the projects root it
+// was found under (its account), for relaunching it with `claude --resume <id>` in the right
+// folder under the right CLAUDE_CONFIG_DIR. Null if the session can't be found.
+export function findSessionCwd(sessionId: string, roots: string[] = [PROJECTS_DIR]): { cwd: string; root: string } | null {
+  for (const root of roots) {
+    let projectDirs: string[]
+    try { projectDirs = readdirSync(root) } catch { continue }
+    for (const d of projectDirs) {
+      const path = join(root, d, `${sessionId}.jsonl`)
+      if (!existsSync(path)) continue
+      try {
+        for (const l of readFileSync(path, 'utf8').split('\n')) {
+          if (!l.trim()) continue
+          try { const e = JSON.parse(l) as Entry; if (e.cwd) return { cwd: e.cwd, root } } catch {}
+        }
+      } catch {}
+      return null
+    }
   }
   return null
 }
 
-// CC stores a session at ~/.claude/projects/<cwd with '/' → '-'>/<sessionId>.jsonl.
+// CC stores a session at <projects root>/<cwd with '/' → '-'>/<sessionId>.jsonl.
 // Resolve the live transcript for a pane's cwd as the most-recently-written .jsonl in
-// that project dir (the active session), verifying its last entry's cwd matches.
-export function resolveTranscript(cwd: string): string | null {
-  const dir = join(PROJECTS_DIR, cwd.replace(/\//g, '-'))
-  let files: string[]
-  try { files = readdirSync(dir).filter(f => f.endsWith('.jsonl')) } catch { return null }
+// that project dir — across every account's root when several are registered.
+export function resolveTranscript(cwd: string, roots: string[] = [PROJECTS_DIR]): string | null {
   let best: string | null = null
   let bestMtime = -1
-  for (const f of files) {
-    const p = join(dir, f)
-    let mt: number
-    try { mt = statSync(p).mtimeMs } catch { continue }
-    if (mt > bestMtime) { bestMtime = mt; best = p }
+  for (const root of roots) {
+    const dir = join(root, cwd.replace(/\//g, '-'))
+    let files: string[]
+    try { files = readdirSync(dir).filter(f => f.endsWith('.jsonl')) } catch { continue }
+    for (const f of files) {
+      const p = join(dir, f)
+      let mt: number
+      try { mt = statSync(p).mtimeMs } catch { continue }
+      if (mt > bestMtime) { bestMtime = mt; best = p }
+    }
   }
   return best
 }
@@ -338,4 +349,46 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
     })
   }
   return out
+}
+
+// Cross-session search (ROADMAP #5): scan transcripts newest-first for `query` in the
+// conversation text (user + main-thread assistant), returning up to `limit` matching sessions
+// with a snippet around the latest hit. Bounded to the newest `maxFiles` transcripts so a big
+// history can't stall the bot; matching is case-insensitive substring (good enough for "which
+// chat was that in?").
+export type SearchHit = { sessionId: string; cwd: string; mtime: number; snippet: string; root: string }
+export function searchTranscripts(query: string, roots: string[] = [PROJECTS_DIR], limit = 5, maxFiles = 120): SearchHit[] {
+  const q = query.toLowerCase()
+  const files: { path: string; sessionId: string; mtime: number; root: string }[] = []
+  for (const root of roots) {
+    let projectDirs: string[]
+    try { projectDirs = readdirSync(root) } catch { continue }
+    for (const d of projectDirs) {
+      let names: string[]
+      try { names = readdirSync(join(root, d)) } catch { continue }
+      for (const n of names) {
+        if (!n.endsWith('.jsonl')) continue
+        const path = join(root, d, n)
+        try { files.push({ path, sessionId: n.slice(0, -6), mtime: statSync(path).mtimeMs, root }) } catch {}
+      }
+    }
+  }
+  files.sort((a, b) => b.mtime - a.mtime)
+  const hits: SearchHit[] = []
+  for (const f of files.slice(0, maxFiles)) {
+    if (hits.length >= limit) break
+    let cwd = ''
+    let best: string | null = null
+    for (const e of readEntries(f.path)) {
+      if (!cwd && e.cwd) cwd = e.cwd
+      if (e.isSidechain || (e.type !== 'user' && e.type !== 'assistant')) continue
+      const text = textOf(e.message?.content)
+      if (!text) continue
+      const at = text.toLowerCase().indexOf(q)
+      if (at < 0) continue
+      best = text.slice(Math.max(0, at - 50), at + q.length + 70).replace(/\s+/g, ' ').trim()   // keep the LATEST hit
+    }
+    if (best != null) hits.push({ sessionId: f.sessionId, cwd, mtime: f.mtime, snippet: best, root: f.root })
+  }
+  return hits
 }

@@ -23,6 +23,7 @@ export type Access = {
   renderMarkdown?: boolean
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
   sessionPin?: boolean
+  shipButtons?: boolean   // post Diff/Commit/Push/PR buttons after turns that dirty the git tree (default off)
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)
   replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
 }

@@ -55,6 +55,8 @@ export type ReplyTarget =
   | { kind: 'schedule'; fireAt: number; paneId: string | null; sessionLabel: string; thread?: number }   // message body; time already fixed
   | { kind: 'schedcompose'; paneId: string | null; sessionLabel: string; thread?: number }               // "time message" in one line
   | { kind: 'md'; path: string; display: string }                // contents for a /md file
+  | { kind: 'acctname'; thread?: number }                        // name for a new Claude account (settings → Accounts → ➕)
+  | { kind: 'newsession' }                                       // folder for /new in General (spawn → its own topic)
 export const replyTargets = new Map<string, ReplyTarget>()
 
 // ---- Relay tracking ----

@@ -11,10 +11,9 @@
 import { Bot } from 'grammy'
 import { exec } from './proc.ts'
 import { stripAnsi } from './prompt.ts'
-import { paneCwd } from './pane-io.ts'
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { parseWorkingLine } from './statusline.ts'
-import { resolveTranscript, currentTurnActivity, currentTurnFeed, type Activity, type FeedItem } from './transcript.ts'
+import { currentTurnActivity, currentTurnFeed, type Activity, type FeedItem } from './transcript.ts'
 import type { Access } from './types.ts'
 
 type MirrorDeps = {
@@ -23,6 +22,10 @@ type MirrorDeps = {
   replyMode: () => 'thoughts' | 'tools' | 'hybrid' | 'off'
   getActivePaneId: () => string | null
   retriggerTyping: () => void
+  // The pane's transcript, resolved by the daemon (stamped @tg_transcript path first, cwd
+  // fallback) — so the card reads the right session even across accounts (CLAUDE_CONFIG_DIR)
+  // and same-cwd siblings, instead of guessing "newest .jsonl for the cwd" here.
+  resolveTranscriptForPane: (paneId: string) => Promise<string | null>
   // Where the card should open: the focused session's topic in forum mode, else the DM chats. The
   // daemon supplies this (outboundTargetsFor) so the mirror doesn't need to know about topics.
   outboundTargets: () => Promise<Array<{ chat: string; thread?: number }>>
@@ -241,8 +244,7 @@ async function syncMirrorBody(done: boolean): Promise<boolean> {
   const mode = deps.replyMode()
   if (mode === 'off') { mirrorBody = ''; return false }
   const paneId = deps.getActivePaneId()
-  const cwd = paneId ? await paneCwd(paneId) : null
-  const file = cwd ? resolveTranscript(cwd) : null
+  const file = paneId ? await deps.resolveTranscriptForPane(paneId) : null
 
   const needCap = !done || (mode === 'tools' && mirrorMode() === 'digest')
   const cap = needCap ? await mirrorCapture() : ''

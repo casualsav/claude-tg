@@ -55,6 +55,13 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
 - **Mode switching** — change permission mode from Telegram: `/plan`, `/auto`,
   `/default`, `/acceptedits`, `/bypass`, or the interactive `/mode`.
 - **Interrupt** — `/stop` sends Esc to the session, cancelling the current turn.
+- **Ship the work** — `/diff` shows uncommitted changes; an opt-in setting (🚢 Ship buttons)
+  posts a "📝 N files changed" footer after turns with Diff / Commit / Push / PR buttons, so
+  review-gated landing works from the phone. See [ROADMAP.md](./ROADMAP.md) for what's next.
+- **Multi-account** — register extra Claude accounts (during setup or `/account add work`)
+  and launch sessions on any of them straight from Telegram (/settings → 👤 Accounts → 🚀;
+  the one-time login link relays into the chat). Some chats on one account, some on another —
+  usage limits, auto-continue, and `/resume` track each account separately.
 - **Attachments** — send photos and documents in; Claude can attach files back.
 - **Voice & audio transcription** — inbound voice/audio notes are transcribed
   to text before they reach Claude, via a local Whisper model or a hosted API
@@ -165,7 +172,9 @@ default instead, `bash scripts/setup-alias.sh` adds a `claude-tg` shell function
 `tmux set -p @tg_bridge "${1:-1}"; claude --allow-dangerously-skip-permissions` — where the
 `@tg_bridge` tmux pane option (valued by instance slot) is the daemon's bridge marker (decoupled
 from claude's args); this starts in a normal mode (prompts relay to Telegram) with bypass switchable
-on demand from `/mode`, and `claude-tg N` routes to a second bridge.)
+on demand from `/mode`, and `claude-tg N` routes to a second bridge. A second arg pins the
+session to another Claude **account**: `claude-tg 1 work` launches under
+`CLAUDE_CONFIG_DIR=~/.claude-work` — see `/account`.)
 
 > Note: `/plugin install` can't add the alias for you — plugins are copied to a
 > cache and don't run host-shell install scripts. The setup script above is the
@@ -207,6 +216,7 @@ formatted. Bot commands:
 | --- | --- |
 | `/start` | Welcome + full feature guide (and pairing steps if not paired) |
 | `/status` | Re-post the pinned status card at the bottom; pairing state if unpaired |
+| `/account` | Claude accounts — list, `add <name>`, `remove <name>` (multi-account) |
 | `/resume` | List recent sessions with last-activity times; tap one to relaunch (`claude --resume`) |
 | `/mode` | Interactive permission-mode switcher (`/mode <name>` jumps straight to one) |
 | `/plan` `/auto` `/default` `/acceptedits` `/bypass` | Quick mode switch |
@@ -218,6 +228,7 @@ formatted. Bot commands:
 | `/cost` | Usage & cost breakdown |
 | `/context` | Token-context usage |
 | `/stream` | Live-activity card style: `thoughts` · `tools` · `hybrid` · `off` |
+| `/diff` | The session's uncommitted changes — stat + chunked patch |
 | `/terminal [N]` | Show recent terminal activity (N lines) |
 | `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
 | `/pin` | Toggle the pinned status message (`/pin on` \| `off` \| `refresh`) |

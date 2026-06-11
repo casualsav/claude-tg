@@ -157,6 +157,7 @@ type Config = {
   whisperDevice?: 'cpu' | 'cuda'
   groqKey?: string
   openaiKey?: string
+  accounts?: string[]
   botUsername?: string
 }
 
@@ -199,6 +200,21 @@ async function interview(): Promise<Config> {
   if (voice === 'local') await pickWhisperModel(cfg)
   if (voice === 'groq') cfg.groqKey = (await ask('GROQ_API_KEY:')).trim()
   if (voice === 'openai') cfg.openaiKey = (await ask('OPENAI_API_KEY:')).trim()
+
+  // Multi-account: register extra Claude accounts now so sessions can be launched on any of
+  // them straight from Telegram later (/settings → 👤 Accounts, or /account). Each name maps to
+  // its own config dir (~/.claude-<name>); the daemon seeds its settings + relays the one-time
+  // login link on first launch, so the terminal is never needed again after setup.
+  console.log(C.dim('\n  Got more than one Claude account (e.g. personal + work)? Register them now —'))
+  console.log(C.dim('  you can launch sessions on any of them from Telegram. (Also later: /account add <name>.)'))
+  cfg.accounts = []
+  while (await askYN('Add another Claude account?', false)) {
+    const name = (await ask('  Account name (e.g. work):')).trim().toLowerCase()
+    if (!/^[a-z0-9][a-z0-9_-]{0,15}$/.test(name) || name === 'main') { console.log(C.err('  ✗ 1–16 letters/digits/dashes (and not "main").')); continue }
+    if (cfg.accounts.includes(name)) { console.log(C.dim('  • already added')); continue }
+    cfg.accounts.push(name)
+    console.log(C.ok(`  ✓ ${name} → ~/.claude-${name}`))
+  }
   return cfg
 }
 
@@ -238,6 +254,19 @@ function writeConfig(cfg: Config): void {
     allowFrom: cfg.telegramId ? [cfg.telegramId] : [], groups: {}, pending: {}, renderMarkdown: true }
   writeFileSync(ACCESS_FILE, JSON.stringify(access, null, 2) + '\n', { mode: 0o600 })
   console.log(C.ok(`  ✓ ${ACCESS_FILE}${cfg.telegramId ? '' : C.dim(' (pairing mode — approve your first DM after setup)')}`))
+
+  // Extra Claude accounts → accounts.json (name → config dir). Dirs are created here; the daemon
+  // seeds each one's settings.json (statusline + hooks) at startup, AFTER this script has written
+  // the main settings.json — so the seed always carries the hooks.
+  if (cfg.accounts?.length) {
+    const reg: Record<string, string> = {}
+    for (const name of cfg.accounts) {
+      reg[name] = join(homedir(), `.claude-${name}`)
+      mkdirSync(reg[name], { recursive: true })
+    }
+    writeFileSync(join(STATE_DIR, 'accounts.json'), JSON.stringify(reg, null, 2) + '\n', { mode: 0o600 })
+    console.log(C.ok(`  ✓ ${join(STATE_DIR, 'accounts.json')} (${cfg.accounts.join(', ')})`))
+  }
 }
 
 // ---- settings.json + statusline + CLAUDE.md ----
@@ -277,13 +306,15 @@ function patchSettings(mode: Mode): void {
 
   if (mode === 'off-mcp') {
     const bashrc = join(homedir(), process.env.SHELL?.includes('zsh') ? '.zshrc' : '.bashrc')
-    // One launch FUNCTION taking an optional instance slot (default 1): `claude-tg`, `claude-tg 2`,
-    // … The adopt marker is `tmux set -p @tg_bridge <slot>` — a tmux PANE option, so it never
-    // touches claude's args (decoupled from the autonomy flag, immune to claude rejecting unknown
-    // flags) and the slot routes the pane to the matching bridge daemon. `claude-tg` starts with
+    // One launch FUNCTION taking an optional instance slot (default 1) and an optional account
+    // name: `claude-tg`, `claude-tg 2`, `claude-tg 1 work`. The adopt marker is `tmux set -p
+    // @tg_bridge <slot>` — a tmux PANE option, so it never touches claude's args (decoupled from
+    // the autonomy flag, immune to claude rejecting unknown flags) and the slot routes the pane to
+    // the matching bridge daemon. The account arg pins the session to an alternate config dir
+    // (~/.claude-<name>, the /account convention) via CLAUDE_CONFIG_DIR. `claude-tg` starts with
     // --allow-dangerously-skip-permissions (normal start, bypass switchable on demand from /mode).
     const want: [string, string][] = [
-      ['claude-tg', 'claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }'],
+      ['claude-tg', 'claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }'],
     ]
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
     // Match either the new function form or a legacy `alias claude-tg=` from an older install.

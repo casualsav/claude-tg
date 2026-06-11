@@ -2,7 +2,7 @@
 # One-time convenience: add the Telegram-bridge launchers to the user's shell rc. Mode-aware
 # (default off-MCP, the recommended mode):
 #   off-mcp -> a shell FUNCTION that takes an optional instance slot (default 1):
-#                claude-tg [slot]    -> tmux set -p @tg_bridge <slot> ; claude --allow-dangerously-skip-permissions
+#                claude-tg [slot] [account] -> tmux set -p @tg_bridge <slot> ; [CLAUDE_CONFIG_DIR=~/.claude-<account>] claude --allow-dangerously-skip-permissions
 #              The `@tg_bridge <slot>` tmux PANE option is the daemon's adopt marker (decoupled from
 #              claude's args). `claude-tg` = slot 1 (the default bridge); `claude-tg 2` routes to a
 #              second bridge (its own state dir/token, see /telegram:configure 2). --allow-… starts
@@ -20,7 +20,7 @@ COMMENT="# better-claude-telegram: Telegram-bridged Claude Code launchers (${MOD
 case "$MODE" in
   off-mcp)
     read -r -d '' DEFS <<'EOF' || true
-claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }
+claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }
 EOF
     ;;
   mcp)
