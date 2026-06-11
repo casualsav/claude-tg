@@ -4120,7 +4120,7 @@ bot.on('message:forum_topic_created', async ctx => {
   const name = ctx.message.forum_topic_created.name
 
   const base = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
-  const dirName = name.replace(/[\\/\0]/g, '-').trim().toLowerCase()   // "Money" → money/ (unix-style folder names)
+  const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')   // "My App" → my-app/ (unix-style folder names)
   const dir = base && dirName ? join(base, dirName) : null
   if (dir) {
     topicCreatePending.set(thread, { name, dir })
