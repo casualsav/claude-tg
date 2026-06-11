@@ -753,6 +753,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   relayIdleStreak = idle ? relayIdleStreak + 1 : 0
 
   const cwd = await paneCwd(paneId)
+  rememberLastCwd(cwd)   // so DM /new can offer this folder after every session is gone
   const file = await transcriptForPane(paneId, cwd)
 
   // The card opens/edits/closes entirely inside updateTerminalMirror, off the transcript's turn
@@ -1101,6 +1102,20 @@ async function findOffMcpPanes(): Promise<string[]> {
 // (there's no shim socket). Tracked in adoptedPaneId so a later shim subscribe announces
 // rather than silently stealing it.
 const ADOPTED_PANE_FILE = join(STATE_DIR, 'adopted-pane')
+
+// Last folder the focused session ran in — persisted so DM /new can offer to start a fresh
+// session there even after every session is gone (when no live pane can answer for a cwd).
+const LAST_CWD_FILE = join(STATE_DIR, 'last-cwd')
+let lastCwdCache: string | null = null
+function rememberLastCwd(cwd: string | null): void {
+  if (!cwd || cwd === lastCwdCache) return
+  lastCwdCache = cwd
+  try { writeFileSync(LAST_CWD_FILE, cwd) } catch {}
+}
+function lastSessionCwd(): string | null {
+  if (!lastCwdCache) { try { lastCwdCache = readFileSync(LAST_CWD_FILE, 'utf8').trim() || null } catch {} }
+  return lastCwdCache && existsSync(lastCwdCache) ? lastCwdCache : null
+}
 
 function adoptPane(paneId: string): void {
   offMcpPanes.add(paneId)
@@ -2271,6 +2286,16 @@ async function confirmNewSession(ctx: Context): Promise<void> {
     kb.text('✏️ Specify folder', 'newask')
     await ctx.reply('🆕 <b>New session</b> — which folder should it run in? It gets its own topic.',
       { parse_mode: 'HTML', reply_markup: kb })
+    return
+  }
+  // DM with no running session: /new offers to START one rather than dead-ending on the
+  // "no active session" guard — the daemon is alive and can spawn a fresh pane itself.
+  if (ctx.chat?.type === 'private' && (!focus.activePaneId || !focus.paneWatcher)) {
+    const dir = lastSessionCwd()
+    const kb = new InlineKeyboard()
+    if (dir) kb.text(`📁 ${dir.length > 48 ? '…' + dir.slice(-47) : dir}`, 'newstartgo').row()
+    kb.text('✏️ Specify folder', 'newask')
+    await ctx.reply('🚫 <b>No active session</b> — start one?', { parse_mode: 'HTML', reply_markup: kb })
     return
   }
   // Inside a session's topic, or DM: /new = clear THIS conversation in place, one confirm.
@@ -4811,6 +4836,23 @@ bot.on('callback_query:data', async ctx => {
     const ok = await spawnSession(dir, '', genSessionId(), await paneAccount(focus.activePaneId))
     await ctx.editMessageText(ok
       ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code> — it gets its own topic shortly.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
+  // DM /new with no running session → "start one?" tap. The folder is the persisted last session
+  // cwd (no live pane to ask); topic mode gives the new session its own topic via discovery.
+  if (data === 'newstartgo') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const dir = lastSessionCwd()
+    if (!dir) { await ctx.answerCallbackQuery({ text: 'That folder is gone — use ✏️ Specify folder.' }).catch(() => {}); return }
+    await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
+    const ok = await spawnSession(dir, '', isTopicMode() ? genSessionId() : undefined)
+    await ctx.editMessageText(ok
+      ? `🚀 Starting a session in <code>${escapeHtml(dir)}</code> — message it here once it's up.`
       : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
