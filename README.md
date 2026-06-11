@@ -77,6 +77,12 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
 - **Queue for idle & limit reset** — `/queue <prompt>` runs when the session next goes
   idle; `/queue @reset <prompt>` holds it until the 5h usage window rolls over, so dead
   limit hours soak up queued work.
+- **Autonomous loops** — `/loop <goal>` re-runs one goal until a check command exits 0
+  (or, without one, until Claude prints `LOOP_DONE`). A 3-step wizard in one self-editing
+  card sets the check, an iteration cap, and a $ budget (`unlimited` to waive — waiving
+  both needs an explicit "Start anyway"); the card then shows live progress with
+  stop-after-iteration / stop-now buttons, and the loop pauses and pings you if two
+  iterations conclude identically or an injected prompt never becomes a turn.
 - **Voice replies (TTS)** — Claude's replies can arrive as voice notes too: free local
   Piper (auto-installed with ffmpeg, 5 curated voices to pick from) or hosted OpenAI /
   ElevenLabs. Modes off · digest-only · all (`/voice on|off`; details in `/settings`).
@@ -238,6 +244,7 @@ formatted. Bot commands:
 | `/account` | Claude accounts — list, `add <name>`, `remove <name>` (multi-account) |
 | `/find <text>` | Search every session's conversation; tap a hit to resume |
 | `/queue <prompt>` | Per-session backlog — runs when the session goes idle (`/queue clear`) |
+| `/loop <goal>` | Re-run a goal until its check passes (`status` · `stop` · `stop now` · `resume`) |
 | `/digest` | All-sessions digest now, or daily (`/digest 08:00` · `off`) |
 | `/budget` | Daily $ cap with 80%/100% warnings (`/budget 20` · `off`) |
 | `/rewind` | Open Claude Code's checkpoint picker as tappable buttons |
