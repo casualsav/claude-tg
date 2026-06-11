@@ -67,7 +67,7 @@ typo'd prompt in place.
 A turn raising N permission prompts costs N taps. When prompts queue up, one card with
 "✅ Allow all from this turn" (scoped to that turn, not bypass) plus per-item Deny.
 
-## 14. /health card
+## 14. /health card — ✅ DONE (v0.1.88)
 Two daemons, watchdog, version-keyed caches, revival — debugging the meta-layer needs the log.
 One card: instance, version, uptime, adopted panes, queue depths, last crash, watchdog state;
 covers both accounts' bridges.

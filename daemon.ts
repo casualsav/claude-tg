@@ -4035,6 +4035,41 @@ bot.command('settings', async ctx => {
   await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
 })
 
+// /health — the bridge's own vitals (ROADMAP #14): instance, version, uptime, adopted panes,
+// queue depths, watchdog, last crash. Debugs the meta-layer from the phone instead of the log.
+const DAEMON_STARTED = Date.now()
+bot.command('health', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  const lines: string[] = [`🩺 <b>Bridge health</b> — instance <code>${escapeHtml(INSTANCE_ID)}</code> · v${escapeHtml(bridgeVersion())}`]
+  lines.push(`⏱ Daemon up ${formatDuration(Date.now() - DAEMON_STARTED)} (pid ${process.pid})`)
+  const paneBits: string[] = []
+  for (const p of offMcpPanes) {
+    const cwd = await paneCwd(p).catch(() => null)
+    paneBits.push(`${p === focus.activePaneId ? '★' : '·'} <code>${escapeHtml(p)}</code> ${escapeHtml(cwd ? basename(cwd) : '?')}`)
+  }
+  lines.push(`🖥 Panes (${offMcpPanes.size}): ${paneBits.join('  ') || 'none'}`)
+  const later = readLater()
+  const laterN = Object.values(later).reduce((n, items) => n + items.length, 0)
+  lines.push(`🗒 Queues: ${laterN} queued · ${scheduledCount()} scheduled · ${revivalQueues.size} reviving`)
+  let wd = 'not running'
+  try {
+    const wpid = parseInt(readFileSync(WATCHDOG_PID_FILE, 'utf8').trim(), 10)
+    if (wpid && !Number.isNaN(wpid)) { process.kill(wpid, 0); wd = `alive (pid ${wpid})` }
+  } catch {}
+  lines.push(`🐶 Watchdog: ${wd}`)
+  try {
+    const tail = readFileSync(DAEMON_LOG_FILE, 'utf8').split('\n').slice(-400)
+    const crash = tail.reverse().find(l => /watchdog: daemon down|FATAL|Uncaught|panic/i.test(l))
+    if (crash) lines.push(`💥 Last crash: <code>${escapeHtml(crash.slice(0, 160))}</code>`)
+  } catch {}
+  try {
+    const { stdout } = await exec('pgrep', ['-af', 'telegram/[0-9.]+/daemon.ts'], { timeout: 2000 })
+    const others = stdout.trim().split('\n').filter(l => l && !l.startsWith(String(process.pid)))
+    if (others.length) lines.push(`👥 Other bridge daemons: ${others.map(l => `<code>${escapeHtml(l.split(' ')[0])}</code>`).join(' ')}`)
+  } catch {}
+  await ctx.reply(lines.join('\n'), { parse_mode: 'HTML' })
+})
+
 // /mcp on|off toggles MCP mode for sessions started afterward (relaunch to apply); bare shows it.
 bot.command('mcp', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -6689,6 +6724,7 @@ void (async () => {
               { command: 'diff', description: 'Show the session\'s uncommitted changes' },
               { command: 'terminal', description: 'Dump the last N lines of the terminal (default 40)' },
               { command: 'compact', description: 'Compact the conversation to free up context' },
+              { command: 'health', description: 'Bridge vitals — instance, uptime, panes, queues, watchdog' },
               { command: 'update', description: 'Update the Telegram bridge or Claude itself' },
             ],
             { scope: { type: 'all_private_chats' } },
