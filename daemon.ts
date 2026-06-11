@@ -4104,10 +4104,12 @@ bot.command('rename', async ctx => {
 bot.command('stop', confirmStop)
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
-// A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session: ask which folder it
-// should run in, then bind + spawn on the reply (below, the topiccreate replyTarget). Topics the bot
-// creates don't produce updates for the bot (own-message filter as belt-and-braces), so this only
-// fires for human-made tabs. Non-allowlisted creators are ignored — the group policy governs.
+// A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session, automatically: its
+// folder is <focused session's cwd>/<topic name> (created if missing) — name a tab "money" while
+// the main session runs in /main and it spawns in /main/money. No anchor session (or mkdir
+// failure) falls back to the old folder force-reply. Topics the bot creates don't produce updates
+// for the bot (own-message filter as belt-and-braces), so this only fires for human-made tabs.
+// Non-allowlisted creators are ignored — the group policy governs.
 bot.on('message:forum_topic_created', async ctx => {
   if (!isTopicMode() || String(ctx.chat.id) !== getGroupChatId()) return
   if (ctx.from?.id === ctx.me.id) return
@@ -4115,6 +4117,31 @@ bot.on('message:forum_topic_created', async ctx => {
   const thread = ctx.message.message_thread_id
   if (!thread || getSessionByThread(thread)) return
   const name = ctx.message.forum_topic_created.name
+
+  const base = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
+  const dirName = name.replace(/[\\/\0]/g, '-').trim()
+  let dir: string | null = base && dirName ? join(base, dirName) : null
+  if (dir) {
+    let created = false
+    if (!existsSync(dir)) {
+      try { mkdirSync(dir, { recursive: true }); created = true } catch { dir = null }
+    }
+    if (dir) {
+      const sid = genSessionId()
+      setTopic(sid, { threadId: thread, cwd: dir, name, closed: false, createdAt: Date.now() })
+      // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on
+      // its first pass — it only renames on an actual branch CHANGE from here on.
+      try { topicBranchCache.set(sid, (await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+      catch { topicBranchCache.set(sid, '') }
+      const ok = await spawnSession(dir, '', sid)
+      if (!ok) removeTopic(sid)
+      await ctx.reply(ok
+        ? `🚀 Starting this topic's session in <code>${escapeHtml(dir)}</code>${created ? ' (📁 created it for you)' : ''} — type here to drive it once it's up.`
+        : `❌ Couldn't start a session in <code>${escapeHtml(dir)}</code>.`,
+        { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+  }
   const sent = await ctx.reply(
     `📂 <b>New topic “${escapeHtml(name)}”</b> — which folder should its Claude session run in?\n\nReply with a folder path (created if missing; <code>~/…</code> works).`,
     { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: 'Folder path' } },
