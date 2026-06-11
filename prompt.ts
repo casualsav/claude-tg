@@ -348,3 +348,39 @@ export function isPluginInstallUserScope(paneText: string): boolean {
   if (!region.some(l => PLUGIN_USER_SCOPE.test(l))) return false
   return region.some(l => /^\s*[>❯●]\s*install for you \(user scope\)/i.test(l))
 }
+
+// ---- Mode detection (moved from daemon.ts — pure pane-text parsers) ----
+
+export type CcMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
+
+export function detectCurrentMode(paneText: string): CcMode {
+  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  // Drop the "✗ Auto-update failed…" footer line first — its "Auto" otherwise matches the
+  // auto-mode test, making every mode read as 'auto' (broke the /mode picker's live update).
+  const footer = lines.slice(-5).filter(l => !/auto-update/i.test(l)).join(' ').toLowerCase()
+  if (/bypass|dangerously.?skip|yolo/i.test(footer)) return 'bypassPermissions'
+  if (/\bplan\s*(mode)?\b/i.test(footer)) return 'plan'
+  if (/\bauto\b/i.test(footer)) return 'auto'
+  if (/accept.?edit/i.test(footer)) return 'acceptEdits'
+  return 'default'
+}
+
+// True when the pane is at Claude Code's normal prompt (input box visible), where reading or
+// changing the mode is valid. A settings/config screen or another modal lacks this footer, so
+// detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and
+// report "another screen" instead of silently switching/mis-reporting.
+export function onNormalPrompt(paneText: string): boolean {
+  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  const tail = lines.slice(-8).join('\n').toLowerCase()
+  if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)) return true
+  // The footer hint rotates with CC version/state ("← for agents", "@ for file paths", …), so all
+  // of the phrases above can be absent at a perfectly normal prompt (this bounced /mode with a
+  // false "another screen"). Accept the input box itself as proof: a "❯" prompt row directly
+  // between two box-border rows. Menus and pickers render "❯" as the cursor on an option row
+  // inside a list — question above, sibling options below — never bordered on both sides.
+  const t = lines.slice(-12)
+  for (let i = 1; i + 1 < t.length; i++) {
+    if (/^\s*❯/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
+  }
+  return false
+}

@@ -22,7 +22,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts, type Activity, type FeedItem } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -61,6 +61,11 @@ import {
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache,
 } from './topic-runtime.ts'
+import {
+  initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
+  removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
+  clearAllPins, createSessionPin, lastModelInTranscript, prettyModel, modeBadge,
+} from './status-card.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
@@ -212,6 +217,7 @@ if (!STATIC) setInterval(checkApprovals, 5000).unref()
 // ---- Bot ----
 
 const bot = new Bot(TOKEN)
+initStatusCard({ bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername })
 initTopicRuntime(bot)
 let botUsername = ''
 // access.ts's isMentioned needs the live bot username (set after the daemon connects).
@@ -235,7 +241,6 @@ const typingPresence = new TypingPresence(bot)
 
 // ---- Pane / tmux layer ----
 
-type CcMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
 
 // Type `text` into the pane's input and submit it with Enter, pausing the watcher
 // so the resulting change isn't mistaken for a new prompt/event.
@@ -289,40 +294,6 @@ async function verifyPromptClosed(paneId: string | null = focus.activePaneId): P
   })
   resetPromptDedup(paneId)
   notifyChats('⚠️ That answer didn’t register cleanly in the session — I dismissed the prompt so the terminal wouldn’t hang. Please try again.')
-}
-
-// ---- Mode detection ----
-
-function detectCurrentMode(paneText: string): CcMode {
-  const lines = paneText.split('\n').map(l => stripAnsi(l))
-  // Drop the "✗ Auto-update failed…" footer line first — its "Auto" otherwise matches the
-  // auto-mode test, making every mode read as 'auto' (broke the /mode picker's live update).
-  const footer = lines.slice(-5).filter(l => !/auto-update/i.test(l)).join(' ').toLowerCase()
-  if (/bypass|dangerously.?skip|yolo/i.test(footer)) return 'bypassPermissions'
-  if (/\bplan\s*(mode)?\b/i.test(footer)) return 'plan'
-  if (/\bauto\b/i.test(footer)) return 'auto'
-  if (/accept.?edit/i.test(footer)) return 'acceptEdits'
-  return 'default'
-}
-
-// True when the pane is at Claude Code's normal prompt (input box visible), where reading or
-// changing the mode is valid. A settings/config screen or another modal lacks this footer, so
-// detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and
-// report "another screen" instead of silently switching/mis-reporting.
-function onNormalPrompt(paneText: string): boolean {
-  const lines = paneText.split('\n').map(l => stripAnsi(l))
-  const tail = lines.slice(-8).join('\n').toLowerCase()
-  if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)) return true
-  // The footer hint rotates with CC version/state ("← for agents", "@ for file paths", …), so all
-  // of the phrases above can be absent at a perfectly normal prompt (this bounced /mode with a
-  // false "another screen"). Accept the input box itself as proof: a "❯" prompt row directly
-  // between two box-border rows. Menus and pickers render "❯" as the cursor on an option row
-  // inside a list — question above, sibling options below — never bordered on both sides.
-  const t = lines.slice(-12)
-  for (let i = 1; i + 1 < t.length; i++) {
-    if (/^\s*❯/.test(t[i]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i - 1]) && /^\s*[─━╭╰└┌├╮╯|]/.test(t[i + 1])) return true
-  }
-  return false
 }
 
 // ---- First-run onboarding driver ----
@@ -497,17 +468,6 @@ function detectLimited(paneText: string): boolean {
   return /used 100% of your [\w-]+ limit|hit your [\w-]+ limit/i.test(tail)
 }
 
-// Compact head-badge form of a mode — one 🛡 (permission posture) + short lowercase word, sized
-// for the pin preview. The per-mode emojis live on in modeLabel (pickers/buttons).
-function modeBadge(mode: CcMode): string {
-  switch (mode) {
-    case 'default': return '🛡default'
-    case 'acceptEdits': return '🛡edits'
-    case 'plan': return '🛡plan'
-    case 'auto': return '🛡auto'
-    case 'bypassPermissions': return '🛡yolo'
-  }
-}
 
 function modeLabel(mode: CcMode): string {
   switch (mode) {
@@ -4369,284 +4329,6 @@ async function paneLabel(paneId: string): Promise<string> {
   return (cwd && cwd.split('/').filter(Boolean).pop()) || paneId
 }
 
-// ---- Pinned status message ----
-// One pinned card per DM chat (and per topic in forum mode) with the live session metrics —
-// model · mode · context · usage (statusCardText; deliberately no session identity). Edited in
-// place on the 10s refresh; pin ids persist so a daemon restart edits the existing pin instead
-// of pinning a new one. Keys: DM chat id, or `topic:<threadId>` in forum mode.
-const SESSION_PIN_FILE = join(STATE_DIR, 'session-pin.json')
-const sessionPins = new Map<string, number>()
-const pinTextCache = new Map<string, string>()   // last rendered text per key — skip no-op edits
-for (const [c, m] of Object.entries(readJsonFile<Record<string, number>>(SESSION_PIN_FILE, {}))) sessionPins.set(c, m)
-function persistSessionPins(): void {
-  writeJsonFile(SESSION_PIN_FILE, Object.fromEntries(sessionPins))
-}
-
-// Unpin + delete every pinned status message (used by /pin off).
-async function removeSessionPins(): Promise<void> {
-  const group = getGroupChatId()
-  for (const [key, mid] of sessionPins) {
-    const chat = key.startsWith('topic:') ? group : key
-    if (!chat) continue
-    await bot.api.unpinChatMessage(chat, mid).catch(() => {})
-    await bot.api.deleteMessage(chat, mid).catch(() => {})
-  }
-  sessionPins.clear(); pinTextCache.clear(); persistSessionPins()
-}
-
-// Force a fresh pin: unpin+delete the old one, then recreate. Recovers a pin the user dismissed
-// in their client — Telegram still reports it pinned, so updateSessionPin can't tell it's hidden,
-// and editing the same id won't bring it back; only pinning a new message will.
-async function refreshSessionPin(): Promise<void> {
-  await removeSessionPins()
-  await updateSessionPin()
-}
-
-// The model the focused session last used, read from its transcript (non-intrusive, per
-// session) — falls back to lastKnownModel. The transcript stores raw ids like
-// "claude-opus-4-8"; prettyModel turns that into "Opus 4.8".
-function lastModelInTranscript(file: string): string | null {
-  let data = ''
-  try { data = readFileSync(file, 'utf8') } catch { return null }
-  const matches = data.match(/"model":"([^"]+)"/g) ?? []
-  for (let i = matches.length - 1; i >= 0; i--) {
-    const m = matches[i].slice(9, -1)
-    if (m && m !== '<synthetic>') return m
-  }
-  return null
-}
-// The session's working plan: the most recent TodoWrite state in its transcript (ROADMAP #16).
-// Whole-file read matches lastModelInTranscript's pattern (the pin tick already pays it).
-type TodoState = { total: number; done: number; active: string | null }
-function lastTodosInTranscript(file: string): TodoState | null {
-  let data = ''
-  try { data = readFileSync(file, 'utf8') } catch { return null }
-  const idx = data.lastIndexOf('"name":"TodoWrite"')
-  if (idx < 0) return null
-  const start = data.lastIndexOf('\n', idx) + 1
-  const endNl = data.indexOf('\n', idx)
-  const line = data.slice(start, endNl < 0 ? data.length : endNl)
-  try {
-    const rec = JSON.parse(line) as { message?: { content?: unknown } }
-    const content = rec?.message?.content
-    type Todo = { status?: string; content?: string; activeForm?: string }
-    const block = Array.isArray(content)
-      ? (content as { type?: string; name?: string; input?: { todos?: Todo[] } }[]).find(b => b?.type === 'tool_use' && b?.name === 'TodoWrite')
-      : null
-    const todos = block?.input?.todos
-    if (!Array.isArray(todos) || todos.length === 0) return null
-    const done = todos.filter(t => t?.status === 'completed').length
-    const act = todos.find(t => t?.status === 'in_progress')
-    return { total: todos.length, done, active: act ? String(act.activeForm ?? act.content ?? '').trim() || null : null }
-  } catch { return null }
-}
-
-// Family name only — "Opus" / "Sonnet" / "Haiku" / "Fable" (no version), for the pin tagline.
-function prettyModel(id: string | null): string | null {
-  if (!id) return id
-  const m = id.match(/(opus|sonnet|haiku|fable)/i)
-  return m ? m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() : id
-}
-
-// Status line for the focused session: 💻 name • model (…) • mode (…). Mode is read live from a
-// pane capture; model from the session's transcript. Both degrade to "—" rather than blocking.
-async function gitBranch(dir: string): Promise<string | null> {
-  try {
-    const { stdout } = await exec('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })
-    const b = stdout.trim()
-    return b && b !== 'HEAD' ? b : null
-  } catch { return null }
-}
-
-// ---- statusline → status card enrichment ----
-// The configured Claude Code statusLine renders rich session metrics (context, tokens, cost,
-// rate-limit windows) at the bottom of the pane. The daemon already captures that pane, so rather
-// than recompute anything we lift those fields straight out of the capture and re-render them in
-// the card's own layout. Scoped to the statusline's slot — the lines just above Claude Code's
-// footer hint — so we never pick up numbers from Claude's reply text higher in the pane.
-
-const CARD_RULE = '──────────────────────────'
-
-// Status card for any pane — usage · context · model · effort · mode up top (the collapsed
-// preview Telegram shows), rule-separated detail groups below. Deliberately NO session identity:
-// in topic mode the tab is the session, and the DM drives a single one. Rendered into the pinned
-// status message (refreshed in place) and re-posted by /status.
-async function statusCardText(paneId: string | null): Promise<string> {
-  if (!paneId) return '🖥️ <b>No active session</b>'
-  let mode = '—', cwd: string | null = null
-  let model = paneId === focus.activePaneId ? lastKnownModel : null
-  let status: StatuslineData | null = null
-  try {
-    const cap = await capturePane(paneId)
-    // Emoji + a SHORT lowercase word (🚨 bypass), matching the "⚡ high" badge grammar — the full
-    // modeLabel name made the collapsed pin preview truncate.
-    if (onNormalPrompt(cap)) mode = modeBadge(detectCurrentMode(cap))
-    status = parseStatusline(cap)
-  } catch {}
-  let todos: TodoState | null = null
-  try {
-    cwd = await paneCwd(paneId)
-    const file = await transcriptForPane(paneId, cwd)
-    model = (file && prettyModel(lastModelInTranscript(file))) || model
-    if (file) todos = lastTodosInTranscript(file)
-  } catch {}
-  const branch = cwd ? await gitBranch(cwd) : null
-
-  // Head badges: model · effort · mode, then session (5h) · weekly (7d) · context. Mode sits in
-  // the identity cluster (emoji + short word, same grammar as "⚡ high") rather than dangling as
-  // a bare emoji at the end. Think lives in the body — with it up top the collapsed pin preview
-  // ellipsized.
-  // Single-space packing throughout — double spacing pushed the context % off the preview.
-  const effortBadge = status?.effort ? ` ⚡${escapeHtml(status.effort)}` : ''
-  const modeBadgeStr = mode === '—' ? '' : ` ${escapeHtml(mode)}`
-  const stats = [
-    status?.h5 ? `🕒 ${status.h5.pct}%` : '',
-    status?.d7 ? `📅 ${status.d7.pct}%` : '',
-    status?.ctxPct != null ? `💾 ${status.ctxPct}%` : '',
-  ].filter(Boolean).join(' ')
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}${modeBadgeStr}${stats ? ` ${stats}` : ''}`
-  const groups: string[] = []
-  if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
-  // The session's working plan (ROADMAP #16): latest TodoWrite state, with the in-progress step.
-  if (todos && todos.done < todos.total) {
-    groups.push(`📋 ${todos.done}/${todos.total}${todos.active ? ` · ${escapeHtml(todos.active.slice(0, 70))}` : ''}`)
-  }
-  if (status) {
-    // Usage group: the 5h/7d limit bars, then the cost/time data.
-    const lim: string[] = []
-    if (status.h5) lim.push(`🕒 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
-    if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
-    const ct: string[] = []
-    if (status.cost) ct.push(`💰 ${status.cost}`)
-    if (status.sessionTime) ct.push(`⏱ ${status.sessionTime}`)
-    if (status.apiTime) ct.push(`⚡ api ${status.apiTime}`)
-    if (status.think) ct.push('✻ think')
-    if (ct.length) lim.push(ct.join('  ·  '))
-    if (lim.length) groups.push(lim.join('\n'))
-    // Context group: the context bar + token data.
-    if (status.ctxPct != null) groups.push(`💾 Context <code>${pinBar(status.ctxPct)}</code> ${status.ctxPct}%${status.tokens ? `  ·  ${status.tokens}` : ''}`)
-  }
-  groups.push(`🔗 Paired${botUsername ? ` · @${escapeHtml(botUsername)}` : ''} · connected`)
-  return `${head}\n\n${groups.join(`\n${CARD_RULE}\n`)}`
-}
-
-// Quick-action buttons on the status card — same emojis as the card's own fields.
-function statusKeyboard(): InlineKeyboard {
-  return new InlineKeyboard()
-    .text('⚙️ Settings', 'st:settings').text('🧠 Model', 'st:model').row()
-    .text('🕹️ Mode', 'st:mode').text('💾 Context', 'st:context').row()
-    .text('🗜️ Compact', 'st:compact').text('💰 Cost', 'st:cost').row()
-    .text('🧹 Clear', 'st:clear').text('📌 Pin off', 'st:pinoff')
-}
-
-// NB: topic cards must stay keyboard-less — Telegram renders a pinned message's first inline
-// button inside the pin banner, crowding out the status preview. Pin off lives in /settings
-// (📌 Pin) and /pin off instead; the DM card keeps its buttons (its banner always showed one).
-
-// Context-fill heads-up poll: lift ctxPct from the focused pane's statusline and feed
-// maybeWarnContext. (This rode on the pinned-card 10s refresh before the pin was removed.)
-async function checkContextWarn(): Promise<void> {
-  if (!focus.activePaneId) return
-  try { maybeWarnContext(parseStatusline(await capturePane(focus.activePaneId))?.ctxPct ?? null) } catch {}
-}
-
-// True when an edit failed because the target message is gone (deleted) rather than a transient
-// like "message is not modified" — a gone pin must be recreated, not re-edited forever.
-function pinMessageGone(e: unknown): boolean {
-  const d = String((e as { description?: string })?.description ?? e)
-  return /message to edit not found|message can'?t be edited|message to pin not found|MESSAGE_ID_INVALID/i.test(d)
-}
-
-// Delete every currently-pinned message in a DM chat. getChat only reports the topmost pinned
-// message, so delete that and re-fetch until none remain (bounded). deleteMessage also clears the
-// pin; if a message is too old to delete, unpin it so the loop still advances. Run right before
-// pinning a fresh card → there is only ever one pin, and creating a new one removes all old ones
-// (tracked or orphaned from a prior daemon run / a pin misfire). DM only — never sweep the group.
-async function clearAllPins(chat: string): Promise<void> {
-  for (let i = 0; i < 12; i++) {
-    const info = await bot.api.getChat(chat).catch(() => null)
-    const pid = (info as { pinned_message?: { message_id?: number } } | null)?.pinned_message?.message_id
-    if (!pid) break
-    const deleted = await bot.api.deleteMessage(chat, pid).then(() => true).catch(() => false)
-    if (!deleted) { await bot.api.unpinChatMessage(chat, pid).catch(() => {}); break }
-  }
-}
-
-async function createSessionPin(chat: string, text: string, reply_markup: InlineKeyboard): Promise<void> {
-  try {
-    await clearAllPins(chat)   // single-pin guarantee: remove any prior/orphaned pins before the new one
-    const m = await bot.api.sendMessage(chat, text, { parse_mode: 'HTML', reply_markup })
-    await bot.api.pinChatMessage(chat, m.message_id, { disable_notification: true }).catch(() => {})
-    sessionPins.set(chat, m.message_id); pinTextCache.set(chat, text); persistSessionPins()
-  } catch (e) { process.stderr.write(`daemon: session pin create failed: ${e}\n`) }
-}
-
-// Forum mode: one pinned status card PER topic, each tracking its own session. Keyed in sessionPins
-// as `topic:<threadId>` (distinct from DM mode's numeric chat keys, so the persisted map holds both).
-// A topic whose session isn't running keeps its existing pin untouched. No clearAllPins here — each
-// topic has its own single in-thread pin, so we never sweep the whole group's pins.
-async function updateTopicPins(): Promise<void> {
-  const group = getGroupChatId()
-  if (!group) return
-  for (const t of listTopics()) {
-    if (t.closed) continue
-    const paneId = await paneForSession(t.sessionId)
-    if (!paneId) continue
-    const text = await statusCardText(paneId)
-    const key = `topic:${t.threadId}`
-    const existing = sessionPins.get(key)
-    if (existing && pinTextCache.get(key) === text) continue   // unchanged → skip the edit
-    if (existing) {
-      try { await bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML' }); pinTextCache.set(key, text); continue }
-      catch (e) {
-        if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
-        else { pinTextCache.set(key, text); continue }   // "not modified" → already current
-      }
-    }
-    try {
-      const m = await bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true })
-      await bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
-      sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
-    } catch (e) { process.stderr.write(`daemon: topic pin create failed: ${e}\n`) }
-  }
-}
-
-let pinUpdating = false
-async function updateSessionPin(): Promise<void> {
-  if (loadAccess().sessionPin === false) return // disabled via /pin off
-  if (pinUpdating) return                       // serialize — capture + edit can overlap with switches
-  pinUpdating = true
-  try {
-    if (isTopicMode()) { await updateTopicPins(); return }   // forum mode → per-topic pins, not the DM pin
-    const text = await statusCardText(focus.activePaneId)
-    const reply_markup = statusKeyboard()
-    const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
-    for (const chat of loadAccess().allowFrom) {
-      const existing = sessionPins.get(chat)
-      if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
-      if (existing) {
-        try {
-          await bot.api.editMessageText(chat, existing, text, { parse_mode: 'HTML', reply_markup })
-          pinTextCache.set(chat, text)
-        } catch (e) {
-          // Deleted out from under us → drop the stale id and recreate below. Transient errors
-          // ("message is not modified") leave it in place — the pin is still good.
-          if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins() }
-          else pinTextCache.set(chat, text)   // "not modified" → it already shows this text
-        }
-        if (sessionPins.has(chat)) {
-          // If the user unpinned it, re-pin on the next update (e.g. a mode change) so it returns.
-          const info = await bot.api.getChat(chat).catch(() => null)
-          if (info?.pinned_message?.message_id !== existing) {
-            await bot.api.pinChatMessage(chat, existing, { disable_notification: true }).catch(() => {})
-          }
-          continue
-        }
-      }
-      if (hasSession) await createSessionPin(chat, text, reply_markup)   // don't pin "No active session" out of nowhere
-    }
-  } finally { pinUpdating = false }
-}
 
 // New-session creation: spawn a plugin-less claude in a fresh tmux window; discovery then
 // announces it with a ▶️ Switch button. The folder comes from a force-reply (see below).
@@ -6829,6 +6511,12 @@ if (FORCE_PANE) {
 setInterval(() => void updateSessionPin(), 10_000)
 // Context-fill warnings (50% / 75%) ride a light statusline poll of the focused pane —
 // independent of the pin so the warnings still fire with /pin off.
+// Context-fill heads-up poll: lift ctxPct from the focused pane's statusline and feed
+// maybeWarnContext. (This rode on the pinned-card 10s refresh before the pin was removed.)
+async function checkContextWarn(): Promise<void> {
+  if (!focus.activePaneId) return
+  try { maybeWarnContext(parseStatusline(await capturePane(focus.activePaneId))?.ctxPct ?? null) } catch {}
+}
 setInterval(() => void checkContextWarn(), 15_000)
 
 // Sweep stale inbox attachments at startup and hourly — voice/audio temp files are already unlinked
