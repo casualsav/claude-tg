@@ -2470,16 +2470,17 @@ async function confirmNewSession(ctx: Context): Promise<void> {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
   if (!t) return
-  // /new inside a session's topic = "a sibling session in this project": spawn straight away with
-  // a fresh pre-stamped sessionId (never adopts the original's topic), and discovery gives it its
-  // own topic ("proj #2").
+  // /new inside a session's topic: ask — reset this conversation in place, or spawn a sibling
+  // session in this project (fresh pre-stamped sessionId → its own topic, "proj #2").
   if (typeof t.replyThread === 'number') {
-    const cwd = await paneCwd(t.paneId).catch(() => null)
-    if (!cwd) { await ctx.reply('Couldn\'t read this session\'s folder.'); return }
-    const ok = await spawnSession(cwd, '', genSessionId())
-    await ctx.reply(ok
-      ? `🚀 Starting a sibling session in <code>${escapeHtml(cwd)}</code> — it gets its own topic shortly.`
-      : `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`, { parse_mode: 'HTML' })
+    const keyboard = new InlineKeyboard()
+      .text('♻️ Reset this chat', 'newtopic:reset')
+      .text('🆕 New session', 'newtopic:spawn')
+    await ctx.reply(
+      '🆕 <b>New</b> — what do you mean?\n\n' +
+      '• <b>Reset this chat</b> — clear this session\'s conversation in place\n' +
+      '• <b>New session</b> — start a sibling session in this project (it gets its own topic)',
+      { parse_mode: 'HTML', reply_markup: keyboard })
     return
   }
   // General: new sessions are new topics there. DM drives a single session, so "new" means a
@@ -4420,6 +4421,32 @@ bot.on('callback_query:data', async ctx => {
     await ctx.answerCallbackQuery({ text: 'Restarting…' }).catch(() => {})
     await ctx.editMessageReplyMarkup().catch(() => {})
     void restartFocusedSession(String(ctx.chat?.id))
+    return
+  }
+
+  // /new in a topic → Reset this chat / New session (sibling in this project).
+  if (data === 'newtopic:reset' || data === 'newtopic:spawn') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const t = await commandTarget(ctx)
+    if (!t) { await ctx.answerCallbackQuery().catch(() => {}); return }
+    if (data === 'newtopic:reset') {
+      await ctx.answerCallbackQuery({ text: 'Clearing…' }).catch(() => {})
+      await ctx.editMessageText('🧹 Clearing the conversation…').catch(() => {})
+      const result = await performReset(t, '/new')
+      await ctx.editMessageText(result, { parse_mode: 'HTML' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
+    const cwd = await paneCwd(t.paneId).catch(() => null)
+    if (!cwd) { await ctx.editMessageText('Couldn\'t read this session\'s folder.').catch(() => {}); return }
+    const ok = await spawnSession(cwd, '', genSessionId())
+    await ctx.editMessageText(ok
+      ? `🚀 Starting a sibling session in <code>${escapeHtml(cwd)}</code> — it gets its own topic shortly.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(cwd)}</code>.`,
+      { parse_mode: 'HTML' }).catch(() => {})
     return
   }
 
