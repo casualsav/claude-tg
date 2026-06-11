@@ -2912,10 +2912,12 @@ function startHelpText(paired: boolean): string {
     `✦ <b>Claude Command Center</b>\n` +
     `Drive your Claude Code sessions from Telegram.\n\n` +
     `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
-    `🧠 <code>/model</code> · 🕹️ <code>/mode</code> — switch model &amp; mode\n` +
-    `🖥️ <code>/status</code> — session card · 👥 <code>/bind</code> a forum group for one topic per session\n` +
-    `📡 <code>/stream</code> — live card of what Claude's doing\n` +
+    `👥 <code>/bind</code> a forum group — one topic per session, create a topic to spawn one\n` +
+    `🧠 <code>/model</code> · 🕹️ <code>/mode</code> · 🎚️ <code>/effort</code> · 📡 <code>/stream</code> live activity\n` +
     `✅ Permission prompts arrive as Allow / Deny taps\n` +
+    `📝 <code>/diff</code> + Commit · Push · PR buttons — ship without a terminal\n` +
+    `🔎 <code>/find</code> any session · ⏰ <code>/queue</code> &amp; <code>/schedule</code> · ⏪ <code>/rewind</code>\n` +
+    `🌅 <code>/digest</code> daily report · 💸 <code>/budget</code> daily cap · 👤 <code>/account</code> multi-account\n` +
     `🛑 <code>/stop</code> to interrupt · ⚙️ <code>/settings</code> for the rest\n\n` +
     `🖼️ Set this image as my profile picture — save it, then @BotFather → Edit Bot → Botpic.`
 
