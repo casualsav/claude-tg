@@ -22,6 +22,7 @@ export type TopicEntry = {
   closed: boolean       // session ended → topic closed but kept for history (reopen if it returns)
   createdAt: number
   firstMsgSwept?: boolean   // Telegram auto-pins the first user message in a new topic; true once unpinned
+  worktree?: { repo: string; path: string }   // session runs in a git worktree of `repo`; removed on close when clean
 }
 
 export type TopicStore = {
@@ -63,6 +64,8 @@ export function loadTopics(): TopicStore {
         closed: t.closed === true,
         createdAt: typeof t.createdAt === 'number' ? t.createdAt : 0,
         ...(t.firstMsgSwept === true ? { firstMsgSwept: true } : {}),
+        ...(t.worktree && typeof t.worktree.repo === 'string' && typeof t.worktree.path === 'string'
+          ? { worktree: { repo: t.worktree.repo, path: t.worktree.path } } : {}),
       }
     }
     store = { groupChatId: typeof raw.groupChatId === 'string' ? raw.groupChatId : null, topics }

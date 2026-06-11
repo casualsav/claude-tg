@@ -169,7 +169,25 @@ export async function closeTopicForPane(pane: string): Promise<void> {
   await closeTopicEntry(group, sid, t)
 }
 
-async function closeTopicEntry(group: string, sessionId: string, t: { threadId: number; cwd: string; name: string }): Promise<void> {
+// A worktree session that ended cleanly leaves no reason to keep the worktree — remove it so
+// <repo>-wt/ doesn't accumulate. Uncommitted changes keep it, with a note in the topic.
+async function cleanupWorktree(group: string, t: { threadId: number; worktree?: { repo: string; path: string } }): Promise<void> {
+  const wt = t.worktree
+  if (!wt) return
+  try {
+    const dirty = (await exec('git', ['-C', wt.path, 'status', '--porcelain'], { timeout: 5000 })).stdout.trim()
+    if (dirty) {
+      await bot.api.sendMessage(group, `🌿 Worktree kept at <code>${wt.path}</code> — it has uncommitted changes.`,
+        { parse_mode: 'HTML', message_thread_id: t.threadId }).catch(() => {})
+      return
+    }
+    await exec('git', ['-C', wt.repo, 'worktree', 'remove', wt.path], { timeout: 10000 })
+    process.stderr.write(`daemon: removed clean worktree ${wt.path}\n`)
+  } catch (e) { process.stderr.write(`daemon: worktree cleanup failed for ${wt.path}: ${e}\n`) }
+}
+
+async function closeTopicEntry(group: string, sessionId: string, t: { threadId: number; cwd: string; name: string; worktree?: { repo: string; path: string } }): Promise<void> {
+  await cleanupWorktree(group, t)
   // Opt-in auto-delete: the tab disappears entirely (Telegram has no "hide" for bots — delete is
   // the only way off the list, and it erases the topic's history). Default keeps close+reopen.
   if (loadAccess().topicOnEnd === 'delete') {

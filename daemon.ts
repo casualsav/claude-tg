@@ -4655,7 +4655,7 @@ bot.command('stop', confirmStop)
 // session falls straight to the folder prompt. Topics the bot creates don't produce updates for
 // the bot (own-message filter as belt-and-braces), so this only fires for human-made tabs.
 // Non-allowlisted creators are ignored — the group policy governs.
-const topicCreatePending = new Map<number, { name: string; dir: string }>()   // threadId → the card's offer
+const topicCreatePending = new Map<number, { name: string; dir: string; repo?: string }>()   // threadId → the card's offer (repo set when a 🌿 worktree is on offer)
 bot.on('message:forum_topic_created', async ctx => {
   if (!isTopicMode() || String(ctx.chat.id) !== getGroupChatId()) return
   if (ctx.from?.id === ctx.me.id) return
@@ -4667,14 +4667,19 @@ bot.on('message:forum_topic_created', async ctx => {
   const base = focus.activePaneId ? await paneCwd(focus.activePaneId).catch(() => null) : null
   const dirName = name.trim().toLowerCase().replace(/[\\/\0\s]+/g, '-')   // "My App" → my-app/ (unix-style folder names)
   const dir = base && dirName ? join(base, dirName) : null
-  if (dir) {
-    topicCreatePending.set(thread, { name, dir })
+  if (dir && base) {
+    // When the anchor cwd is a git repo, offer a 🌿 worktree too: same repo, isolated working
+    // tree at <repoParent>/<repo>-wt/<name> — parallel sessions on one repo without collisions.
+    let repo: string | undefined
+    try { repo = (await exec('git', ['-C', base, 'rev-parse', '--show-toplevel'], { timeout: 2000 })).stdout.trim() || undefined } catch {}
+    topicCreatePending.set(thread, { name, dir, repo })
     const label = dir.length > 48 ? `…${dir.slice(-47)}` : dir
+    const kb = new InlineKeyboard().text(`📁 ${label}`, `tcgo:${thread}`).row()
+    if (repo) kb.text(`🌿 Worktree of ${basename(repo)}`, `tcwt:${thread}`).row()
+    kb.text('✏️ Specify folder', `tcask:${thread}`)
     const sent = await ctx.reply(
       `📂 <b>New topic “${escapeHtml(name)}”</b> — where should its Claude session run?`,
-      { parse_mode: 'HTML', reply_markup: new InlineKeyboard()
-          .text(`📁 ${label}`, `tcgo:${thread}`).row()
-          .text('✏️ Specify folder', `tcask:${thread}`) },
+      { parse_mode: 'HTML', reply_markup: kb },
     ).catch(() => null)
     if (sent) return
   }
@@ -5342,7 +5347,7 @@ bot.on('callback_query:data', async ctx => {
   // "➕ Add" on the /schedule dashboard → force-reply asking for "time message" in one line,
   // parsed (split + queued) when the reply lands. Captures the current session as the target.
   // New-topic folder card: tcgo = spawn in the offered <cwd>/<name>; tcask = force-reply prompt.
-  const tcMatch = /^tc(go|ask):(\d+)$/.exec(data)
+  const tcMatch = /^tc(go|ask|wt):(\d+)$/.exec(data)
   if (tcMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -5367,7 +5372,7 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     let created = false
-    if (!existsSync(pending.dir)) {
+    if (tcMatch[1] === 'go' && !existsSync(pending.dir)) {
       try { mkdirSync(pending.dir, { recursive: true }); created = true }
       catch (e) {
         await ctx.editMessageText(`❌ Couldn't create <code>${escapeHtml(pending.dir)}</code>: ${escapeHtml(String((e as Error)?.message ?? e))}`, { parse_mode: 'HTML' }).catch(() => {})
@@ -5378,17 +5383,38 @@ bot.on('callback_query:data', async ctx => {
         return
       }
     }
+    // 🌿 Worktree: carve an isolated working tree off the anchor repo and run the session there.
+    // Branch tg/<name> from the repo's current HEAD; falls back to checking out an existing
+    // tg/<name> (e.g. a previous topic of the same name whose worktree was removed).
+    let spawnDir = pending.dir
+    let worktree: { repo: string; path: string } | undefined
+    if (tcMatch[1] === 'wt') {
+      const repo = pending.repo
+      const wtName = basename(pending.dir)
+      if (!repo) { await ctx.editMessageText('❌ Worktree offer expired — create the topic again.').catch(() => {}); return }
+      const wtPath = join(dirname(repo), `${basename(repo)}-wt`, wtName)
+      try {
+        mkdirSync(dirname(wtPath), { recursive: true })
+        try { await exec('git', ['-C', repo, 'worktree', 'add', wtPath, '-b', `tg/${wtName}`], { timeout: 15000 }) }
+        catch { await exec('git', ['-C', repo, 'worktree', 'add', wtPath, `tg/${wtName}`], { timeout: 15000 }) }
+      } catch (e) {
+        await ctx.editMessageText(`❌ Couldn't create the worktree: <code>${escapeHtml(String((e as Error)?.message ?? e).slice(0, 200))}</code>`, { parse_mode: 'HTML' }).catch(() => {})
+        return
+      }
+      spawnDir = wtPath
+      worktree = { repo, path: wtPath }
+    }
     const sid = genSessionId()
-    setTopic(sid, { threadId: thread, cwd: pending.dir, name: pending.name || basename(pending.dir), closed: false, createdAt: Date.now() })
+    setTopic(sid, { threadId: thread, cwd: spawnDir, name: pending.name || basename(spawnDir), closed: false, createdAt: Date.now(), ...(worktree ? { worktree } : {}) })
     // Seed the branch cache so the retitle sweep doesn't stomp the user's chosen tab name on its
     // first pass — it only renames on an actual branch CHANGE from here on.
-    try { topicBranchCache.set(sid, (await exec('git', ['-C', pending.dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
+    try { topicBranchCache.set(sid, (await exec('git', ['-C', spawnDir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 2000 })).stdout.trim()) }
     catch { topicBranchCache.set(sid, '') }
-    const ok = await spawnSession(pending.dir, '', sid)
+    const ok = await spawnSession(spawnDir, '', sid)
     if (!ok) removeTopic(sid)
     await ctx.editMessageText(ok
-      ? `🚀 Starting this topic's session in <code>${escapeHtml(pending.dir)}</code>${created ? ' (📁 created it for you)' : ''} — type here to drive it once it's up.`
-      : `❌ Couldn't start a session in <code>${escapeHtml(pending.dir)}</code>.`,
+      ? `🚀 Starting this topic's session in <code>${escapeHtml(spawnDir)}</code>${worktree ? ` (🌿 worktree on <code>tg/${escapeHtml(basename(spawnDir))}</code>)` : created ? ' (📁 created it for you)' : ''} — type here to drive it once it's up.`
+      : `❌ Couldn't start a session in <code>${escapeHtml(spawnDir)}</code>.`,
       { parse_mode: 'HTML' }).catch(() => {})
     return
   }

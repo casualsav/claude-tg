@@ -43,7 +43,7 @@ failing silently — the escape hatch that makes full-remote trustworthy.
 
 # Wave 2 (approved 2026-06-11)
 
-## 9. Worktree siblings
+## 9. Worktree siblings — ✅ DONE (v0.1.83)
 Spawning a second session in the same repo shares one working tree — edits collide. Offer
 "spawn in a git worktree" on /new and topic-create so same-repo sessions work in parallel
 safely (worktree auto-created under e.g. `<repo>-wt/<topic>`, cleaned up on topic close).
