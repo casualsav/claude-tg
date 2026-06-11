@@ -277,6 +277,17 @@ export function finalRepliesAfter(file: string, afterUuid: string): { uuid: stri
   return out
 }
 
+// The uuid of the entry anchoring the current turn (the last REAL user prompt). The mirror card
+// persists this as the open card's turn identity, so a daemon restart can tell "same turn —
+// resume editing the existing card" from "new turn — cap the orphan and open fresh".
+export function turnAnchorUuid(file: string): string | null {
+  const entries = readEntries(file)
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (isRealUserText(entries[i])) return entries[i].uuid ?? null
+  }
+  return null
+}
+
 // Whether the latest turn is still running, read straight from the transcript: there's been
 // main-thread assistant activity since the last real user message, but no conclusion entry has
 // landed yet (stop_reason is still 'tool_use'). Drives the live mirror card's open/close so a

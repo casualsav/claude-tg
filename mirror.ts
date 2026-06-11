@@ -9,11 +9,13 @@
 // helper (shared across the daemon, so it stays there), a live getActivePaneId getter, and a
 // retriggerTyping callback (the mirror send clears Telegram's typing state).
 import { Bot } from 'grammy'
+import { join } from 'node:path'
 import { exec } from './proc.ts'
 import { stripAnsi } from './prompt.ts'
+import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { parseWorkingLine } from './statusline.ts'
-import { currentTurnActivity, currentTurnFeed, type Activity, type FeedItem } from './transcript.ts'
+import { currentTurnActivity, currentTurnFeed, turnAnchorUuid, type Activity, type FeedItem } from './transcript.ts'
 import type { Access } from './types.ts'
 
 type MirrorDeps = {
@@ -32,7 +34,10 @@ type MirrorDeps = {
 }
 
 let deps: MirrorDeps
-export function initMirror(d: MirrorDeps): void { deps = d }
+export function initMirror(d: MirrorDeps): void {
+  deps = d
+  restorePersistedCard()
+}
 
 const MIRROR_THROTTLE_MS = 3000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
@@ -69,6 +74,60 @@ let mirrorLastSyncAt = 0         // last heavy sync; throttled to MIRROR_THROTTL
 // steps to the current value on real activity rather than ticking every second. This key is the
 // content fingerprint (no elapsed); an unchanged key means no edit.
 let mirrorContentKey = ''
+// The last-real-user-prompt uuid of the turn the open card tracks — the "same turn?" identity
+// used to resume the card across a daemon restart (see the persistence block below).
+let mirrorAnchor: string | null = null
+
+// ---- Card persistence across daemon restarts ----
+// mirrorMsgIds used to live ONLY in process memory, so every deploy/crash mid-turn orphaned the
+// live card: frozen un-capped (never edited again), with the fresh daemon opening a new one on
+// its first working tick. With a deploy inside nearly every dev turn, each user message produced
+// one card per restart — the "stream fragments into 5-6 messages" bug. Persisting
+// {ids, pane, turn anchor, last body} lets the next daemon RESUME editing the same card when it's
+// still the same pane + turn, and cap the orphan cleanly when it isn't.
+const MIRROR_STATE_FILE = join(STATE_DIR, 'mirror-card.json')
+type PersistedCard = { ids: Record<string, number>; paneId: string | null; startedAt: number; anchor: string | null; body: string }
+// Restored ids await a verdict on the first tick (resume vs cap) — needs the live transcript,
+// so it can't be decided at load time.
+let pendingRestore: { anchor: string | null; body: string } | null = null
+
+function persistMirror(): void {
+  writeJsonFile(MIRROR_STATE_FILE, mirrorMsgIds.size
+    ? { ids: Object.fromEntries(mirrorMsgIds), paneId: mirrorPaneId, startedAt: mirrorStartedAt, anchor: mirrorAnchor, body: mirrorBody } satisfies PersistedCard
+    : {})
+}
+
+function restorePersistedCard(): void {
+  const saved = readJsonFile<Partial<PersistedCard>>(MIRROR_STATE_FILE, {})
+  if (!saved.ids || !Object.keys(saved.ids).length) return
+  for (const [chat, mid] of Object.entries(saved.ids)) mirrorMsgIds.set(chat, mid)
+  mirrorPaneId = saved.paneId ?? null
+  mirrorStartedAt = saved.startedAt || Date.now()
+  pendingRestore = { anchor: saved.anchor ?? null, body: saved.body ?? '' }
+}
+
+// First tick after a restart with a restored card: same pane + same turn → keep editing it (the
+// restart is invisible); anything else → cap the orphan with its last known body so it never
+// lingers un-capped, and let the normal lifecycle open a fresh card for the new turn.
+async function reconcileRestoredCard(): Promise<void> {
+  const saved = pendingRestore
+  pendingRestore = null
+  if (!saved || mirrorMsgIds.size === 0) return
+  const paneId = deps.getActivePaneId()
+  const file = paneId ? await deps.resolveTranscriptForPane(paneId).catch(() => null) : null
+  const anchor = file ? turnAnchorUuid(file) : null
+  if (paneId && paneId === mirrorPaneId && anchor && anchor === saved.anchor) {
+    mirrorAnchor = anchor
+    mirrorBody = saved.body   // contentKey + the cap fallback hold the last body until the next sync
+    mirrorContentKey = saved.body
+    process.stderr.write(`daemon: resumed live mirror card across restart (pane ${paneId})\n`)
+    return
+  }
+  const text = saved.body ? `${saved.body}\n\n✅ <b>Done</b>` : '✅ <b>Done</b>'
+  for (const [chat, mid] of mirrorMsgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
+  process.stderr.write('daemon: capped orphaned mirror card from previous run\n')
+}
 
 // Compact live elapsed for the status footer: "23s" / "1m 40s" / "1h 02m".
 function fmtElapsed(ms: number): string {
@@ -93,7 +152,7 @@ function mirrorFooter(): string {
 function resetMirrorState(): void {
   mirrorBody = ''; mirrorVerb = 'Working'; mirrorTokens = null
   mirrorContentKey = ''; mirrorIdleTicks = 0; mirrorStartedAt = 0; mirrorLastSyncAt = 0
-  mirrorPaneId = null
+  mirrorPaneId = null; mirrorAnchor = null
 }
 
 // Live tool-use feed. On by default ('tools') — opt out via access.json
@@ -289,12 +348,14 @@ function contentKey(): string { return mirrorBody }
 async function pushCard(text: string): Promise<void> {
   if (!text || mirrorMsgIds.size === 0) return
   for (const [chat, mid] of mirrorMsgIds) await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
+  persistMirror()   // keep the persisted body current so a restart's cap fallback shows the latest state
 }
 
 // The card's whole lifecycle lives here, driven by one signal — `working` = turnInProgress(file)
 // from the transcript. While the turn runs we open the card once and edit it in place; the
 // instant the turn settles we cap it (✅ Done) and clear it. Idempotent.
 export async function updateTerminalMirror(working: boolean): Promise<void> {
+  if (pendingRestore) await reconcileRestoredCard()   // restart verdict first: resume the old card or cap it
   const mode = deps.replyMode()
   // off → never a card. tools+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)
   if (mode === 'off' || (mode === 'tools' && mirrorMode() === 'off')) { mirrorIdleTicks = 0; if (mirrorMsgIds.size) await finalizeTerminalMirror(); return }
@@ -320,12 +381,15 @@ export async function updateTerminalMirror(working: boolean): Promise<void> {
     // Open the card silently — it's the ambient mirror; the alerting message is the relayed reply.
     mirrorContentKey = contentKey()
     mirrorPaneId = deps.getActivePaneId()   // remember which pane this card tracks (see abandonMirror)
+    const file = mirrorPaneId ? await deps.resolveTranscriptForPane(mirrorPaneId).catch(() => null) : null
+    mirrorAnchor = file ? turnAnchorUuid(file) : null   // the turn this card belongs to (restart resume check)
     const text = composeCard(false)
     for (const t of await deps.outboundTargets()) {
       const opts = { parse_mode: 'HTML' as const, disable_notification: true, ...(t.thread ? { message_thread_id: t.thread } : {}) }
       try { const m = await deps.bot.api.sendMessage(t.chat, text, opts); mirrorMsgIds.set(t.chat, m.message_id) }
       catch (e) { process.stderr.write(`daemon: activity mirror create failed: ${e}\n`) }
     }
+    persistMirror()
     deps.retriggerTyping()   // the mirror send clears Telegram's typing state — re-assert it now
   } else {
     const key = contentKey()
@@ -342,7 +406,7 @@ async function finalizeTerminalMirror(): Promise<void> {
   for (const [chat, mid] of mirrorMsgIds) {
     await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
   }
-  mirrorMsgIds.clear(); resetMirrorState()
+  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
 }
 
 // Drop the open card entirely (delete, don't cap) and stop tracking it, so the next relay tick
@@ -352,7 +416,7 @@ export async function respawnTerminalMirror(): Promise<void> {
   for (const [chat, mid] of mirrorMsgIds) {
     await deps.bot.api.deleteMessage(chat, mid).catch(() => {})
   }
-  mirrorMsgIds.clear(); resetMirrorState()
+  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
 }
 
 // Abandon tracking of any open card WITHOUT touching the Telegram messages — used when focus/
@@ -362,5 +426,5 @@ export async function respawnTerminalMirror(): Promise<void> {
 // turn doesn't get a second, duplicate card opened beneath the orphaned first one.
 export function abandonMirror(focusedPaneId?: string | null): void {
   if (focusedPaneId != null && mirrorMsgIds.size > 0 && focusedPaneId === mirrorPaneId) return
-  mirrorMsgIds.clear(); resetMirrorState()
+  mirrorMsgIds.clear(); resetMirrorState(); persistMirror()
 }

@@ -739,6 +739,14 @@ const auxRelayPrimed = new Set<string>()
 // ping message ids (file → chat → messageId) so a follow-up edits in place and a read clears.
 let relayIdleStreak = 0
 let relayLoopGen = 0   // bump to retire the running loop when focus moves
+// Final replies relay only after the turn has read concluded for a few consecutive ticks —
+// the same debounce the mirror card's cap uses. A mid-burst end_turn (harness auto-continue:
+// background-task completions, injected reminders) flips turnInProgress false for a tick or two
+// before the burst resumes; relaying instantly shipped that interim narration as a standalone
+// message ("thinking arrives outside the stream"). ~4.5s of sustained conclusion = a real end.
+const RELAY_CONCLUDE_TICKS = 3
+let relayConcludeTicks = 0
+const auxConcludeTicks = new Map<string, number>()   // aux loop's per-file equivalent
 
 // How Claude's text reaches Telegram. Default 'hybrid'. Every mode sends only the turn's
 // conclusion block(s) as real messages; they differ only in the live self-editing card:
@@ -775,6 +783,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   // create/finalize storm. turnInProgress is the ground truth, so the card caps exactly when the
   // turn concludes. (relayIdleStreak/detectWorking now only feed ambient signals elsewhere.)
   const working = file ? turnInProgress(file) : !idle
+  relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
   if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
   else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
   await updateTerminalMirror(working).catch(() => {})
@@ -793,7 +802,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   // tool call (TodoWrite / `tg react` / file send) that would otherwise stamp it 'tool_use' and hide
   // it. Gated on !working so mid-turn narration never leaks into the messages (it lives in the card,
   // which already dropped this same reply block at finalize — so stream and final stay separate).
-  if (relayCursorPrimed && file && !working) {
+  if (relayCursorPrimed && file && !working && relayConcludeTicks >= RELAY_CONCLUDE_TICKS) {
     // Suppress Claude's own usage-limit banner echo (the ⛔ handler sends a richer one), but
     // only a short banner-shaped block — a real reply that merely mentions a limit isn't eaten.
     const isBanner = (t: string) => t.length < 200 && /\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(t)
@@ -850,6 +859,7 @@ function startRelayLoop(): void {
   const gen = ++relayLoopGen
   relayCursorPrimed = false
   relayIdleStreak = 0
+  relayConcludeTicks = 0
   abandonMirror(focus.activePaneId)   // keep the card if this is a relay restart on the same pane; abandon only on a real pane switch
   void primeRelayCursor().finally(() => {
     if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
@@ -896,7 +906,12 @@ async function auxRelayTick(): Promise<void> {
           auxRelayPrimed.add(file)
           continue
         }
-        if (turnInProgress(file)) { void emitTopicTyping(pane); continue }   // working → typing in its topic, relay only once the turn concludes
+        if (turnInProgress(file)) { auxConcludeTicks.delete(file); void emitTopicTyping(pane); continue }   // working → typing in its topic, relay only once the turn concludes
+        // Same conclude-debounce as the focused loop: a mid-burst end_turn (auto-continue gap)
+        // shouldn't ship interim narration to the topic as if the turn had ended.
+        const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
+        auxConcludeTicks.set(file, ticks)
+        if (ticks < RELAY_CONCLUDE_TICKS) continue
         const cursor = lastRelayedByFile.get(file) ?? ''
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
