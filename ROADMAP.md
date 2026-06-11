@@ -58,7 +58,7 @@ so dead hours soak up queued work.
 <prompt>` (cron-lite: daily/weekday/weekly) with a dashboard listing + cancel, reusing the
 scheduler store.
 
-## 12. Edited message → correction
+## 12. Edited message → correction — ✅ DONE (v0.1.86)
 Editing a sent Telegram message currently does nothing. Relay the edit as a correction
 ("✏️ correction to earlier message: …") into the session — matches the instinct of fixing a
 typo'd prompt in place.

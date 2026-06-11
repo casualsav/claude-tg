@@ -5835,6 +5835,10 @@ async function handleInbound(
   if (isTopicMode()) { if (typeof inThreadId === 'number') void bot.api.sendChatAction(chat_id, 'typing', { message_thread_id: inThreadId }).catch(() => {}) }
   else typingPresence.arm(chat_id)
 
+  // Remember the latest inbound message per route so an edit to it can be re-injected as a
+  // correction (ROADMAP #12) — only the MOST RECENT message qualifies (typo-fix instinct).
+  if (msgId != null) lastInboundMsg.set(`${chat_id}:${typeof inThreadId === 'number' ? inThreadId : 'dm'}`, msgId)
+
   // Telegram auto-pins the first message a user sends in a freshly created topic (a forum
   // behavior with no off switch). Unpin it once per topic so the status card stays the only pin.
   if (isTopicMode() && typeof inThreadId === 'number' && msgId != null) {
@@ -5962,6 +5966,36 @@ async function offerTopicBind(ctx: Context, threadId: number): Promise<void> {
   ).catch(() => null)
   if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'topiccreate', threadId, name: '' })
 }
+
+// Edited message → correction (ROADMAP #12): editing your MOST RECENT message in a topic/DM
+// re-injects it as a correction. Older edits are ignored (decided: latest-only).
+const lastInboundMsg = new Map<string, number>()   // `${chat}:${thread|'dm'}` → last inbound message_id
+bot.on('edited_message', async ctx => {
+  const em = ctx.editedMessage
+  const text = em?.text ?? em?.caption
+  if (!em || !text) return
+  if (!loadAccess().allowFrom.includes(String(ctx.from?.id))) return
+  const chat = String(ctx.chat.id)
+  if (isTopicMode() && chat !== getGroupChatId() && !loadAccess().allowFrom.includes(chat)) return
+  const thread = em.message_thread_id
+  const key = `${chat}:${typeof thread === 'number' ? thread : 'dm'}`
+  if (lastInboundMsg.get(key) !== em.message_id) return
+  let targetPane: string | null | undefined
+  if (isTopicMode() && typeof thread === 'number') {
+    const sid = getSessionByThread(thread)
+    targetPane = sid ? await paneForSession(sid) : null
+    if (!targetPane) return   // session gone — a correction isn't worth a revival
+  }
+  emitInbound({
+    content: `✏️ (correction — I edited my last message; this version replaces it)\n${text}`,
+    meta: {
+      chat_id: chat, message_id: String(em.message_id),
+      user: ctx.from?.username ?? String(ctx.from?.id), user_id: String(ctx.from?.id),
+      ts: new Date((em.edit_date ?? em.date) * 1000).toISOString(),
+    },
+  }, targetPane)
+  void bot.api.setMessageReaction(chat, em.message_id, [{ type: 'emoji', emoji: '✍' }]).catch(() => {})
+})
 
 bot.on('message:text', async ctx => {
   const text = ctx.message.text
