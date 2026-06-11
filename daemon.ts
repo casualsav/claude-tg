@@ -63,6 +63,7 @@ import {
 } from './topic-runtime.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
+import { synthesize, provisionPiper, piperReady, engineStatus, type TtsEngine } from './voice-out.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, type Recurrence } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
@@ -776,6 +777,22 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
       await bot.api.sendMessage(chat_id, c, extra).catch(e => process.stderr.write(`daemon: transcript relay send failed: ${e}\n`))
     }
   }
+  if (access.tts?.mode === 'all') void sendTtsVoice(text, chats.map(chat => ({ chat, thread: threadId })))
+}
+
+// Voice replies (ROADMAP #15): speak `text` and drop the voice note after the text message.
+// Fire-and-forget — synthesis failures log and never block the text path. Zero Claude usage:
+// it reads text the model already produced.
+async function sendTtsVoice(text: string, targets: Array<{ chat: string; thread?: number }>): Promise<void> {
+  const engine = loadAccess().tts?.engine ?? 'piper'
+  try {
+    const file = await synthesize(text, engine)
+    for (const { chat, thread } of targets) {
+      await bot.api.sendVoice(chat, new InputFile(file), { disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) })
+        .catch(e => process.stderr.write(`daemon: tts send failed: ${e}\n`))
+    }
+    try { unlinkSync(file) } catch {}
+  } catch (e) { process.stderr.write(`daemon: tts synth (${engine}) failed: ${e}\n`) }
 }
 
 // ---- Per-session transcript resolution (Track B) ----
@@ -3357,6 +3374,8 @@ async function sendDigest(): Promise<void> {
   const text = await digestText()
   const dests = isTopicMode() && getGroupChatId() ? [getGroupChatId()!] : loadAccess().allowFrom
   for (const c of dests) await bot.api.sendMessage(c, text, { parse_mode: 'HTML' }).catch(() => {})
+  const ttsMode = loadAccess().tts?.mode
+  if (ttsMode === 'digest' || ttsMode === 'all') void sendTtsVoice(text, dests.map(chat => ({ chat })))
 }
 
 let digestTimer: ReturnType<typeof setTimeout> | null = null
@@ -4020,7 +4039,8 @@ function settingsText(): string {
     `👤 Accounts — <b>${listAccounts().length}</b>\n` +
     `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
     `🗞 Daily digest — <b>${a.digestAt ?? 'off'}</b>\n` +
-    `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n\n` +
+    `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
+    `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
@@ -4028,7 +4048,27 @@ function settingsKeyboard(): InlineKeyboard {
     .text('📌 Pin', 'set:pin').text('💬 Stream', 'set:replymode').row()
     .text('🎙️ Voice transcription', 'set:voice').text('👤 Accounts', 'acct:panel').row()
     .text('🚢 Ship buttons', 'set:ship').text('🗞 Daily digest', 'set:digest').row()
-    .text('⚡ Batch allow', 'set:batch')
+    .text('⚡ Batch allow', 'set:batch').text('🔊 Voice replies', 'set:tts')
+}
+
+// Voice-replies sub-panel (ROADMAP #15): mode off/digest/all + engine piper/openai/elevenlabs.
+function ttsText(): string {
+  const t = loadAccess().tts
+  const mode = t?.mode ?? 'off', eng = t?.engine ?? 'piper'
+  const st = engineStatus(eng)
+  return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b> (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
+    `Claude's replies arrive as voice notes after the text. Zero extra Claude usage — it speaks text already written.\n\n` +
+    `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB)\n☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)`
+}
+function ttsKeyboard(): InlineKeyboard {
+  const t = loadAccess().tts
+  const mode = t?.mode ?? 'off', eng = t?.engine ?? 'piper'
+  const m = (label: string, v: string) => (mode === v ? `● ${label}` : label)
+  const e = (label: string, v: string) => (eng === v ? `● ${label}` : label)
+  return new InlineKeyboard()
+    .text(m('🔇 Off', 'off'), 'tts:mode:off').text(m('🗞 Digest', 'digest'), 'tts:mode:digest').text(m('💬 All', 'all'), 'tts:mode:all').row()
+    .text(e('🆓 Piper', 'piper'), 'tts:eng:piper').text(e('☁️ OpenAI', 'openai'), 'tts:eng:openai').text(e('☁️ 11Labs', 'elevenlabs'), 'tts:eng:elevenlabs').row()
+    .text('‹ Back', 'tts:back')
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -4969,7 +5009,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|digest|voice|batch)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|digest|voice|batch|tts)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4980,6 +5020,10 @@ bot.on('callback_query:data', async ctx => {
       // Voice sub-panel (backend off/local/groq/openai + the local model picker) — was sent as
       // set:voice but never handled, so the settings button silently did nothing.
       await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
+      return
+    }
+    if (setMatch[1] === 'tts') {
+      await ctx.editMessageText(ttsText(), { parse_mode: 'HTML', reply_markup: ttsKeyboard() }).catch(() => {})
       return
     }
     const a = loadAccess()
@@ -5068,6 +5112,44 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Voice-transcription sub-panel → switch backend (live; daemon reads .env per voice note).
+  // Voice-replies sub-panel taps: mode/engine selection + provisioning side effects.
+  const ttsMatch = /^tts:(?:mode:(off|digest|all)|eng:(piper|openai|elevenlabs)|(back))$/.exec(data)
+  if (ttsMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    if (ttsMatch[3]) {   // back
+      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      return
+    }
+    const a = loadAccess()
+    const tts = a.tts ?? { mode: 'off' as const, engine: 'piper' as const }
+    if (ttsMatch[1]) tts.mode = ttsMatch[1] as 'off' | 'digest' | 'all'
+    if (ttsMatch[2]) tts.engine = ttsMatch[2] as TtsEngine
+    a.tts = tts
+    saveAccess(a)
+    const chat = String(ctx.chat!.id)
+    const thread = ctx.callbackQuery.message?.message_thread_id
+    const threadExtra2 = thread ? { message_thread_id: thread } : {}
+    if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady()) {
+      void bot.api.sendMessage(chat, '⏳ Installing the Piper voice engine (~80MB)…', threadExtra2).catch(() => {})
+      void provisionPiper().then(
+        () => bot.api.sendMessage(chat, '✅ Piper voice engine ready — replies will speak.', threadExtra2).catch(() => {}),
+        e => bot.api.sendMessage(chat, `⚠️ Piper install failed: ${escapeHtml(String(e).slice(0, 150))}`, threadExtra2).catch(() => {}),
+      )
+    }
+    if (tts.mode !== 'off' && (tts.engine === 'openai' || tts.engine === 'elevenlabs') && !engineStatus(tts.engine).ready) {
+      const sent = await bot.api.sendMessage(chat,
+        `🔑 Reply with your <b>${tts.engine === 'openai' ? 'OpenAI' : 'ElevenLabs'}</b> API key — it's stored in the bridge's .env and your message is deleted right away.`,
+        { parse_mode: 'HTML', ...threadExtra2, reply_markup: { force_reply: true, input_field_placeholder: 'API key' } }).catch(() => null)
+      if (sent) replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'ttskey', engine: tts.engine })
+    }
+    await ctx.editMessageText(ttsText(), { parse_mode: 'HTML', reply_markup: ttsKeyboard() }).catch(() => {})
+    return
+  }
+
   const voiceMatch = /^voice:(off|local|groq|openai|back|panel)$/.exec(data)
   if (voiceMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
@@ -6243,6 +6325,18 @@ bot.on('message:text', async ctx => {
           a2.digestAt = `${m[1].padStart(2, '0')}:${m[2]}`
           saveAccess(a2); armDigest()
           await ctx.reply(`🗞 Daily digest scheduled for ${a2.digestAt} (server time). Turn off in /settings or with /digest off.`)
+          return
+        }
+        // API key for a hosted TTS engine — stored in .env, the key message deleted from chat.
+        case 'ttskey': {
+          const key = text.trim()
+          if (!/^[\x21-\x7e]{10,200}$/.test(key)) {
+            await ctx.reply('❌ That doesn\'t look like an API key — open /settings → 🔊 Voice replies to retry.')
+            return
+          }
+          writeEnvVars({ [target.engine === 'openai' ? 'OPENAI_API_KEY' : 'ELEVENLABS_API_KEY']: key })
+          await ctx.deleteMessage().catch(() => {})
+          await ctx.reply(`🔑 ${target.engine === 'openai' ? 'OpenAI' : 'ElevenLabs'} key saved — voice replies are ready.`)
           return
         }
         // Folder for /new in General → spawn a session there (it creates its own topic).

@@ -58,6 +58,7 @@ export type ReplyTarget =
   | { kind: 'acctname'; thread?: number }                        // name for a new Claude account (settings → Accounts → ➕)
   | { kind: 'newsession' }                                       // folder for /new in General (spawn → its own topic)
   | { kind: 'digesttime' }                                       // daily time for the digest (settings → 🗞 Digest)
+  | { kind: 'ttskey'; engine: 'openai' | 'elevenlabs' }          // API key for a hosted TTS engine (settings → 🔊 Voice replies)
 export const replyTargets = new Map<string, ReplyTarget>()
 
 // ---- Relay tracking ----

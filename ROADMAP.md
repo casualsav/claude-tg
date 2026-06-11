@@ -72,7 +72,7 @@ Two daemons, watchdog, version-keyed caches, revival — debugging the meta-laye
 One card: instance, version, uptime, adopted panes, queue depths, last crash, watchdog state;
 covers both accounts' bridges.
 
-## 15. TTS voice replies
+## 15. TTS voice replies — ✅ DONE (v0.1.90)
 Daemon-side text→speech of outbound replies as Telegram voice notes (local Piper, same
 provisioning pattern as Whisper; zero Claude-usage cost). /settings toggle off/digest-only/all;
 long replies capped or summarized.

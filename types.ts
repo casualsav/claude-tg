@@ -29,6 +29,7 @@ export type Access = {
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)
   scheduleTz?: string     // IANA timezone for recurring /schedule wall-clock times (default America/Los_Angeles)
   batchAllow?: boolean    // 2+ permission prompts in one turn offer "Allow all this turn" (default on)
+  tts?: { mode: 'off' | 'digest' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs' }   // voice replies (ROADMAP #15)
   replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
 }
 

@@ -130,7 +130,18 @@ live in the state dir, and the daemon reads them on first start.
    self-heals on the first voice note as a backstop, but provisioning at install is better: it
    makes the first note instant instead of carrying a ~1–3 min install, and the daemon can't
    `sudo apt-get install python3-venv` if `ensurepip` is missing — you can.)
-4. **More than one Claude account?** (default no.) If they have e.g. a personal and a work
+4. **Voice replies (TTS)?** (default off.) Claude's replies can also arrive as Telegram
+   voice notes — zero extra Claude usage (it speaks text already written). Mode `off` |
+   `digest` (only the daily /digest is spoken) | `all` (every reply). If on, pick an engine:
+   - `piper` (recommended) — local & free; the daemon auto-installs the engine + a voice
+     (~80MB) when first enabled. No key.
+   - `openai` — hosted, ~$0.015/1k chars; ask for **OPENAI_API_KEY**.
+   - `elevenlabs` — best voices, priciest; ask for **ELEVENLABS_API_KEY**.
+
+   Write the choice into `access.json` as `"tts": { "mode": "<digest|all>", "engine":
+   "<piper|openai|elevenlabs>" }` (omit entirely for off) and any key into `.env`. All of it
+   is changeable later from chat: /settings → 🔊 Voice replies.
+5. **More than one Claude account?** (default no.) If they have e.g. a personal and a work
    account, collect short names for the extra ones (`work`, lowercase letters/digits/dashes,
    ≤16 chars; the default account is `main` = `~/.claude`). Each maps to its own config dir
    `~/.claude-<name>`. After setup they can launch sessions on any account straight from
