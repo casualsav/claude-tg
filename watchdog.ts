@@ -55,7 +55,9 @@ try {
     process.exit(0)
   }
 } catch {}
-try { writeFileSync(WATCHDOG_PID_FILE, String(process.pid), { mode: 0o600 }) } catch {}
+// The "usr1" line is a capability marker: ensure-daemon SIGUSR1s a watchdog that advertises it
+// (immediate daemon respawn) and replaces one that doesn't — an unhandled SIGUSR1 would kill it.
+try { writeFileSync(WATCHDOG_PID_FILE, `${process.pid}\nusr1`, { mode: 0o600 }) } catch {}
 
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
 function findDaemon(): string | null {
@@ -110,8 +112,10 @@ process.on('SIGTERM', () => {
   process.exit(0)
 })
 
+process.on('SIGUSR1', () => void tick())   // ensure-daemon's nudge: the daemon is down — respawn it NOW
 process.stderr.write(`watchdog: up (pid ${process.pid}), checking every ${CHECK_MS / 1000}s\n`)
 reapZombies()                                   // sweep any orphans already adopted at startup
 setInterval(reapZombies, REAP_MS).unref?.()     // and keep reaping re-parented orphans
+try { process.on('SIGCHLD', reapZombies) } catch {}   // reap the instant an adopted orphan exits (sweep backstops)
 await tick()
 setInterval(() => void tick(), CHECK_MS)

@@ -57,14 +57,6 @@ function socketAlive(socketPath: string): Promise<boolean> {
   })
 }
 
-function pidAlive(file: string): boolean {
-  try {
-    const pid = parseInt(readFileSync(file, 'utf8'), 10)
-    if (pid > 1) { process.kill(pid, 0); return true }
-  } catch {}
-  return false
-}
-
 // `?? ''` keeps the type plain string for the closures below (control-flow narrowing from the
 // module-level exit guard doesn't reach into functions); the guard still exits on not-found.
 const daemonPath = findDaemon() ?? ''
@@ -95,17 +87,48 @@ function ensureDeps(log: number): void {
 }
 
 // Bring up one instance (daemon + watchdog) scoped to its state dir. Only spawns what's down.
+//
+// Zombie hygiene: the WATCHDOG is the child-subreaper that adopts + reaps orphaned bridge
+// processes. A daemon spawned HERE re-parents to PID 1 when this hook exits — and a PID 1 that
+// never wait()s (`sleep infinity` in a container) keeps it as a PERMANENT zombie after its next
+// restart, along with everything it leaked. So bring the watchdog up first and let IT spawn the
+// daemon inside its own subtree: a fresh watchdog ticks on boot; a running one gets a SIGUSR1
+// "check now". A watchdog whose pid file lacks the `usr1` capability marker predates that handler
+// (an unhandled SIGUSR1 would kill it) — replace it with the current build instead of signaling.
 async function ensureInstance(stateDir: string, log: number): Promise<void> {
   const env = { ...process.env, TELEGRAM_STATE_DIR: stateDir }
-  if (!(await socketAlive(join(stateDir, 'daemon.sock')))) {
+  const daemonDown = !(await socketAlive(join(stateDir, 'daemon.sock')))
+  if (existsSync(watchdogPath)) {
+    const pidFile = join(stateDir, 'watchdog.pid')
+    let wdPid = 0, canUsr1 = false
+    try {
+      const raw = readFileSync(pidFile, 'utf8')
+      wdPid = parseInt(raw, 10)
+      canUsr1 = /\busr1\b/.test(raw)
+      if (wdPid > 1) process.kill(wdPid, 0)
+      else wdPid = 0
+    } catch { wdPid = 0 }
+    if (wdPid && daemonDown && !canUsr1) {
+      try { process.kill(wdPid, 'SIGTERM') } catch {}
+      await new Promise(r => setTimeout(r, 300))   // let it unlink its pid file so the new one boots
+      wdPid = 0
+      process.stderr.write(`ensure-daemon: replaced pre-usr1 watchdog for ${stateDir}\n`)
+    }
+    if (!wdPid) {
+      const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env })
+      child.unref()
+      process.stderr.write(`ensure-daemon: launched watchdog for ${stateDir} (pid ${child.pid}) — it brings up the daemon\n`)
+    } else if (daemonDown) {
+      try { process.kill(wdPid, 'SIGUSR1') } catch {}
+      process.stderr.write(`ensure-daemon: daemon down for ${stateDir} — nudged watchdog ${wdPid} to respawn it\n`)
+    }
+    return
+  }
+  // No watchdog in this cache (very old build) — spawn the daemon directly, as before.
+  if (daemonDown) {
     const child = spawn('bun', [daemonPath], { detached: true, stdio: ['ignore', log, log], env })
     child.unref()
     process.stderr.write(`ensure-daemon: launched daemon ${daemonPath} for ${stateDir} (pid ${child.pid})\n`)
-  }
-  if (existsSync(watchdogPath) && !pidAlive(join(stateDir, 'watchdog.pid'))) {
-    const child = spawn('bun', [watchdogPath], { detached: true, stdio: ['ignore', log, log], env })
-    child.unref()
-    process.stderr.write(`ensure-daemon: launched watchdog for ${stateDir} (pid ${child.pid})\n`)
   }
 }
 
