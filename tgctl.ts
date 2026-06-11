@@ -16,12 +16,15 @@ import { frame, makeLineReader, SOCKET_PATH, type ShimToDaemon, type DaemonToShi
 const fromStdin = (s: string | undefined) => (s === '-' ? readFileSync(0, 'utf8') : s)
 const [, , cmd, chat_id, a, b] = process.argv
 
+// The caller's tmux pane rides along so the daemon can resolve `.` to THIS session's
+// chat — and in forum mode its own topic thread — instead of needing an explicit id.
+const pane = process.env.TMUX_PANE
 let name = '', args: Record<string, unknown> = {}
 switch (cmd) {
-  case 'send':  name = 'reply';        args = { chat_id, files: [a], ...(b != null ? { text: fromStdin(b) } : {}) }; break
-  case 'react': name = 'react';        args = { chat_id, message_id: a, emoji: b }; break
-  case 'edit':  name = 'edit_message'; args = { chat_id, message_id: a, text: fromStdin(b) }; break
-  case 'reply': name = 'reply';        args = { chat_id, text: fromStdin(a) }; break
+  case 'send':  name = 'reply';        args = { chat_id, pane, files: [a], ...(b != null ? { text: fromStdin(b) } : {}) }; break
+  case 'react': name = 'react';        args = { chat_id, pane, message_id: a, emoji: b }; break
+  case 'edit':  name = 'edit_message'; args = { chat_id, pane, message_id: a, text: fromStdin(b) }; break
+  case 'reply': name = 'reply';        args = { chat_id, pane, text: fromStdin(a) }; break
   // `tg update` / `tg update check` — the second token lands in `chat_id`.
   case 'update': name = 'update';      args = { mode: chat_id === 'check' ? 'check' : 'apply' }; break
   default:

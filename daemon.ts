@@ -145,6 +145,20 @@ function resolveChatId(raw: unknown): string {
   throw new Error(s ? `chat "${s}" not resolvable` : 'no chat id given and not exactly one allowlisted chat')
 }
 
+// Pane-aware `.`: a tg-CLI call carries its tmux pane, so `.` resolves to the calling session's
+// own chat — in forum mode the bound group + that session's topic thread (so sends land in the
+// right tab), else the sole allowlisted DM. Lets inbound blocks drop the chat id entirely.
+async function resolveTarget(args: Record<string, unknown>): Promise<{ chat: string; thread?: number }> {
+  const s = (args.chat_id == null ? '' : String(args.chat_id)).trim()
+  if (s && s !== '.') return { chat: s }
+  const pane = args.pane ? String(args.pane) : null
+  if (pane) {
+    const t = await topicThreadFor(pane).catch(() => null)
+    if (t) return { chat: t.group, thread: t.thread }
+  }
+  return { chat: resolveChatId(s) }
+}
+
 function assertSendable(f: string): void {
   let real, stateReal: string
   try {
@@ -635,62 +649,31 @@ let promptRelayOutstanding = false
 // relayed messages so a Telegram reply to one is injected into the pane.
 let lastRelayedAuthUrl = ''
 
-// Reaction-worthy heuristic for the `↳ react?` hint. The daemon can't judge taste — it only
-// decides when to re-prime the affordance; the model judges whether to act. Crude and slightly
-// generous on purpose: a false positive costs ~12 tokens and the model just declines. Crucially
-// the hint rides ONLY on messages where reacting to *that message* would be right — hint
-// adjacency reads as an imperative (observed live), so a periodic decoupled refresh is exactly
-// the thing that misfires. No timer; organic thanks/wins/greetings keep the affordance alive.
-const REACT_LEX = /\b(thanks|thank you|thx|ty|tysm|lol|lmao|haha+|nice|awesome|amazing|great|love(d)? (it|this|that)|wow|congrats|well done|good ?(morning|night|bye)|gn|bye|goodbye|cheers)\b/i
-const TASK_VERB = /^(ultrathink\b[\s,!.]*)?(please\s+)?(build|fix|investigate|audit|explore|research|refactor|implement|debug|analy[sz]e|review|rewrite|optimi[sz]e|design|dig)\b/i
-function isReactWorthy(text: string): boolean {
-  const t = text.trim()
-  if (!t) return false
-  if (/\p{Extended_Pictographic}/u.test(t)) return true                 // user used emoji
-  if (REACT_LEX.test(t)) return true                                    // warmth / humor / sign-off
-  if (t.length < 80 && !t.includes('?') && t.includes('!')) return true // short exclamatory
-  if (t.length > 200 && TASK_VERB.test(t)) return true                  // big task → 👀 candidate
-  return false
-}
-
-// Build the inbound block the agent reads. Bare minimum, short aliases — it lives in the
-// session's context, so every dropped field is saved tokens: tag name encodes the source,
-// `c`=chat_id (for the tg CLI), `m`=message_id (for react/reply). The sender `u` is kept only
-// for groups (chat_id ≠ user_id) where attribution matters; `img`/`att` are local file paths
-// to Read. user_id / ts are dropped entirely. (off-mcp/CLAUDE.md documents this shape.)
+// Build the inbound block the agent reads. It lives in the session's context, so every
+// dropped character is saved tokens — the format is as small as it can get while staying
+// unambiguous (off-mcp/CLAUDE.md documents it):
+//   <tg ID[ e][ @sender][ img="path"][ att="path"]>TEXT</tg>
+// ID (bare, positional) is the message id — the handle for `tg react . ID` (reactions are an
+// ambient affordance, decoded + paced by CLAUDE.md; no per-message flag or hint needed).
+// The chat id is GONE even in groups: the tg CLI sends its tmux pane, and `.` resolves to the
+// calling session's own chat/topic (resolveTarget). `e` = an edit replacing the user's previous
+// message. `@sender` appears only when the author isn't the paired owner. user_id / ts dropped.
 function formatChannelBlock(params: InboundParams): string {
   const m = params.meta
   const esc = (v: string) => v.replace(/"/g, '&quot;')
   const a: string[] = []
-  // DM (chat_id == user_id): omit c — it's the same id every message, so it's pure token waste.
-  // Deliberate actions (tg send/react/edit) default to the sole allowlisted chat (accept `.`).
-  // Groups keep c so the agent targets the right chat.
-  const isDm = !!m.user_id && m.chat_id === m.user_id
-  if (m.chat_id && !isDm) a.push(`c="${esc(m.chat_id)}"`)
-  // `m` is the react/reply handle; the bare `r` flag right after it is the standing reaction
-  // affordance — an ambient "you may react to this" on every message, decoded by CLAUDE.md (which
-  // also carries the when: sparingly, only when it genuinely lands). Replaces the old verbose
-  // once-per-context cue; ~2 chars keeps it alive without nudging the model into routine reactions.
-  if (m.message_id) { a.push(`m="${esc(m.message_id)}"`); a.push('r') }
-  if (m.user && m.user_id && m.chat_id !== m.user_id) a.push(`u="${esc(m.user)}"`)   // group → keep sender
+  if (m.message_id) a.push(m.message_id)
+  if (m.edited) a.push('e')
+  if (m.user && m.user_id && m.user_id !== loadAccess().allowFrom[0] && m.chat_id !== m.user_id) a.push(`@${m.user}`)
   if (m.image_path) a.push(`img="${esc(m.image_path)}"`)
   if (m.attachment_path) a.push(`att="${esc(m.attachment_path)}"`)
-  const tag = `<tg ${a.join(' ')}>${params.content}</tg>`
-  // The per-message react affordance (the MCP-tool-presence analog): a ready-made command,
-  // adjacent to the one message it applies to, only when the heuristic says it could land.
-  if (m.message_id && isReactWorthy(params.content)) {
-    return `${tag}\n↳ react? tg react ${isDm ? '.' : m.chat_id} ${m.message_id} <emoji>`
-  }
-  return tag
+  return `<tg${a.length ? ' ' + a.join(' ') : ''}>${params.content}</tg>`
 }
 
 // Inbound injections are serialized through one chain: two Telegram messages arriving
 // close together would otherwise drive the same pane concurrently and interleave
 // keystrokes. A failed inject (pane died mid-send) re-buffers for the next session.
 let inboundInjectChain: Promise<unknown> = Promise.resolve()
-// The reaction affordance now rides on every message as the bare `r` flag in the tag (see
-// formatChannelBlock) — ambient and ~free — instead of a verbose once-per-context nudge, so it
-// stays alive without driving routine reactions. CLAUDE.md decodes `r` and sets the when (sparing).
 function enqueueInboundInject(paneId: string, watcher: PaneWatcher, params: InboundParams): void {
   const block = formatChannelBlock(params)
   // If an effort-change confirmation is open and the user sent a message instead of tapping, dismiss
@@ -2382,7 +2365,8 @@ async function handleCall(
     let text: string
     switch (name) {
       case 'reply': {
-        const chat_id = resolveChatId(args.chat_id)
+        const { chat: chat_id, thread } = await resolveTarget(args)
+        const threadOpt = thread ? { message_thread_id: thread } : {}
         const msgText = args.text as string
         const reply_to = args.reply_to != null ? Number(args.reply_to) : undefined
         const files = (args.files as string[] | undefined) ?? []
@@ -2411,6 +2395,7 @@ async function handleCall(
           const sent = await bot.api.sendMessage(chat_id, chunks[i], {
             ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
             ...(parseMode ? { parse_mode: parseMode } : {}),
+            ...threadOpt,
           })
           sentIds.push(sent.message_id)
         }
@@ -2419,7 +2404,7 @@ async function handleCall(
         for (const f of files) {
           const ext = extname(f).toLowerCase()
           const input = new InputFile(f)
-          const opts = reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : undefined
+          const opts = { ...(reply_to != null && replyMode !== 'off' ? { reply_parameters: { message_id: reply_to } } : {}), ...threadOpt }
           if (PHOTO_EXTS.has(ext)) {
             const sent = await bot.api.sendPhoto(chat_id, input, opts)
             sentIds.push(sent.message_id)
@@ -2440,7 +2425,7 @@ async function handleCall(
         break
       }
       case 'react': {
-        const chat = resolveChatId(args.chat_id)
+        const { chat } = await resolveTarget(args)   // reactions don't thread — the chat suffices
         assertAllowedChat(chat)
         const msgId = Number(args.message_id)
         const wanted = coerceReaction(args.emoji as string)
@@ -2461,7 +2446,7 @@ async function handleCall(
         break
       }
       case 'edit_message': {
-        const editChat = resolveChatId(args.chat_id)
+        const { chat: editChat } = await resolveTarget(args)   // edits address an existing message — no thread needed
         assertAllowedChat(editChat)
         const editFormat = args.format as string | undefined
         const editRender = editFormat !== 'text' && editFormat !== 'markdownv2' && loadAccess().renderMarkdown !== false
@@ -6244,9 +6229,9 @@ bot.on('edited_message', async ctx => {
     if (!targetPane) return   // session gone — a correction isn't worth a revival
   }
   emitInbound({
-    content: `✏️ (correction — I edited my last message; this version replaces it)\n${text}`,
+    content: text,
     meta: {
-      chat_id: chat, message_id: String(em.message_id),
+      chat_id: chat, message_id: String(em.message_id), edited: 'true',   // → the `e` flag: this text replaces their previous message
       user: ctx.from?.username ?? String(ctx.from?.id), user_id: String(ctx.from?.id),
       ts: new Date((em.edit_date ?? em.date) * 1000).toISOString(),
     },
