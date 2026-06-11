@@ -31,6 +31,7 @@ import {
   MAIN_ACCOUNT, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
+import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, type GhAccount } from './github.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
@@ -3798,10 +3799,24 @@ function voiceModelKeyboard(): InlineKeyboard {
   kb.text('‹ Back', 'voice:panel')
   return kb
 }
+// gh status pings the GitHub API (can take seconds), so the settings line renders from a cache
+// that refreshes in the background on /settings open; the GitHub panel itself reads live.
+let ghAccountsCache: GhAccount[] | null = null
+// Startup scan: pick up logins that already exist on the machine (gh's hosts.yml and any
+// GH_TOKEN/GITHUB_TOKEN env login both surface via `gh auth status`), so the panel and the
+// settings line are populated before anyone opens them.
+void ghAccounts().then(a => { ghAccountsCache = a }).catch(() => {})
+function ghSummary(): string {
+  if (ghAccountsCache === null) return '…'
+  if (ghAccountsCache.length === 0) return 'not logged in'
+  const active = ghAccountsCache.find(g => g.active) ?? ghAccountsCache[0]
+  return ghAccountsCache.length > 1 ? `${active.user} +${ghAccountsCache.length - 1}` : active.user
+}
 function settingsText(): string {
   const a = loadAccess()
   return `⚙️ <b>Settings</b>\n\n` +
     `👤 Accounts — <b>${listAccounts().length}</b>\n` +
+    `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
     `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
     `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
@@ -3813,7 +3828,8 @@ function settingsText(): string {
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('👤 Accounts', 'acct:panel').text('📌 Pin', 'set:pin').row()
+    .text('👤 Accounts', 'acct:panel').text('🐙 GitHub', 'gh:panel').row()
+    .text('📌 Pin', 'set:pin')
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
     .text('💬 Stream', 'set:replymode').text('🗞 Daily digest', 'set:digest')
@@ -3847,6 +3863,7 @@ function ttsKeyboard(): InlineKeyboard {
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
+  void ghAccounts().then(a => { ghAccountsCache = a }).catch(() => {})   // warm the 🐙 summary for next render
   await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
 })
 
@@ -4334,6 +4351,34 @@ function accountsPanelKeyboard(): InlineKeyboard {
   return kb
 }
 
+// The GitHub panel (settings → 🐙 GitHub): gh CLI accounts, with switch/logout per account and
+// the device-code login flow behind ➕. Reads gh live (and refreshes the settings-line cache).
+async function ghPanelText(): Promise<string> {
+  if (!(await ghInstalled())) {
+    ghAccountsCache = []
+    return `🐙 <b>GitHub</b>\n\nThe <code>gh</code> CLI isn't installed on the host — install it (<code>https://cli.github.com</code>), then reopen this panel.`
+  }
+  const accounts = await ghAccounts()
+  ghAccountsCache = accounts
+  const lines = accounts.map(a => `${a.active ? '●' : '○'} <b>${escapeHtml(a.user)}</b> — ${escapeHtml(a.host)}${a.active ? ' (active)' : ''}`)
+  return `🐙 <b>GitHub</b> — gh CLI accounts\n\n${lines.length ? lines.join('\n') : 'Not logged in to any account.'}\n\n` +
+    `➕ starts a sign-in: you get a one-time code and a link here — open the link on any device, ` +
+    `enter the code, and I'll confirm once GitHub accepts it (nothing to type back). ` +
+    `🔁 makes that account the active one for <code>gh</code> and git.`
+}
+function ghPanelKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard()
+  for (const a of ghAccountsCache ?? []) {
+    if (a.host !== 'github.com') continue   // switch/logout below are pinned to github.com
+    if (!a.active) kb.text(`🔁 ${a.user}`, `gh:switch:${a.user}`)
+    kb.text(`🗑 ${a.user}`, `gh:rm:${a.user}`)
+    kb.row()
+  }
+  kb.text('➕ Add account', 'gh:add').text('‹ Back', 'gh:back')
+  return kb
+}
+let ghLoginInFlight = false
+
 // /restart — exit the focused Claude session and relaunch it resuming the same conversation
 // (claude -c), reusing the same pane. Useful to pick up a CLAUDE.md / plugin / config change that
 // only takes effect on a fresh process, without losing the conversation. The pane (and its
@@ -4660,6 +4705,59 @@ bot.on('callback_query:data', async ctx => {
       await ctx.answerCallbackQuery().catch(() => {})
     }
     await ctx.editMessageText(await accountsPanelText(), { parse_mode: 'HTML', reply_markup: accountsPanelKeyboard() }).catch(() => {})
+    return
+  }
+
+  // GitHub sub-panel (settings → 🐙 GitHub): login (device-code relay), switch, logout.
+  const ghMatch = /^gh:(panel|back|add|switch:(\S+)|rm:(\S+))$/.exec(data)
+  if (ghMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    if (ghMatch[1] === 'back') {
+      await ctx.answerCallbackQuery().catch(() => {})
+      await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      return
+    }
+    if (ghMatch[1] === 'add') {
+      if (ghLoginInFlight) { await ctx.answerCallbackQuery({ text: 'A GitHub login is already in progress.' }).catch(() => {}); return }
+      ghLoginInFlight = true
+      await ctx.answerCallbackQuery({ text: 'Starting…' }).catch(() => {})
+      const chat = String(ctx.chat!.id)
+      const thread = ctx.callbackQuery.message?.message_thread_id
+      // One status message, edited through the stages (requesting code → code card → outcome).
+      const status = await bot.api.sendMessage(chat, '⏳ Requesting a GitHub sign-in code…',
+        { ...(thread ? { message_thread_id: thread } : {}) }).catch(() => null)
+      const edit = (txt: string) => status
+        ? bot.api.editMessageText(chat, status.message_id, txt,
+            { parse_mode: 'HTML', link_preview_options: { is_disabled: true } }).catch(() => {})
+        : Promise.resolve()
+      // The flow runs minutes (until the user authorizes on github.com) — don't block the callback.
+      void (async () => {
+        const res = await runGhLogin((code, url) => {
+          void edit(`🔑 <b>GitHub sign-in</b>\n\nYour one-time code (tap to copy):\n<code>${escapeHtml(code)}</code>\n\n` +
+            `Open ${escapeHtml(url)} on any device, enter the code, and authorize. ` +
+            `I'll confirm here once GitHub accepts it — nothing to send back.`)
+        })
+        ghLoginInFlight = false
+        await edit(res.ok
+          ? `✅ GitHub: logged in${res.user ? ` as <b>${escapeHtml(res.user)}</b>` : ''}.`
+          : `❌ GitHub login failed: ${escapeHtml(res.error)}`)
+        ghAccountsCache = await ghAccounts().catch(() => ghAccountsCache)
+      })()
+      return
+    }
+    const user = ghMatch[2] ?? ghMatch[3]
+    if (user) {
+      const err = ghMatch[2] ? await ghSwitch(user) : await ghLogout(user)
+      await ctx.answerCallbackQuery({
+        text: err ? err.slice(0, 190) : ghMatch[2] ? `Switched to ${user}.` : `Logged out ${user}.`,
+      }).catch(() => {})
+    } else {
+      await ctx.answerCallbackQuery().catch(() => {})
+    }
+    await ctx.editMessageText(await ghPanelText(), { parse_mode: 'HTML', reply_markup: ghPanelKeyboard() }).catch(() => {})
     return
   }
 
