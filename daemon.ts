@@ -63,7 +63,7 @@ import {
 } from './topic-runtime.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
-import { synthesize, provisionPiper, piperReady, engineStatus, type TtsEngine } from './voice-out.ts'
+import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
 import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, type Recurrence } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
@@ -784,9 +784,10 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
 // Fire-and-forget — synthesis failures log and never block the text path. Zero Claude usage:
 // it reads text the model already produced.
 async function sendTtsVoice(text: string, targets: Array<{ chat: string; thread?: number }>): Promise<void> {
-  const engine = loadAccess().tts?.engine ?? 'piper'
+  const tts = loadAccess().tts
+  const engine = tts?.engine ?? 'piper'
   try {
-    const file = await synthesize(text, engine)
+    const file = await synthesize(text, engine, tts?.voice)
     for (const { chat, thread } of targets) {
       await bot.api.sendVoice(chat, new InputFile(file), { disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) })
         .catch(e => process.stderr.write(`daemon: tts send failed: ${e}\n`))
@@ -4056,8 +4057,9 @@ function settingsKeyboard(): InlineKeyboard {
 function ttsText(): string {
   const t = loadAccess().tts
   const mode = t?.mode ?? 'off', eng = t?.engine ?? 'piper'
-  const st = engineStatus(eng)
-  return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b> (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
+  const st = engineStatus(eng, t?.voice)
+  const voiceLabel = PIPER_VOICES.find(v => v.id === (t?.voice ?? DEFAULT_PIPER_VOICE))?.label ?? t?.voice
+  return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b>${eng === 'piper' ? ` · 🗣 <b>${escapeHtml(voiceLabel ?? '')}</b>` : ''} (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
     `Claude's replies arrive as voice notes after the text. Zero extra Claude usage — it speaks text already written.\n\n` +
     `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB; needs ffmpeg — installed with it if missing)\n☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)`
 }
@@ -4066,10 +4068,16 @@ function ttsKeyboard(): InlineKeyboard {
   const mode = t?.mode ?? 'off', eng = t?.engine ?? 'piper'
   const m = (label: string, v: string) => (mode === v ? `● ${label}` : label)
   const e = (label: string, v: string) => (eng === v ? `● ${label}` : label)
-  return new InlineKeyboard()
+  const kb = new InlineKeyboard()
     .text(m('🔇 Off', 'off'), 'tts:mode:off').text(m('🗞 Digest', 'digest'), 'tts:mode:digest').text(m('💬 All', 'all'), 'tts:mode:all').row()
     .text(e('🆓 Piper', 'piper'), 'tts:eng:piper').text(e('☁️ OpenAI', 'openai'), 'tts:eng:openai').text(e('☁️ 11Labs', 'elevenlabs'), 'tts:eng:elevenlabs').row()
-    .text('‹ Back', 'tts:back')
+  if (eng === 'piper') {
+    const cur = t?.voice ?? DEFAULT_PIPER_VOICE
+    PIPER_VOICES.forEach((v, i) => { kb.text(v.id === cur ? `● ${v.label}` : v.label, `tts:pv:${i}`); if (i === 2) kb.row() })
+    kb.row()
+  }
+  kb.text('‹ Back', 'tts:back')
+  return kb
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
@@ -4121,13 +4129,13 @@ bot.command('voice', async ctx => {
   }
   if (arg) {
     const a = loadAccess()
-    a.tts = { mode: arg === 'on' ? 'all' : 'off', engine: a.tts?.engine ?? 'piper' }
+    a.tts = { ...a.tts, mode: arg === 'on' ? 'all' : 'off', engine: a.tts?.engine ?? 'piper' }
     saveAccess(a)
     const thread = ctx.message?.message_thread_id
     const extra = thread ? { message_thread_id: thread } : {}
-    if (arg === 'on' && a.tts.engine === 'piper' && !piperReady()) {
+    if (arg === 'on' && a.tts.engine === 'piper' && !piperReady(a.tts.voice)) {
       void bot.api.sendMessage(String(ctx.chat!.id), '⏳ Installing the Piper voice engine (~80MB)…', extra).catch(() => {})
-      void provisionPiper().then(
+      void provisionPiper(a.tts.voice).then(
         () => bot.api.sendMessage(String(ctx.chat!.id), '✅ Piper ready — replies will speak.', extra).catch(() => {}),
         e => bot.api.sendMessage(String(ctx.chat!.id), `⚠️ Piper install failed: ${String(e).slice(0, 150)}`, extra).catch(() => {}),
       )
@@ -5145,14 +5153,14 @@ bot.on('callback_query:data', async ctx => {
 
   // Voice-transcription sub-panel → switch backend (live; daemon reads .env per voice note).
   // Voice-replies sub-panel taps: mode/engine selection + provisioning side effects.
-  const ttsMatch = /^tts:(?:mode:(off|digest|all)|eng:(piper|openai|elevenlabs)|(back))$/.exec(data)
+  const ttsMatch = /^tts:(?:mode:(off|digest|all)|eng:(piper|openai|elevenlabs)|pv:(\d)|(back))$/.exec(data)
   if (ttsMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
-    if (ttsMatch[3]) {   // back
+    if (ttsMatch[4]) {   // back
       await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
       return
     }
@@ -5160,15 +5168,16 @@ bot.on('callback_query:data', async ctx => {
     const tts = a.tts ?? { mode: 'off' as const, engine: 'piper' as const }
     if (ttsMatch[1]) tts.mode = ttsMatch[1] as 'off' | 'digest' | 'all'
     if (ttsMatch[2]) tts.engine = ttsMatch[2] as TtsEngine
+    if (ttsMatch[3] && PIPER_VOICES[Number(ttsMatch[3])]) tts.voice = PIPER_VOICES[Number(ttsMatch[3])].id
     a.tts = tts
     saveAccess(a)
     const chat = String(ctx.chat!.id)
     const thread = ctx.callbackQuery.message?.message_thread_id
     const threadExtra2 = thread ? { message_thread_id: thread } : {}
-    if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady()) {
-      void bot.api.sendMessage(chat, '⏳ Installing the Piper voice engine (~80MB)…', threadExtra2).catch(() => {})
-      void provisionPiper().then(
-        () => bot.api.sendMessage(chat, '✅ Piper voice engine ready — replies will speak.', threadExtra2).catch(() => {}),
+    if (tts.mode !== 'off' && tts.engine === 'piper' && !piperReady(tts.voice)) {
+      void bot.api.sendMessage(chat, `⏳ Installing Piper${ttsMatch[3] ? `'s ${PIPER_VOICES[Number(ttsMatch[3])].label} voice (~60MB)` : ' (~80MB)'}…`, threadExtra2).catch(() => {})
+      void provisionPiper(tts.voice).then(
+        () => bot.api.sendMessage(chat, '✅ Piper voice ready — replies will speak.', threadExtra2).catch(() => {}),
         e => bot.api.sendMessage(chat, `⚠️ Piper install failed: ${escapeHtml(String(e).slice(0, 150))}`, threadExtra2).catch(() => {}),
       )
     }

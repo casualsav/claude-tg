@@ -15,8 +15,18 @@ export type TtsEngine = 'piper' | 'openai' | 'elevenlabs'
 
 const PIPER_DIR = join(STATE_DIR, 'piper')
 const PIPER_BIN = join(PIPER_DIR, 'piper', 'piper')
-const PIPER_VOICE = 'en_US-lessac-medium'
-const PIPER_MODEL = join(PIPER_DIR, `${PIPER_VOICE}.onnx`)
+
+// A curated shortlist (the full rhasspy/piper-voices catalog is 100+ voices — these are the
+// popular/realistic picks). `path` is the HuggingFace repo subdir holding the .onnx.
+export const PIPER_VOICES = [
+  { id: 'en_US-lessac-medium', label: 'Lessac (US·f)', path: 'en/en_US/lessac/medium' },
+  { id: 'en_US-amy-medium', label: 'Amy (US·f)', path: 'en/en_US/amy/medium' },
+  { id: 'en_US-hfc_female-medium', label: 'HFC (US·f)', path: 'en/en_US/hfc_female/medium' },
+  { id: 'en_US-ryan-high', label: 'Ryan (US·m)', path: 'en/en_US/ryan/high' },
+  { id: 'en_GB-alan-medium', label: 'Alan (GB·m)', path: 'en/en_GB/alan/medium' },
+] as const
+export const DEFAULT_PIPER_VOICE: string = PIPER_VOICES[0].id
+function voiceModel(voice: string): string { return join(PIPER_DIR, `${voice}.onnx`) }
 
 const FFMPEG_LOCAL = join(PIPER_DIR, 'ffmpeg')
 function ffmpegBin(): string | null {
@@ -46,19 +56,21 @@ export async function ensureFfmpeg(): Promise<string> {
   return got
 }
 
-export function piperReady(): boolean { return existsSync(PIPER_BIN) && existsSync(PIPER_MODEL) && !!ffmpegBin() }
+export function piperReady(voice: string = DEFAULT_PIPER_VOICE): boolean {
+  return existsSync(PIPER_BIN) && existsSync(voiceModel(voice)) && !!ffmpegBin()
+}
 
 // Engine availability for the settings panel: ready / what's missing.
-export function engineStatus(engine: TtsEngine): { ready: boolean; missing: string } {
-  if (engine === 'piper') return { ready: piperReady(), missing: 'local engine (auto-installs on select)' }
+export function engineStatus(engine: TtsEngine, voice?: string): { ready: boolean; missing: string } {
+  if (engine === 'piper') return { ready: piperReady(voice), missing: 'local engine (auto-installs on select)' }
   if (engine === 'openai') return { ready: !!tConfig('OPENAI_API_KEY'), missing: 'OPENAI_API_KEY' }
   return { ready: !!tConfig('ELEVENLABS_API_KEY'), missing: 'ELEVENLABS_API_KEY' }
 }
 
-// Download the piper binary + default voice (~80MB total). Idempotent; throws on failure so the
-// daemon can surface the error in chat.
-export async function provisionPiper(): Promise<void> {
-  if (piperReady()) return
+// Download the piper binary + the chosen voice (~80MB total first time, ~60MB per extra voice).
+// Idempotent; throws on failure so the daemon can surface the error in chat.
+export async function provisionPiper(voice: string = DEFAULT_PIPER_VOICE): Promise<void> {
+  if (piperReady(voice)) return
   mkdirSync(PIPER_DIR, { recursive: true })
   const arch = (await exec('uname', ['-m'], { timeout: 2000 })).stdout.trim()
   const plat = arch === 'aarch64' || arch === 'arm64' ? 'aarch64' : 'x86_64'
@@ -69,13 +81,16 @@ export async function provisionPiper(): Promise<void> {
     await exec('tar', ['-xzf', tarball, '-C', PIPER_DIR], { timeout: 60_000 })
     try { unlinkSync(tarball) } catch {}
   }
-  if (!existsSync(PIPER_MODEL)) {
-    const base = `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/${PIPER_VOICE}.onnx`
-    await exec('curl', ['-fsSL', '-o', PIPER_MODEL, base], { timeout: 600_000, maxBuffer: 1 << 20 })
-    await exec('curl', ['-fsSL', '-o', `${PIPER_MODEL}.json`, `${base}.json`], { timeout: 60_000, maxBuffer: 1 << 20 })
+  const model = voiceModel(voice)
+  if (!existsSync(model)) {
+    const entry = PIPER_VOICES.find(v => v.id === voice)
+    if (!entry) throw new Error(`unknown piper voice ${voice}`)
+    const base = `https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/${entry.path}/${voice}.onnx`
+    await exec('curl', ['-fsSL', '-o', model, base], { timeout: 600_000, maxBuffer: 1 << 20 })
+    await exec('curl', ['-fsSL', '-o', `${model}.json`, `${base}.json`], { timeout: 60_000, maxBuffer: 1 << 20 })
   }
   await ensureFfmpeg()   // wav→opus depends on it; install alongside piper rather than failing at first use
-  if (!piperReady()) throw new Error('piper install incomplete')
+  if (!piperReady(voice)) throw new Error('piper install incomplete')
 }
 
 // Markdown/HTML → speakable plain text: code blocks become a marker (nobody wants 40 lines of
@@ -99,7 +114,8 @@ export function speakable(text: string, cap = 1500): string {
 }
 
 // Synthesize `text` to an opus voice file; returns its path (caller unlinks) or throws.
-export async function synthesize(text: string, engine: TtsEngine): Promise<string> {
+// `voice` applies to piper (a PIPER_VOICES id; default Lessac).
+export async function synthesize(text: string, engine: TtsEngine, voice?: string): Promise<string> {
   const t = speakable(text)
   if (!t) throw new Error('nothing speakable')
   const out = join(tmpdir(), `tg-tts-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.ogg`)
@@ -129,13 +145,14 @@ export async function synthesize(text: string, engine: TtsEngine): Promise<strin
     return out
   }
   // piper: text on stdin via a temp file, wav out, then ffmpeg → opus.
-  if (!piperReady()) throw new Error('piper not provisioned')
+  const pv = voice && PIPER_VOICES.some(v => v.id === voice) ? voice : DEFAULT_PIPER_VOICE
+  if (!piperReady(pv)) throw new Error(`piper not provisioned (voice ${pv})`)
   const ff = ffmpegBin()
   if (!ff) throw new Error('ffmpeg missing')
   const txt = `${out}.txt`, wav = `${out}.wav`
   writeFileSync(txt, t)
   try {
-    await exec('bash', ['-c', `'${PIPER_BIN}' --model '${PIPER_MODEL}' --output_file '${wav}' < '${txt}'`], { timeout: 120_000 })
+    await exec('bash', ['-c', `'${PIPER_BIN}' --model '${voiceModel(pv)}' --output_file '${wav}' < '${txt}'`], { timeout: 120_000 })
     await exec(ff, ['-y', '-i', wav, '-c:a', 'libopus', '-b:a', '32k', '-ac', '1', out], { timeout: 60_000 })
   } finally {
     try { unlinkSync(txt) } catch {}
