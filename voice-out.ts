@@ -18,7 +18,35 @@ const PIPER_BIN = join(PIPER_DIR, 'piper', 'piper')
 const PIPER_VOICE = 'en_US-lessac-medium'
 const PIPER_MODEL = join(PIPER_DIR, `${PIPER_VOICE}.onnx`)
 
-export function piperReady(): boolean { return existsSync(PIPER_BIN) && existsSync(PIPER_MODEL) }
+const FFMPEG_LOCAL = join(PIPER_DIR, 'ffmpeg')
+function ffmpegBin(): string | null {
+  const sys = Bun.which('ffmpeg')
+  if (sys) return sys
+  return existsSync(FFMPEG_LOCAL) ? FFMPEG_LOCAL : null
+}
+
+// ffmpeg is required for piper's wav→opus step. Best effort: apt (passwordless sudo only),
+// else a static build dropped next to piper. Throws when neither lands.
+export async function ensureFfmpeg(): Promise<string> {
+  const have = ffmpegBin()
+  if (have) return have
+  try {
+    await exec('sudo', ['-n', 'apt-get', 'install', '-y', 'ffmpeg'], { timeout: 300_000, maxBuffer: 1 << 22 })
+    if (Bun.which('ffmpeg')) return 'ffmpeg'
+  } catch { /* no sudo / no apt → static build below */ }
+  const arch = (await exec('uname', ['-m'], { timeout: 2000 })).stdout.trim()
+  const plat = arch === 'aarch64' || arch === 'arm64' ? 'arm64' : 'amd64'
+  mkdirSync(PIPER_DIR, { recursive: true })
+  const tarball = join(PIPER_DIR, 'ffmpeg.tar.xz')
+  await exec('curl', ['-fsSL', '-o', tarball, `https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-${plat}-static.tar.xz`], { timeout: 600_000, maxBuffer: 1 << 20 })
+  await exec('bash', ['-c', `tar -xJf '${tarball}' -C '${PIPER_DIR}' --wildcards --strip-components=1 '*/ffmpeg'`], { timeout: 120_000 })
+  try { unlinkSync(tarball) } catch {}
+  const got = ffmpegBin()
+  if (!got) throw new Error('ffmpeg install failed (apt + static build both unavailable)')
+  return got
+}
+
+export function piperReady(): boolean { return existsSync(PIPER_BIN) && existsSync(PIPER_MODEL) && !!ffmpegBin() }
 
 // Engine availability for the settings panel: ready / what's missing.
 export function engineStatus(engine: TtsEngine): { ready: boolean; missing: string } {
@@ -46,6 +74,7 @@ export async function provisionPiper(): Promise<void> {
     await exec('curl', ['-fsSL', '-o', PIPER_MODEL, base], { timeout: 600_000, maxBuffer: 1 << 20 })
     await exec('curl', ['-fsSL', '-o', `${PIPER_MODEL}.json`, `${base}.json`], { timeout: 60_000, maxBuffer: 1 << 20 })
   }
+  await ensureFfmpeg()   // wav→opus depends on it; install alongside piper rather than failing at first use
   if (!piperReady()) throw new Error('piper install incomplete')
 }
 
@@ -99,13 +128,15 @@ export async function synthesize(text: string, engine: TtsEngine): Promise<strin
     writeFileSync(out, Buffer.from(await res.arrayBuffer()))
     return out
   }
-  // piper: text on stdin via a temp file, wav out, then ffmpeg → opus (whisper already needs ffmpeg).
+  // piper: text on stdin via a temp file, wav out, then ffmpeg → opus.
   if (!piperReady()) throw new Error('piper not provisioned')
+  const ff = ffmpegBin()
+  if (!ff) throw new Error('ffmpeg missing')
   const txt = `${out}.txt`, wav = `${out}.wav`
   writeFileSync(txt, t)
   try {
     await exec('bash', ['-c', `'${PIPER_BIN}' --model '${PIPER_MODEL}' --output_file '${wav}' < '${txt}'`], { timeout: 120_000 })
-    await exec('ffmpeg', ['-y', '-i', wav, '-c:a', 'libopus', '-b:a', '32k', '-ac', '1', out], { timeout: 60_000 })
+    await exec(ff, ['-y', '-i', wav, '-c:a', 'libopus', '-b:a', '32k', '-ac', '1', out], { timeout: 60_000 })
   } finally {
     try { unlinkSync(txt) } catch {}
     try { unlinkSync(wav) } catch {}

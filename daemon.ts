@@ -4059,7 +4059,7 @@ function ttsText(): string {
   const st = engineStatus(eng)
   return `🔊 <b>Voice replies</b> — mode <b>${mode}</b> · engine <b>${eng}</b> (${st.ready ? '✅ ready' : `needs ${escapeHtml(st.missing)}`})\n\n` +
     `Claude's replies arrive as voice notes after the text. Zero extra Claude usage — it speaks text already written.\n\n` +
-    `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB)\n☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)`
+    `🆓 <b>Piper</b> — local &amp; free, auto-installs (~80MB; needs ffmpeg — installed with it if missing)\n☁️ <b>OpenAI</b> — ~$0.015/1k chars (OPENAI_API_KEY)\n☁️ <b>ElevenLabs</b> — best voices, priciest (ELEVENLABS_API_KEY)`
 }
 function ttsKeyboard(): InlineKeyboard {
   const t = loadAccess().tts
