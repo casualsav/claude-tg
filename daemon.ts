@@ -4448,7 +4448,7 @@ async function statusCardText(paneId: string | null): Promise<string> {
   // ellipsized.
   // Single-space packing throughout — double spacing pushed the context % off the preview.
   const effortBadge = status?.effort ? `⚡${escapeHtml(status.effort)}` : ''   // no space before ⚡ — buys the preview one char
-  const modeBadgeStr = mode === '—' ? '' : ` ${escapeHtml(mode)}`
+  const modeBadgeStr = mode === '—' ? '' : `${escapeHtml(mode)}`   // no space before 🛡 either — the emoji is the separator
   const stats = [
     status?.h5 ? `🕒 ${status.h5.pct}%` : '',
     status?.d7 ? `📅 ${status.d7.pct}%` : '',
