@@ -505,7 +505,7 @@ function modeBadge(mode: CcMode): string {
     case 'acceptEdits': return '🛡edits'
     case 'plan': return '🛡plan'
     case 'auto': return '🛡auto'
-    case 'bypassPermissions': return '🛡yolo'
+    case 'bypassPermissions': return '🛡bypass'
   }
 }
 
