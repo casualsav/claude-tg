@@ -3800,7 +3800,7 @@ async function statusCardText(paneId: string | null): Promise<string> {
   const usage = status?.h5 ? `  📈 ${status.h5.pct}%` : ''
   const weekly = status?.d7 ? `  📅 ${status.d7.pct}%` : ''
   const ctxBadge = status?.ctxPct != null ? `  💾 ${status.ctxPct}%` : ''
-  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}  ${escapeHtml(mode)}${usage}${weekly}${ctxBadge}`
+  const head = `🧠 ${escapeHtml(model ?? '—')}${effortBadge}  ${escapeHtml(mode)} •${usage}${weekly}${ctxBadge}`
   const groups: string[] = []
   if (cwd) groups.push(`📁 <code>${escapeHtml(cwd)}</code>${branch ? ` · 🌿 ${escapeHtml(branch)}` : ''}`)
   if (status) {
