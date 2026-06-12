@@ -1,9 +1,12 @@
 import { test, expect } from 'bun:test'
 import {
-  toolBadge, recentAssistantBlocks, renderToolsMirror, renderThoughtsMirror,
-  renderHybridMirror, renderDigestMirror, splitThoughtParagraphs, renderToolRun,
+  toolBadge, recentAssistantBlocks, renderActionsMirror, renderThoughtsMirror,
+  renderDigestMirror, splitThoughtParagraphs, renderToolRun,
 } from './mirror.ts'
-import type { Activity, FeedItem } from './transcript.ts'
+import type { FeedItem } from './transcript.ts'
+
+type ToolItem = Extract<FeedItem, { kind: 'tool' }>
+const t = (tool: string, detail: string, lines?: number): ToolItem => ({ kind: 'tool', tool, detail, lines: lines ?? null })
 
 // These display helpers are pure (no initMirror/deps needed) — characterizing the mirror's
 // most bug-prone surface: tool badging, ● block parsing, and the per-mode card rendering.
@@ -40,17 +43,22 @@ test('recentAssistantBlocks keeps only the last `max` blocks', () => {
   expect(recentAssistantBlocks(raw, 2)).toEqual(['● b', '● c'])
 })
 
-test('renderToolsMirror lists the latest 10 tools and a Done summary', () => {
-  const acts: Activity[] = Array.from({ length: 12 }, (_, i) => ({ tool: 'Read', detail: `f${i}` }))
-  const out = renderToolsMirror(acts, true)
+test('renderActionsMirror live: collapsed history + the newest 3 as detail rows', () => {
+  const tools = Array.from({ length: 12 }, (_, i) => t('Read', `/a/f${i}.ts`))
+  const out = renderActionsMirror(tools, false)
   const lines = out.split('\n')
-  expect(lines.length).toBe(11)                // 10 tools + Done
-  expect(lines[0]).toContain('f2')             // oldest two (f0,f1) fell off
-  expect(lines.at(-1)).toBe('✅ <b>Done</b> · 12 steps')
+  expect(lines[0]).toBe('<i>Read 9 files</i>')          // 12 - 3 tail = 9 aggregated
+  expect(lines.length).toBe(4)                           // aggregate + 3 detail rows
+  expect(lines.at(-1)).toContain('f11.ts')               // newest call stays fully detailed
 })
 
-test('renderToolsMirror pluralizes a single step correctly', () => {
-  expect(renderToolsMirror([{ tool: 'Bash', detail: 'ls' }], true)).toContain('1 step')
+test('renderActionsMirror done: whole turn collapses into the aggregate + step count', () => {
+  const out = renderActionsMirror([t('Bash', 'ls'), t('Edit', '/x/a.ts', 5)], true)
+  expect(out).toBe('<i>Ran 1 shell command</i>\n✏️ <code>a.ts</code> <i>+5</i>\n✅ <b>Done</b> · 2 steps')
+})
+
+test('renderActionsMirror pluralizes a single step correctly', () => {
+  expect(renderActionsMirror([t('Bash', 'ls')], true)).toContain('1 step')
 })
 
 test('renderThoughtsMirror leads with 💭, folds tools into a summary, appends Done', () => {
@@ -83,17 +91,6 @@ test('renderToolRun aggregates search/read/bash and lists edits with line deltas
   const lines = renderToolRun(run)
   expect(lines[0]).toBe('<i>Searched 3 patterns, read 2 files, ran 2 shell commands, fetch</i>')
   expect(lines[1]).toBe('✏️ <code>status-card.ts</code> <i>+3</i>')
-})
-
-test('renderHybridMirror interleaves thoughts and tool badges', () => {
-  const feed: FeedItem[] = [
-    { kind: 'text', text: 'planning' },
-    { kind: 'tool', tool: 'Edit', detail: 'a.ts' },
-  ]
-  const out = renderHybridMirror(feed, false)
-  expect(out).toContain('🗨️ planning')   // thoughts carry the 🗨️ marker to set them apart from tools
-  expect(out).toContain('✏️ edit')
-  expect(out).toContain('a.ts')
 })
 
 test('renderDigestMirror shows live/idle header + blocks', () => {

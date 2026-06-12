@@ -21,13 +21,13 @@ import { stripAnsi } from './prompt.ts'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { parseWorkingLine } from './statusline.ts'
-import { currentTurnActivity, currentTurnFeed, turnAnchorUuid, type Activity, type FeedItem } from './transcript.ts'
+import { currentTurnFeed, turnAnchorUuid, type FeedItem } from './transcript.ts'
 import type { Access } from './types.ts'
 
 type MirrorDeps = {
   bot: Bot
   loadAccess: () => Access
-  replyMode: () => 'thoughts' | 'tools' | 'hybrid' | 'off'
+  replyMode: () => 'thoughts' | 'actions' | 'off'
   getActivePaneId: () => string | null
   retriggerTyping: () => void
   // The pane's transcript, resolved by the daemon (stamped @tg_transcript path first, cwd
@@ -49,9 +49,8 @@ export function initMirror(d: MirrorDeps): void {
 
 const MIRROR_THROTTLE_MS = 3000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
-const MIRROR_TOOLS = 10        // tools mode: max tool rows shown (newest replaces oldest until ✅ Done)
 const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) before capping the card
-const MIRROR_FEED = 10       // hybrid: max interleaved items shown (matches tools & thoughts)
+const ACTIONS_TAIL = 3       // actions mode: how many of the newest calls stay as full detail rows
 const MIRROR_THOUGHTS = 10   // thoughts mode: max thoughts shown (oldest falls off as new flow in)
 // The status footer (verb · elapsed · tokens) is DISABLED for now — it doesn't track reliably yet
 // (verb/token scraping off the spinner line is flaky). The whole machinery (the footer method,
@@ -149,37 +148,22 @@ export function toolBadge(tool: string): [string, string] {
   return ['🔧', tool]   // unregistered tool
 }
 
-export function renderToolsMirror(acts: Activity[], done: boolean): string {
-  // No "Working…" header — just the latest few tool calls scrolling by (oldest fall off as
-  // new ones arrive). A Done summary caps the feed at the bottom when the turn settles.
-  const lines: string[] = []
-  for (const a of acts.slice(-MIRROR_TOOLS)) {
-    const [emoji, label] = toolBadge(a.tool)
-    const d = a.detail ? `: <code>${escapeHtml(a.detail)}</code>` : ''
-    lines.push(`${emoji} ${label}${d}`)
-  }
-  if (done) lines.push(`✅ <b>Done</b> · ${acts.length} step${acts.length === 1 ? '' : 's'}`)
-  return lines.join('\n')
-}
-
-// Hybrid card: the current turn's narration + tool calls interleaved (transcript-driven, so no
-// pane scraping), the latest few items.
-export function renderHybridMirror(feed: FeedItem[], done: boolean): string {
-  const lines: string[] = []
-  for (const it of feed.slice(-MIRROR_FEED)) {
-    if (it.kind === 'text') {
-      const html = mdToTelegramHtml(it.text.trim()).trim()
-      if (html) lines.push(`<blockquote>🗨️ ${html}</blockquote>`)   // thought: shaded blockquote sets it apart from the tool badges
-    } else {
-      const [emoji, label] = toolBadge(it.tool)
-      const d = it.detail ? `: <code>${escapeHtml(it.detail)}</code>` : ''
-      lines.push(`${emoji} ${label}${d}`)                 // tool: the emoji badge differentiates it
-    }
-  }
-  if (done) lines.push('✅ <b>Done</b>')
-  // Keep the HTML valid under the card cap: drop oldest lines first, then hard-cap safely.
+// Actions card (the renamed tools mode): collapsed history + live tail, the TUI's own pattern.
+// Everything older than the newest ACTIONS_TAIL calls folds into renderToolRun's aggregate
+// ("Searched 14 patterns, read 9 files…" keeps counting instead of scrolling away); the newest
+// few stay as full detail rows so you can watch what's running right now. At Done the whole
+// turn collapses into the aggregate — a clean endpoint summary.
+export function renderActionsMirror(tools: Array<Extract<FeedItem, { kind: 'tool' }>>, done: boolean): string {
+  const split = done ? tools.length : Math.max(0, tools.length - ACTIONS_TAIL)
+  const lines: string[] = [
+    ...renderToolRun(tools.slice(0, split)),
+    ...tools.slice(split).map(a => {
+      const [emoji, label] = toolBadge(a.tool)
+      return `${emoji} ${label}${a.detail ? `: <code>${escapeHtml(a.detail)}</code>` : ''}`
+    }),
+  ]
+  if (done) lines.push(`✅ <b>Done</b> · ${tools.length} step${tools.length === 1 ? '' : 's'}`)
   let body = lines.join('\n')
-  while (body.length > 3500 && lines.length > 1) { lines.shift(); body = lines.join('\n') }
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   return body
 }
@@ -205,25 +189,25 @@ export function splitThoughtParagraphs(text: string): string[] {
 // A run of consecutive tool calls (between two thoughts) folded into compact summary lines:
 // one aggregate sentence ("Searched 3 patterns, read 2 files, ran 2 shell commands"), then one
 // line per file edit with its net line delta. The thoughts card shows the work narrative this
-// way without the hybrid card's per-call noise.
+// way without per-call noise.
 export function renderToolRun(run: Array<Extract<FeedItem, { kind: 'tool' }>>): string[] {
   let searched = 0, read = 0, ran = 0
   const other = new Map<string, number>()
-  const editLines: string[] = []
+  const edits = new Map<string, number>()   // file → summed net delta (repeat edits fold into one line)
   for (const it of run) {
     if (it.tool === 'Grep' || it.tool === 'Glob') searched++
     else if (it.tool === 'Read') read++
     else if (it.tool === 'Bash') ran++
     else if (it.tool === 'Edit' || it.tool === 'MultiEdit' || it.tool === 'Write' || it.tool === 'NotebookEdit') {
       const file = it.detail.split('/').pop() || it.detail || 'file'
-      const n = it.lines
-      const delta = n ? ` <i>${n > 0 ? `+${n}` : `−${-n}`}</i>` : ''
-      editLines.push(`✏️ <code>${escapeHtml(file)}</code>${delta}`)
+      edits.set(file, (edits.get(file) ?? 0) + (it.lines ?? 0))
     } else {
       const [, label] = toolBadge(it.tool)
       other.set(label, (other.get(label) ?? 0) + 1)
     }
   }
+  const editLines = [...edits].map(([file, n]) =>
+    `✏️ <code>${escapeHtml(file)}</code>${n ? ` <i>${n > 0 ? `+${n}` : `−${-n}`}</i>` : ''}`)
   const parts: string[] = []
   if (searched) parts.push(`searched ${searched} pattern${searched === 1 ? '' : 's'}`)
   if (read) parts.push(`read ${read} file${read === 1 ? '' : 's'}`)
@@ -371,8 +355,8 @@ class MirrorCard {
     const file = paneId ? await deps.resolveTranscriptForPane(paneId) : null
 
     // The capture feeds the digest body and the footer's verb/tokens scrape — with the footer
-    // disabled, thoughts/tools/hybrid don't need it at all (saves a tmux spawn per sync).
-    const needCap = (mode === 'tools' && mirrorMode() === 'digest') || (!done && MIRROR_FOOTER_ENABLED)
+    // disabled, thoughts/actions don't need it at all (saves a tmux spawn per sync).
+    const needCap = (mode === 'actions' && mirrorMode() === 'digest') || (!done && MIRROR_FOOTER_ENABLED)
     const cap = needCap ? await mirrorCapture(paneId) : ''
     // Refresh the footer pieces from Claude's spinner line, but only when a fresh reading exists — a
     // tick that misses the line (it scrolls) keeps the last good verb/tokens instead of flickering.
@@ -384,12 +368,14 @@ class MirrorCard {
 
     let body: string | null
     if (mode === 'thoughts') body = renderThoughtsMirror(file ? currentTurnFeed(file, done) : [], done) || null   // `done` → drop the reply (relayed on its own)
-    else if (mode === 'hybrid') { const feed = file ? currentTurnFeed(file, done) : []; body = feed.length ? renderHybridMirror(feed, done) : null }
     else {
-      // tools (legacy 'final')
+      // actions (legacy 'tools'/'final')
       if (mirrorMode() === 'off') { this.body = ''; return false }
       if (mirrorMode() === 'digest') body = cap ? renderDigestMirror(cap, done) : null
-      else { const acts = file ? currentTurnActivity(file) : []; body = acts.length ? renderToolsMirror(acts, done) : null }
+      else {
+        const tools = file ? currentTurnFeed(file, done).filter((it): it is Extract<FeedItem, { kind: 'tool' }> => it.kind === 'tool') : []
+        body = tools.length ? renderActionsMirror(tools, done) : null
+      }
     }
     if (body == null) return false
     this.body = body
@@ -416,8 +402,8 @@ class MirrorCard {
   async update(working: boolean): Promise<void> {
     if (this.pendingRestore) await this.reconcile()   // restart verdict first: resume the old card or cap it
     const mode = deps.replyMode()
-    // off → never a card. tools+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)
-    if (mode === 'off' || (mode === 'tools' && mirrorMode() === 'off')) { this.idleTicks = 0; if (this.msgIds.size) await this.finalize(); return }
+    // off → never a card. actions+terminalMirror:off → no card. (Explicit off → cap now, no debounce.)
+    if (mode === 'off' || (mode === 'actions' && mirrorMode() === 'off')) { this.idleTicks = 0; if (this.msgIds.size) await this.finalize(); return }
 
     if (!working) {
       // Debounce the cap: only finalize after sustained idle, so a one-tick blip doesn't split the

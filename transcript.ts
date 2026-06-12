@@ -318,7 +318,7 @@ export function turnInProgress(file: string): boolean {
 }
 
 // The current turn's chronological feed of what Claude said and did — text narration and tool
-// calls interleaved in transcript order — for the hybrid mirror card. Subagent output skipped.
+// calls interleaved in transcript order — for the stream cards. Subagent output skipped.
 // `lines` is the net line delta of a file edit (+grew / −shrank; null for non-edit tools),
 // shown by the thoughts-stream tool summaries.
 export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null }

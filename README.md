@@ -52,7 +52,7 @@ formatted. Bot commands:
 | `/compact` | Compact the conversation to free up context |
 | `/cost` | Usage & cost breakdown |
 | `/context` | Token-context usage |
-| `/stream` | Live-activity card style: `thoughts` · `tools` · `hybrid` · `off` |
+| `/stream` | Live-activity card style: `thoughts` · `actions` · `off` |
 | `/diff` | The session's uncommitted changes — stat + chunked patch |
 | `/terminal` | Show recent terminal activity (40 lines) |
 | `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |

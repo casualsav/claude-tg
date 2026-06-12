@@ -24,7 +24,7 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts, type Activity, type FeedItem } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, accountLoggedIn, healAccountConfigs,
@@ -795,20 +795,19 @@ const RELAY_CONCLUDE_TICKS = 3
 let relayConcludeTicks = 0
 const auxConcludeTicks = new Map<string, number>()   // aux loop's per-file equivalent
 
-// How Claude's text reaches Telegram. Default 'hybrid'. Every mode sends only the turn's
-// conclusion block(s) as real messages; they differ only in the live self-editing card:
-//   'thoughts' — card shows only Claude's thoughts (💭 lines).
-//   'tools'    — card shows only tool calls (the legacy 'final' behavior; honors terminalMirror).
-//   'hybrid'   — card shows thoughts + tool calls interleaved.
+// How Claude's text reaches Telegram. Every mode sends only the turn's conclusion block(s) as
+// real messages; they differ only in the live self-editing card:
+//   'thoughts' — card shows Claude's thoughts (💭 quotes) with tool runs folded into summary lines.
+//   'actions'  — card shows tool calls only: collapsed history + the newest few as live detail
+//                rows (honors terminalMirror; the renamed 'tools' mode).
 //   'off'      — no live card at all, just the final message.
-// Legacy aliases: all/stream→thoughts, final→tools, live→hybrid.
-function replyMode(): 'thoughts' | 'tools' | 'hybrid' | 'off' {
+// Legacy aliases: all/stream→thoughts, final/tools→actions, hybrid/live→thoughts (hybrid is
+// retired — thoughts now carries the tool summaries that made it distinct).
+function replyMode(): 'thoughts' | 'actions' | 'off' {
   const v = loadAccess().replyMode as string | undefined
-  if (v === 'thoughts' || v === 'all' || v === 'stream') return 'thoughts'
-  if (v === 'tools' || v === 'final') return 'tools'
+  if (v === 'actions' || v === 'tools' || v === 'final') return 'actions'
   if (v === 'off') return 'off'
-  if (v === 'hybrid' || v === 'live') return 'hybrid'
-  return 'thoughts'   // default (unset) — new users start on /stream thoughts
+  return 'thoughts'   // thoughts/all/stream/hybrid/live, or unset (the default)
 }
 
 
@@ -4149,28 +4148,28 @@ bot.command('mcp', async ctx => {
 })
 
 // One-line descriptions of each stream mode, shared by /stream and the usage hint.
-const STREAM_DESC: Record<'thoughts' | 'tools' | 'hybrid' | 'off', string> = {
-  thoughts: 'a silent self-updating card of Claude’s thoughts, plus the conclusion block(s).',
-  tools: 'a silent self-updating card of tool calls, plus the conclusion block(s).',
-  hybrid: 'a silent self-updating card (live thoughts + tools), plus the conclusion block(s).',
+const STREAM_DESC: Record<'thoughts' | 'actions' | 'off', string> = {
+  thoughts: 'a silent self-updating card of Claude’s thoughts + tool summaries, plus the conclusion block(s).',
+  actions: 'a silent self-updating card of tool calls (collapsed history + live tail), plus the conclusion block(s).',
   off: 'just the final message — no live mirror.',
 }
 
-// /stream thoughts|tools|hybrid|off sets how Claude's text reaches you (default thoughts); bare shows it.
+// /stream thoughts|actions|off sets how Claude's text reaches you (default thoughts); bare shows it.
 bot.command('stream', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  if (arg === 'thoughts' || arg === 'tools' || arg === 'hybrid' || arg === 'off') {
-    const access = loadAccess(); access.replyMode = arg; saveAccess(access)
-    await ctx.reply(`✅ Stream mode changed to <b>${arg.charAt(0).toUpperCase() + arg.slice(1)}</b>`, { parse_mode: 'HTML' })
+  if (arg === 'thoughts' || arg === 'actions' || arg === 'tools' || arg === 'off') {   // 'tools' kept as a typed alias for muscle memory
+    const mode = arg === 'tools' ? 'actions' : arg
+    const access = loadAccess(); access.replyMode = mode; saveAccess(access)
+    await ctx.reply(`✅ Stream mode changed to <b>${mode.charAt(0).toUpperCase() + mode.slice(1)}</b>`, { parse_mode: 'HTML' })
     await respawnTerminalMirror()   // a mode change shouldn't leave the old card stranded above this confirmation
     return
   } else if (arg) {
-    await ctx.reply('Usage: <code>/stream thoughts | tools | hybrid | off</code>', { parse_mode: 'HTML' }); return
+    await ctx.reply('Usage: <code>/stream thoughts | actions | off</code>', { parse_mode: 'HTML' }); return
   }
   // Bare /stream — just report the current mode and how to change it.
   const m = replyMode()
-  await ctx.reply(`💬 Stream mode is <b>${m}</b> — ${STREAM_DESC[m]}\nChange with <code>/stream thoughts | tools | hybrid | off</code>.`, { parse_mode: 'HTML' })
+  await ctx.reply(`💬 Stream mode is <b>${m}</b> — ${STREAM_DESC[m]}\nChange with <code>/stream thoughts | actions | off</code>.`, { parse_mode: 'HTML' })
 })
 
 // ---- /md: create a markdown file in the active session's working directory ----
@@ -4873,8 +4872,8 @@ bot.on('callback_query:data', async ctx => {
     const a = loadAccess()
     if (setMatch[1] === 'replymode') {
       const m = replyMode()
-      // Cycle thoughts → tools → hybrid → off → thoughts.
-      a.replyMode = m === 'thoughts' ? 'tools' : m === 'tools' ? 'hybrid' : m === 'hybrid' ? 'off' : 'thoughts'
+      // Cycle thoughts → actions → off → thoughts.
+      a.replyMode = m === 'thoughts' ? 'actions' : m === 'actions' ? 'off' : 'thoughts'
       saveAccess(a)
       await respawnTerminalMirror()   // re-spawn the live card below the panel after a mode change
     } else if (setMatch[1] === 'pin') {
@@ -6941,7 +6940,7 @@ void (async () => {
               { command: 'account', description: 'Claude accounts — list, add, remove (multi-account)' },
               { command: 'restart', description: 'Exit and resume the current session (picks up config changes)' },
               { command: 'reset', description: 'Clear the current conversation in place' },
-              { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
+              { command: 'stream', description: 'How replies arrive: thoughts · actions · off' },
               { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
               { command: 'budget', description: 'Daily $ cap with warnings (/budget 20 · off)' },
               { command: 'rewind', description: 'Open the checkpoint picker (undo a turn\'s changes)' },
