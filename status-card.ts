@@ -213,7 +213,7 @@ export async function statusCardText(paneId: string | null): Promise<string> {
 // Quick-action buttons on the status card — same emojis as the card's own fields.
 export function statusKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('🧠 Model', 'st:model').text('🎚️ Effort', 'st:effort').row()
+    .text('🧠 Model', 'st:model').text('⚡ Effort', 'st:effort').row()
     .text('🕹️ Mode', 'st:mode').text('🗜️ Compact', 'st:compact').row()
     .text('💾 Context', 'st:context').text('💰 Cost', 'st:cost').row()
     .text('⚙️ Settings', 'st:settings').text('📌 Pin off', 'st:pinoff')

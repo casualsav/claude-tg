@@ -186,7 +186,7 @@ export function renderHybridMirror(feed: FeedItem[], done: boolean): string {
 
 // Split a narration block into its visual paragraphs (blank-line separated), keeping fenced
 // code blocks glued. On the card, paragraphs within one block render exactly like separate
-// thoughts (a blank line apart inside the blockquote), so the MIRROR_THOUGHTS window must count
+// thoughts (a blank line apart on the card), so the MIRROR_THOUGHTS window must count
 // PARAGRAPHS — counting feed items let a multi-paragraph block show 6+ visual thoughts.
 export function splitThoughtParagraphs(text: string): string[] {
   const out: string[] = []
@@ -214,7 +214,7 @@ export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
   while (body.length > 3500 && rendered.length > 1) { rendered.shift(); body = rendered.join('\n\n') }
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   if (!body) return done ? '✅ <b>Done</b>' : ''
-  const head = `<blockquote>💭 ${body}</blockquote>`   // thoughts shaded in a blockquote; ✅ Done stays outside it
+  const head = `<blockquote>💭 ${body}</blockquote>`   // thoughts shaded in a blockquote; ✅ Done stays outside it (tried plain — shaded reads better)
   return done ? `${head}\n\n✅ <b>Done</b>` : head
 }
 

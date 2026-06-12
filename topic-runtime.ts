@@ -349,17 +349,22 @@ export async function topicThreadFor(paneId: string | null): Promise<{ group: st
   return { group, thread: t.threadId }
 }
 
-// ---- Per-topic typing latch ----
-// DM mode holds typing through Claude's pre-first-token thinking with TypingPresence's startup
-// latch; topics only got a single sendChatAction on inbound, which Telegram expires after ~5s —
-// then nothing until the transcript shows turnInProgress (a completed assistant entry), so the
-// indicator went dark exactly while Claude was thinking. This is the topic-mode equivalent:
-// armed on inbound for the topic the message landed in, re-pinged every few seconds, ended by
-// observed work (the relay loops sustain typing from there), the relayed reply, or the cap.
-const TOPIC_TYPING_PING_MS = 4_000     // « Telegram's ~5s expiry
-const TOPIC_TYPING_GRACE_MS = 60_000   // same cap as TypingPresence.START_GRACE_MS — a no-reply
-                                       // message can't pin the indicator on
-const topicTypingPending = new Map<string, number>()   // `chat:thread` → latch deadline
+// ---- Per-topic typing (latch + work keep-alive) ----
+// DM mode's TypingPresence holds typing with an independent 2s ping timer over a rolling
+// keep-alive window. Topics mirror that model here, over one shared map of `chat:thread` →
+// window deadline: armTopicTyping (inbound latch, 60s cap, covers pre-first-token thinking)
+// and observeTopicTyping (work observed by a relay tick, rolling 8s window) both just push the
+// thread's window out; the timer re-pings every open window. The relay loops used to send the
+// chat action directly once per working tick instead — so a slow tick (tmux + transcript +
+// Telegram edits can exceed Telegram's ~5s expiry) or a mid-turn flicker of the transcript's
+// turn signal (the auto-continue gap) let the indicator drop and re-light. The timer is
+// independent of tick cadence, so neither can kill it now.
+const TOPIC_TYPING_PING_MS = 2_500     // « Telegram's ~5s expiry — same safety margin as TypingPresence
+const TOPIC_TYPING_GRACE_MS = 60_000   // inbound latch cap (matches TypingPresence.START_GRACE_MS) —
+                                       // a no-reply message can't pin the indicator on
+const TOPIC_TYPING_WORK_GRACE_MS = 8_000   // rolling keep-alive past the last observed work tick
+                                           // (matches TypingPresence.WORK_GRACE_MS)
+const topicTypingPending = new Map<string, number>()   // `chat:thread` → keep-alive deadline
 let topicTypingTimer: ReturnType<typeof setInterval> | null = null
 
 function pingTopicTyping(key: string): void {
@@ -371,9 +376,7 @@ function pingTopicTyping(key: string): void {
     { message_thread_id: thread === 'general' ? 1 : Number(thread) }, AbortSignal.timeout(1500)).catch(() => {})
 }
 
-export function armTopicTyping(chat: string, thread: number | 'general'): void {
-  topicTypingPending.set(`${chat}:${thread}`, Date.now() + TOPIC_TYPING_GRACE_MS)
-  pingTopicTyping(`${chat}:${thread}`)
+function ensureTopicTypingTimer(): void {
   if (!topicTypingTimer) topicTypingTimer = setInterval(() => {
     for (const [key, until] of topicTypingPending) {
       if (Date.now() > until) { topicTypingPending.delete(key); continue }
@@ -382,14 +385,32 @@ export function armTopicTyping(chat: string, thread: number | 'general'): void {
   }, TOPIC_TYPING_PING_MS)
 }
 
+export function armTopicTyping(chat: string, thread: number | 'general'): void {
+  topicTypingPending.set(`${chat}:${thread}`, Date.now() + TOPIC_TYPING_GRACE_MS)
+  pingTopicTyping(`${chat}:${thread}`)
+  ensureTopicTypingTimer()
+}
+
+// Work observed for a thread: extend its rolling keep-alive window. The timer does the actual
+// pinging — this is TypingPresence.observe() for topics. Ping immediately only when the window
+// was closed (turn start / re-light after a reply), so typing shows without waiting a tick.
+function observeTopicTyping(chat: string, thread: number | 'general'): void {
+  const key = `${chat}:${thread}`
+  const wasClosed = !topicTypingPending.has(key)
+  topicTypingPending.set(key, Date.now() + TOPIC_TYPING_WORK_GRACE_MS)
+  if (wasClosed) pingTopicTyping(key)
+  ensureTopicTypingTimer()
+}
+
 // The latch's job is done for this thread: work was observed (the relay loops take over) or the
 // reply landed (any further ping would re-light typing OVER the delivered answer).
 export function stopTopicTyping(chat: string, thread: number | 'general'): void {
   topicTypingPending.delete(`${chat}:${thread}`)
 }
 
-// Show "typing…" in a session's own topic while it works (topic mode). Telegram's action expires
-// after ~5s; the relay loops re-emit each tick (~1.5s) so it stays lit for the whole turn.
+// Show "typing…" in a session's own topic while it works (topic mode). Called by the relay
+// loops on each working tick; just extends the thread's keep-alive window — the typing timer
+// sustains the indicator independently of tick cadence.
 export async function emitTopicTyping(paneId: string | null): Promise<void> {
   const t = await topicThreadFor(paneId)
   if (!t) {
@@ -398,11 +419,9 @@ export async function emitTopicTyping(paneId: string | null): Promise<void> {
     const group = getGroupChatId()
     const anchor = getGeneralSession()
     if (!group || !anchor || !paneId || (await sessionForPane(paneId, false)) !== anchor) return
-    stopTopicTyping(group, 'general')
-    await bot.api.sendChatAction(group, 'typing', { message_thread_id: 1 }, AbortSignal.timeout(1500)).catch(() => {})
+    observeTopicTyping(group, 'general')
     return
   }
-  stopTopicTyping(t.group, t.thread)   // work observed — the relay ticks sustain typing from here
-  await bot.api.sendChatAction(t.group, 'typing', { message_thread_id: t.thread }, AbortSignal.timeout(1500)).catch(() => {})
+  observeTopicTyping(t.group, t.thread)
 }
 

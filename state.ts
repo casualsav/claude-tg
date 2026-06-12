@@ -8,6 +8,9 @@
 //
 // NOTE: reassigned scalar `let` flags (focus pointers, relay/mirror counters) still live in
 // daemon.ts; they migrate into their domain modules in a later phase.
+import { join } from 'node:path'
+import { existsSync } from 'node:fs'
+import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import type { DaemonToShim } from './common.ts'
 import type { Access, Session, PendingMultiSelect, FreeTextPrompt, ChatPrompt, ActiveShim } from './types.ts'
 import type { PaneWatcher } from './pane-io.ts'
@@ -62,7 +65,31 @@ export type ReplyTarget =
 export const replyTargets = new Map<string, ReplyTarget>()
 
 // ---- Relay tracking ----
-export const lastRelayedByFile = new Map<string, string>()
+// Persisted across restarts: this map used to be memory-only, so every deploy/crash re-primed
+// each transcript's cursor to its current tail — and a reply written during the restart window
+// (a deploy lands mid-turn constantly in dev) was silently swallowed, never relayed. Writing
+// through on set() and restoring at boot lets the relay loops resume from the true cursor and
+// ship anything that landed while the daemon was down. Debounced one tick; cursors for
+// transcripts deleted since the last run are dropped on load.
+const RELAY_CURSORS_FILE = join(STATE_DIR, 'relay-cursors.json')
+class PersistedCursorMap extends Map<string, string> {
+  private timer: ReturnType<typeof setTimeout> | null = null
+  override set(file: string, uuid: string): this {
+    super.set(file, uuid)
+    if (!this.timer) {
+      this.timer = setTimeout(() => {
+        this.timer = null
+        writeJsonFile(RELAY_CURSORS_FILE, Object.fromEntries(this))
+      }, 250)
+      this.timer.unref?.()
+    }
+    return this
+  }
+}
+export const lastRelayedByFile: Map<string, string> = new PersistedCursorMap()
+for (const [file, uuid] of Object.entries(readJsonFile<Record<string, string>>(RELAY_CURSORS_FILE, {}))) {
+  if (existsSync(file)) lastRelayedByFile.set(file, uuid)
+}
 
 // ---- Off-MCP panes ----
 export const offMcpPanes = new Set<string>()

@@ -956,7 +956,9 @@ async function auxRelayTick(): Promise<void> {
         // driven by the same transcript turn signal this loop already computes.
         await updateAuxMirror(pane, working).catch(() => {})
         if (!auxRelayPrimed.has(file)) {
-          lastRelayedByFile.set(file, latestFinalReply(file)?.uuid ?? '')
+          // A restored (persisted) cursor survives restarts — keep it, so a reply written during
+          // the restart window still relays. Only a never-seen transcript skips its existing tail.
+          if (!lastRelayedByFile.has(file)) lastRelayedByFile.set(file, latestFinalReply(file)?.uuid ?? '')
           auxRelayPrimed.add(file)
           continue
         }
