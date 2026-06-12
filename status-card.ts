@@ -222,8 +222,8 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   if (status) {
     // Usage group: the 5h/7d limit bars, then the cost/time data.
     const lim: string[] = []
-    if (status.h5) lim.push(`🕒 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ↻ ${status.h5.reset}`)
-    if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ↻ ${status.d7.reset}`)
+    if (status.h5) lim.push(`🕒 5h <code>${pinBar(status.h5.pct)}</code> ${status.h5.pct}%  ${status.h5.reset}`)
+    if (status.d7) lim.push(`📅 7d <code>${pinBar(status.d7.pct)}</code> ${status.d7.pct}%  ${status.d7.reset}`)
     const ct: string[] = []
     if (status.cost) ct.push(`💰 ${status.cost}`)
     if (status.sessionTime) ct.push(`⏱ ${status.sessionTime}`)
