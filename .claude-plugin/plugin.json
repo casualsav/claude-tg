@@ -1,7 +1,7 @@
 {
   "name": "telegram",
   "description": "Pocket Claude \u2014 drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
-  "version": "0.1.150",
+  "version": "0.1.151",
   "keywords": [
     "telegram",
     "messaging",

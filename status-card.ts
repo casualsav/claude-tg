@@ -175,7 +175,8 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   // dangling as a bare emoji at the end. Think is a bare ✻ — the worded "✻ think" up top
   // ellipsized the collapsed pin preview, but one glyph fits (it also stays in the body).
   // Single-space packing throughout — double spacing pushed the context % off the preview.
-  const effortBadge = status?.effort ? ` ⚡${escapeHtml(status.effort)}` : ''
+  // Think + effort read as one cluster ("✻⚡high") — no space between the glyph and the bolt.
+  const effortBadge = status?.effort ? `${status?.think ? '' : ' '}⚡${escapeHtml(status.effort)}` : ''
   const modeBadgeStr = mode === '—' ? '' : ` ${escapeHtml(mode)}`
   const thinkBadge = status?.think ? ' ✻' : ''
   const stats = [
