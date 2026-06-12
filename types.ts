@@ -24,12 +24,11 @@ export type Access = {
   terminalMirror?: 'tools' | 'digest' | 'off' | boolean
   sessionPin?: boolean
   shipButtons?: boolean   // post Diff/Commit/Push/PR buttons after turns that dirty the git tree (default off)
-  digestAt?: string       // daily all-sessions digest, local "HH:MM" (unset = off)
   budgetDaily?: number    // daily $ cap — warn at 80% and 100% of summed session cost growth (unset = off)
   topicOnEnd?: 'close' | 'delete'   // ended session's topic: close (keep history, default) or delete (tab disappears)
   scheduleTz?: string     // IANA timezone for recurring /schedule wall-clock times (default America/Los_Angeles)
   batchAllow?: boolean    // 2+ permission prompts in one turn offer "Allow all this turn" (default on)
-  tts?: { mode: 'off' | 'digest' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
+  tts?: { mode: 'off' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   replyMode?: 'thoughts' | 'tools' | 'hybrid' | 'off' | 'all' | 'final' | 'stream' | 'live'   // all/final/stream/live are legacy aliases
 }

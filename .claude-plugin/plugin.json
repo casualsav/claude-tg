@@ -1,7 +1,7 @@
 {
   "name": "telegram",
-  "description": "Telegram channel for Claude Code \u2014 messaging bridge with built-in access control. Manage pairing, allowlists, and policy via /telegram:access.",
-  "version": "0.1.126",
+  "description": "Pocket Claude \u2014 drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
+  "version": "0.1.131",
   "keywords": [
     "telegram",
     "messaging",

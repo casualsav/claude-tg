@@ -28,8 +28,8 @@ getting the bot token from [@BotFather](https://t.me/BotFather) and the single C
 restart.
 
 ```sh
-gh repo clone casualsav/better-claude-telegram   # private/preview: uses your gh auth
-cd better-claude-telegram && claude              # then: "set up the Telegram bridge"
+gh repo clone casualsav/pocket-claude   # private/preview: uses your gh auth
+cd pocket-claude && claude              # then: "set up the Telegram bridge"
 ```
 
 > While the repo is private, `git clone` over HTTPS fails with `could not read Username`. Use
@@ -88,7 +88,7 @@ Prefer to do it by hand? [`off-mcp/INSTALL.md`](./off-mcp/INSTALL.md) lists ever
   as do two identical conclusions in a row or an injected prompt that never becomes a turn.
 - **Voice replies (TTS)** — Claude's replies can arrive as voice notes too: free local
   Piper (auto-installed with ffmpeg, 5 curated voices to pick from) or hosted OpenAI /
-  ElevenLabs. Modes off · digest-only · all (`/voice on|off`; details in `/settings`).
+  ElevenLabs. Modes off · all (`/voice on|off`; details in `/settings`).
   Speaks text Claude already wrote — zero extra usage.
 - **Edit to correct** — edit your most recent Telegram message and the session receives
   it as a correction replacing the original.
@@ -152,12 +152,12 @@ Telegram  ⇄  daemon.ts  ⇄  shim.ts (MCP server)  ⇄  Claude Code session
 This is a Claude Code plugin. Add it and install:
 
 ```
-/plugin marketplace add casualsav/better-claude-telegram
-/plugin install telegram@better-claude-plugins
+/plugin marketplace add casualsav/pocket-claude
+/plugin install telegram@pocket-claude
 ```
 
 (The `marketplace add` argument is the repo path — update it if you rename the
-repo. The `@better-claude-plugins` suffix is the marketplace name from
+repo. The `@pocket-claude` suffix is the marketplace name from
 `.claude-plugin/marketplace.json` and is independent of the repo name.)
 
 ## Launch
@@ -165,12 +165,12 @@ repo. The `@better-claude-plugins` suffix is the marketplace name from
 Channels are a research-preview feature, and only channels from the official
 `claude-plugins-official` marketplace are on Claude Code's approved allowlist. A
 custom channel like this one is blocked until you load it explicitly — otherwise
-you'll see `plugin:telegram@better-claude-plugins • not on the approved channels
+you'll see `plugin:telegram@pocket-claude • not on the approved channels
 allowlist`. Launch Claude Code with the development flag (requires Claude Code
 v2.1.80+):
 
 ```bash
-claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins
+claude --dangerously-load-development-channels plugin:telegram@pocket-claude
 ```
 
 That loads and activates the channel for the session (after a one-time
@@ -178,14 +178,14 @@ confirmation prompt). To also skip per-tool permission prompts, add
 `--dangerously-skip-permissions`:
 
 ```bash
-claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions
+claude --dangerously-load-development-channels plugin:telegram@pocket-claude --dangerously-skip-permissions
 ```
 
 Since you'll run this every session, add an alias. Either drop it in your shell
 rc by hand:
 
 ```bash
-alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions'
+alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@pocket-claude --dangerously-skip-permissions'
 ```
 
 …or run the bundled one-time setup script, which appends that alias to your
@@ -248,7 +248,6 @@ formatted. Bot commands:
 | `/find <text>` | Search every session's conversation; tap a hit to resume |
 | `/queue <prompt>` | Per-session backlog — runs when the session goes idle (`/queue clear`) |
 | `/loop <goal>` | Re-run a goal until its check passes (`status` · `stop` · `stop now` · `resume`) |
-| `/digest` | All-sessions digest now, or daily (`/digest 08:00` · `off`) |
 | `/budget` | Daily $ cap with 80%/100% warnings (`/budget 20` · `off`) |
 | `/rewind` | Open Claude Code's checkpoint picker as tappable buttons |
 | `/resume` | List recent sessions with last-activity times; tap one to relaunch (`claude --resume`) |
@@ -324,13 +323,13 @@ Keep that state instead if you're just reinstalling/upgrading and want to stay
 paired. The skill then prints the plugin-removal commands it can't run itself:
 
 ```
-/plugin uninstall telegram@better-claude-plugins
-/plugin marketplace remove better-claude-plugins
+/plugin uninstall telegram@pocket-claude
+/plugin marketplace remove pocket-claude
 ```
 
 Plugins are cached, so to guarantee a fresh fetch on reinstall, also clear
-`~/.claude/plugins/marketplaces/better-claude-plugins` and
-`~/.claude/plugins/cache/better-claude-plugins`, then re-add the marketplace and
+`~/.claude/plugins/marketplaces/pocket-claude` and
+`~/.claude/plugins/cache/pocket-claude`, then re-add the marketplace and
 reinstall. Restart Claude Code to apply.
 
 ## Security

@@ -204,10 +204,10 @@ export async function statusCardText(paneId: string | null): Promise<string> {
 // Quick-action buttons on the status card — same emojis as the card's own fields.
 export function statusKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
-    .text('⚙️ Settings', 'st:settings').text('🧠 Model', 'st:model').row()
-    .text('🕹️ Mode', 'st:mode').text('💾 Context', 'st:context').row()
-    .text('🗜️ Compact', 'st:compact').text('💰 Cost', 'st:cost').row()
-    .text('🧹 Clear', 'st:clear').text('📌 Pin off', 'st:pinoff')
+    .text('🧠 Model', 'st:model').text('🎚️ Effort', 'st:effort').row()
+    .text('🕹️ Mode', 'st:mode').text('🗜️ Compact', 'st:compact').row()
+    .text('💾 Context', 'st:context').text('💰 Cost', 'st:cost').row()
+    .text('⚙️ Settings', 'st:settings').text('📌 Pin off', 'st:pinoff')
 }
 
 // NB: topic cards must stay keyboard-less — Telegram renders a pinned message's first inline

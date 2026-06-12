@@ -17,8 +17,13 @@ import { dirname, join } from 'node:path'
 const CHANNELS_DIR = join(homedir(), '.claude', 'channels')
 
 // Newest plugin-cache copy of daemon.ts (version dirs sort ascending; take the last).
+// Marketplace id: pocket-claude after the rename; falls back to the old id on machines that
+// haven't re-added the marketplace yet.
+const MKT_IDS = ['pocket-claude', 'better-claude-plugins']
 function findDaemon(): string | null {
-  const base = join(homedir(), '.claude', 'plugins', 'cache', 'better-claude-plugins', 'telegram')
+  const cacheRoot = join(homedir(), '.claude', 'plugins', 'cache')
+  const base = MKT_IDS.map(n => join(cacheRoot, n, 'telegram')).find(p => existsSync(p))
+    ?? join(cacheRoot, MKT_IDS[0], 'telegram')
   let versions: string[]
   // Only real version dirs (x.y.z) — never a backup/temp dir like 0.0.6.bak-… or .build-…,
   // which would otherwise sort highest and get launched. Numeric sort so 0.0.10 > 0.0.9.

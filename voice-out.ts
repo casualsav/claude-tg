@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os'
 import { STATE_DIR, tConfig } from './common.ts'
 import { exec } from './proc.ts'
 
-export type TtsMode = 'off' | 'digest' | 'all'
+export type TtsMode = 'off' | 'all'
 export type TtsEngine = 'piper' | 'openai' | 'elevenlabs'
 
 const PIPER_DIR = join(STATE_DIR, 'piper')

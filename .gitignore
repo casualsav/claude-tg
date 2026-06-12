@@ -9,3 +9,9 @@ __pycache__/
 
 # graphify analysis output
 graphify-out/
+*.log
+*.bak
+.DS_Store
+
+# local Claude Code project settings (never ship operator-specific config)
+.claude/settings.local.json

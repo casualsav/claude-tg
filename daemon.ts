@@ -31,7 +31,7 @@ import {
   MAIN_ACCOUNT, type Account,
 } from './accounts.ts'
 import { exec, sleep, hashText } from './proc.ts'
-import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, type GhAccount } from './github.ts'
+import { ghAccounts, ghInstalled, ghSwitch, ghLogout, runGhLogin, provisionGh, type GhAccount } from './github.ts'
 import {
   capturePane, paneAlive, sendKeys, sendKeysLiteral, navigateDown, waitForSettle,
   autoSizeWindowOf, paneCommand, paneCwd, PaneWatcher,
@@ -636,7 +636,8 @@ function provisionOffMcpTooling(): void {
 import { readdirSync, existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-const base = join(homedir(), '.claude', 'plugins', 'cache', 'better-claude-plugins', 'telegram')
+const root = join(homedir(), '.claude', 'plugins', 'cache')
+const base = ['pocket-claude', 'better-claude-plugins'].map(n => join(root, n, 'telegram')).find(p => existsSync(p)) ?? join(root, 'pocket-claude', 'telegram')
 let t = null
 try { const vs = readdirSync(base).filter(v => /^\\d+\\.\\d+\\.\\d+$/.test(v)).sort((a, b) => a.localeCompare(b, undefined, { numeric: true })); for (const v of vs.reverse()) { const p = join(base, v, 'ensure-daemon.ts'); if (existsSync(p)) { t = p; break } } } catch {}
 if (t) await import(t)
@@ -2709,16 +2710,16 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
 // 1024-char caption limit — the parsed text, not the HTML tags, counts toward it.
 function startHelpText(paired: boolean): string {
   const guide =
-    `✦ <b>Claude Command Center</b>\n` +
-    `Drive your Claude Code sessions from Telegram.\n\n` +
+    `✦ <b>Pocket Claude</b>\n` +
+    `Claude Code in your pocket — drive every session from Telegram.\n\n` +
     `💬 Send text, 📷 photos, 📎 files, 🎙️ voice — the reply comes straight back\n` +
-    `👥 <code>/bind</code> a forum group — create a topic to spawn a session (📁 folder or 🌿 worktree)\n` +
+    `👥 <code>/bind</code> a forum group — each session gets its own topic (📁 folder or 🌿 worktree); your main session lives in General (📌 <code>/claim</code>)\n` +
+    `📍 Pinned status card — Model · Effort · Mode · Compact · Context · Cost in one tap\n` +
     `🧠 <code>/model</code> · 🕹️ <code>/mode</code> · 🎚️ <code>/effort</code> · 📡 <code>/stream</code> live activity\n` +
     `✅ Permission taps — ⚡ or allow all this turn\n` +
-    `📝 <code>/diff</code> + Commit · Push · PR buttons — ship without a terminal\n` +
+    `📝 <code>/diff</code> + Commit · Push · PR buttons · 🐙 GitHub sign-in from /settings (gh installs itself)\n` +
     `🔎 <code>/find</code> any session · ⏰ <code>/queue @reset</code> · 🔁 <code>/schedule every 09:00</code> · ⏪ <code>/rewind</code>\n` +
-    `♾️ <code>/loop</code> a goal on repeat until its check passes (with iteration + budget caps)\n` +
-    `🌅 <code>/digest</code> daily report · 💸 <code>/budget</code> cap · 👤 <code>/account</code> · 🩺 <code>/health</code>\n` +
+    `♾️ <code>/loop</code> a goal until its check passes · 💸 <code>/budget</code> cap · 👤 <code>/account</code>\n` +
     `🔊 Voice replies (free local TTS) · ✏️ edit your last message to correct it\n` +
     `🛑 <code>/stop</code> to interrupt · ⚙️ <code>/settings</code> for the rest\n\n` +
     `🖼️ Set this image as my profile picture — save it, then @BotFather → Edit Bot → Botpic.`
@@ -2736,9 +2737,9 @@ async function sendStartHelp(ctx: Context): Promise<void> {
   const caption = startHelpText(paired)
   // remove_keyboard clears the retired docked control bar for anyone who still has it stuck on
   // their client (its taps would otherwise leak the button label to Claude as a plain message).
-  // Lead with the Claude starburst (bundled asset) — doubles as the suggested bot profile picture.
+  // Lead with the Pocket Claude crab (bundled asset) — doubles as the suggested bot profile picture.
   try {
-    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'claude.jpg')), { caption, parse_mode: 'HTML', reply_markup: { remove_keyboard: true } })
+    await ctx.replyWithPhoto(new InputFile(join(import.meta.dir, 'assets', 'pocket-claude.jpg')), { caption, parse_mode: 'HTML', reply_markup: { remove_keyboard: true } })
   } catch {
     await ctx.reply(caption, { parse_mode: 'HTML', link_preview_options: { is_disabled: true }, reply_markup: { remove_keyboard: true } })   // asset missing (stale cache) → text only
   }
@@ -3123,82 +3124,6 @@ function cleanPaneTail(raw: string, maxLines: number): string {
   return lines.join('\n')
 }
 
-// /terminal [N] — dump the last N lines of the terminal (default 40, capped) so you can
-// catch up on recent session activity. Read-only: just captures the pane scrollback.
-// ---- Morning digest (ROADMAP #4) ----
-// One card across every live session: state (working / waiting on you / idle), cost, last
-// activity — plus each account's limit burn. /digest renders now; /digest 08:00 schedules it
-// daily (server-local time); /digest off stops it.
-async function digestText(): Promise<string> {
-  const lines: string[] = []
-  for (const pane of [...offMcpPanes]) {
-    try {
-      if (!(await paneAlive(pane))) continue
-      const cwd = await paneCwd(pane).catch(() => null)
-      const sid = await sessionForPane(pane, false)
-      const t = sid ? getTopicBySession(sid) : null
-      const name = t?.name ?? (cwd ? (cwd.split('/').filter(Boolean).pop() ?? cwd) : pane)
-      const cap = await capturePane(pane).catch(() => '')
-      const st = cap ? parseStatusline(cap) : null
-      const file = await transcriptForPane(pane, cwd)
-      const working = file ? turnInProgress(file) : false
-      const blocked = cap ? !!(detectUserPrompt(cap) || detectPermissionPrompt(cap)) : false
-      let last = 0
-      try { if (file) last = statSync(file).mtimeMs } catch {}
-      const state = blocked ? '⛔ <b>waiting on you</b>' : working ? '⚙️ working' : '💤 idle'
-      lines.push(`• <b>${escapeHtml(name)}</b> — ${state}${st?.cost ? ` · 💰 ${st.cost}` : ''}${last ? ` · ${fmtAgo(last)}` : ''}`)
-    } catch { /* pane vanished mid-render */ }
-  }
-  const acct: string[] = []
-  for (const a of listAccounts()) {
-    const snap = readUsageSnapshot(undefined, a)
-    if (!snap) continue
-    const h5 = snap.fiveHour ? `🕒 ${Math.round(snap.fiveHour.pct)}%` : ''
-    const d7 = snap.sevenDay ? `📅 ${Math.round(snap.sevenDay.pct)}%` : ''
-    if (h5 || d7) acct.push(`👤 ${escapeHtml(a.name)} — ${[h5, d7].filter(Boolean).join(' · ')}`)
-  }
-  return `🗞 <b>Digest</b>\n\n${lines.join('\n') || 'No live sessions.'}${acct.length ? `\n\n${acct.join('\n')}` : ''}`
-}
-
-async function sendDigest(): Promise<void> {
-  const text = await digestText()
-  const dests = isTopicMode() && getGroupChatId() ? [getGroupChatId()!] : loadAccess().allowFrom
-  for (const c of dests) await bot.api.sendMessage(c, text, { parse_mode: 'HTML' }).catch(() => {})
-  const ttsMode = loadAccess().tts?.mode
-  if (ttsMode === 'digest' || ttsMode === 'all') void sendTtsVoice(text, dests.map(chat => ({ chat })))
-}
-
-let digestTimer: ReturnType<typeof setTimeout> | null = null
-function armDigest(): void {
-  if (digestTimer) { clearTimeout(digestTimer); digestTimer = null }
-  const at = loadAccess().digestAt
-  const m = at ? /^(\d{1,2}):(\d{2})$/.exec(at) : null
-  if (!m) return
-  const next = new Date()
-  next.setHours(+m[1], +m[2], 0, 0)
-  if (next.getTime() <= Date.now()) next.setDate(next.getDate() + 1)
-  digestTimer = setTimeout(() => { void sendDigest(); armDigest() }, next.getTime() - Date.now())
-  digestTimer.unref?.()
-}
-
-bot.command('digest', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  const arg = (ctx.match ?? '').toString().trim().toLowerCase()
-  const a = loadAccess()
-  if (arg === 'off') {
-    a.digestAt = undefined; saveAccess(a); armDigest()
-    await ctx.reply('🗞 Daily digest off.')
-    return
-  }
-  if (/^\d{1,2}:\d{2}$/.test(arg)) {
-    a.digestAt = arg; saveAccess(a); armDigest()
-    await ctx.reply(`🗞 Daily digest scheduled for ${arg} (server time). <code>/digest off</code> to stop.`, { parse_mode: 'HTML' })
-    return
-  }
-  if (arg) { await ctx.reply('Usage: <code>/digest</code> (now) · <code>/digest 08:00</code> (daily) · <code>/digest off</code>', { parse_mode: 'HTML' }); return }
-  await ctx.reply(await digestText(), { parse_mode: 'HTML' })
-})
-
 // ---- Budget guardrail (ROADMAP #7) ----
 // Daily $ cap, warn-only (80% and at the cap; no auto-pause — interrupting work the user asked
 // for is worse than a loud ping). Spend = today's GROWTH of each session's cumulative statusline
@@ -3440,6 +3365,8 @@ bot.command('diff', async ctx => {
   await sendDiff(String(ctx.chat!.id), t.paneId, typeof t.replyThread === 'number' ? t.replyThread : undefined)
 })
 
+// /terminal [N] — dump the last N lines of the terminal (default 40, capped) so you can
+// catch up on recent session activity. Read-only: just captures the pane scrollback.
 bot.command('terminal', async ctx => {
   if (!dmCommandGate(ctx)) return
   const t = await commandTarget(ctx)
@@ -3801,12 +3728,19 @@ function voiceModelKeyboard(): InlineKeyboard {
 }
 // gh status pings the GitHub API (can take seconds), so the settings line renders from a cache
 // that refreshes in the background on /settings open; the GitHub panel itself reads live.
-let ghAccountsCache: GhAccount[] | null = null
+let ghAccountsCache: GhAccount[] | null = null   // null = not scanned yet
+let ghMissing = false                            // gh binary absent → panel offers 📦 self-install
+async function refreshGh(): Promise<GhAccount[]> {
+  ghMissing = !(await ghInstalled())
+  ghAccountsCache = ghMissing ? [] : await ghAccounts().catch(() => [])
+  return ghAccountsCache
+}
 // Startup scan: pick up logins that already exist on the machine (gh's hosts.yml and any
 // GH_TOKEN/GITHUB_TOKEN env login both surface via `gh auth status`), so the panel and the
 // settings line are populated before anyone opens them.
-void ghAccounts().then(a => { ghAccountsCache = a }).catch(() => {})
+void refreshGh()
 function ghSummary(): string {
+  if (ghMissing) return 'not installed'
   if (ghAccountsCache === null) return '…'
   if (ghAccountsCache.length === 0) return 'not logged in'
   const active = ghAccountsCache.find(g => g.active) ?? ghAccountsCache[0]
@@ -3817,25 +3751,23 @@ function settingsText(): string {
   return `⚙️ <b>Settings</b>\n\n` +
     `👤 Accounts — <b>${listAccounts().length}</b>\n` +
     `🐙 GitHub — <b>${escapeHtml(ghSummary())}</b>\n` +
-    `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n` +
     `⚡ Batch allow — <b>${a.batchAllow !== false ? 'on' : 'off'}</b>\n` +
     `🚢 Ship buttons — <b>${a.shipButtons === true ? 'on' : 'off'}</b>\n` +
     `🎙️ Voice transcription — <b>${transcribeStatus()}</b>\n` +
     `🔊 Voice replies — <b>${a.tts?.mode && a.tts.mode !== 'off' ? `${a.tts.mode} · ${a.tts.engine}` : 'off'}</b>\n` +
     `💬 Stream — <b>${replyMode()}</b>\n` +
-    `🗞 Daily digest — <b>${a.digestAt ?? 'off'}</b>\n\n` +
+    `📌 Pinned message — <b>${a.sessionPin !== false ? 'on' : 'off'}</b>\n\n` +
     `Tap to change:`
 }
 function settingsKeyboard(): InlineKeyboard {
   return new InlineKeyboard()
     .text('👤 Accounts', 'acct:panel').text('🐙 GitHub', 'gh:panel').row()
-    .text('📌 Pin', 'set:pin')
     .text('⚡ Batch allow', 'set:batch').text('🚢 Ship buttons', 'set:ship').row()
     .text('🎙️ Voice transcription', 'set:voice').text('🔊 Voice replies', 'set:tts').row()
-    .text('💬 Stream', 'set:replymode').text('🗞 Daily digest', 'set:digest')
+    .text('💬 Stream', 'set:replymode').text('📌 Pin', 'set:pin')
 }
 
-// Voice-replies sub-panel (ROADMAP #15): mode off/digest/all + engine piper/openai/elevenlabs.
+// Voice-replies sub-panel (ROADMAP #15): mode off/all + engine piper/openai/elevenlabs.
 function ttsText(): string {
   const t = loadAccess().tts
   const mode = t?.mode ?? 'off', eng = t?.engine ?? 'piper'
@@ -3851,7 +3783,7 @@ function ttsKeyboard(): InlineKeyboard {
   const m = (label: string, v: string) => (mode === v ? `● ${label}` : label)
   const e = (label: string, v: string) => (eng === v ? `● ${label}` : label)
   const kb = new InlineKeyboard()
-    .text(m('🔇 Off', 'off'), 'tts:mode:off').text(m('🗞 Digest', 'digest'), 'tts:mode:digest').text(m('💬 All', 'all'), 'tts:mode:all').row()
+    .text(m('🔇 Off', 'off'), 'tts:mode:off').text(m('💬 All', 'all'), 'tts:mode:all').row()
     .text(e('🆓 Piper', 'piper'), 'tts:eng:piper').text(e('☁️ OpenAI', 'openai'), 'tts:eng:openai').text(e('☁️ 11Labs', 'elevenlabs'), 'tts:eng:elevenlabs').row()
   if (eng === 'piper') {
     const cur = t?.voice ?? DEFAULT_PIPER_VOICE
@@ -3863,7 +3795,7 @@ function ttsKeyboard(): InlineKeyboard {
 }
 bot.command('settings', async ctx => {
   if (!dmCommandGate(ctx)) return
-  void ghAccounts().then(a => { ghAccountsCache = a }).catch(() => {})   // warm the 🐙 summary for next render
+  void refreshGh()   // warm the 🐙 summary for the next render
   await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
 })
 
@@ -3903,7 +3835,7 @@ bot.command('health', async ctx => {
 })
 
 // /voice on|off — quick toggle for voice replies (TTS); bare shows status. `on` = every reply
-// speaks (mode 'all'); digest-only mode and the engine live in /settings → 🔊 Voice replies.
+// speaks (mode 'all'); the engine lives in /settings → 🔊 Voice replies.
 bot.command('voice', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
@@ -3929,7 +3861,7 @@ bot.command('voice', async ctx => {
   const t = loadAccess().tts
   await ctx.reply(
     `🔊 Voice replies are <b>${t?.mode && t.mode !== 'off' ? `${t.mode} · ${t.engine}` : 'off'}</b>.\n` +
-    'Toggle with <code>/voice on</code> | <code>off</code>; engine &amp; digest-only mode in /settings → 🔊 Voice replies.',
+    'Toggle with <code>/voice on</code> | <code>off</code>; engine in /settings → 🔊 Voice replies.',
     { parse_mode: 'HTML' })
 })
 
@@ -4354,12 +4286,10 @@ function accountsPanelKeyboard(): InlineKeyboard {
 // The GitHub panel (settings → 🐙 GitHub): gh CLI accounts, with switch/logout per account and
 // the device-code login flow behind ➕. Reads gh live (and refreshes the settings-line cache).
 async function ghPanelText(): Promise<string> {
-  if (!(await ghInstalled())) {
-    ghAccountsCache = []
-    return `🐙 <b>GitHub</b>\n\nThe <code>gh</code> CLI isn't installed on the host — install it (<code>https://cli.github.com</code>), then reopen this panel.`
+  const accounts = await refreshGh()
+  if (ghMissing) {
+    return `🐙 <b>GitHub</b>\n\nThe <code>gh</code> CLI isn't on this machine yet — tap 📦 and I'll install it for you (~12MB, no root needed).`
   }
-  const accounts = await ghAccounts()
-  ghAccountsCache = accounts
   const lines = accounts.map(a => `${a.active ? '●' : '○'} <b>${escapeHtml(a.user)}</b> — ${escapeHtml(a.host)}${a.active ? ' (active)' : ''}`)
   return `🐙 <b>GitHub</b> — gh CLI accounts\n\n${lines.length ? lines.join('\n') : 'Not logged in to any account.'}\n\n` +
     `➕ starts a sign-in: you get a one-time code and a link here — open the link on any device, ` +
@@ -4368,6 +4298,9 @@ async function ghPanelText(): Promise<string> {
 }
 function ghPanelKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard()
+  if (ghMissing) {   // see ghPanelText — offer the self-install
+    return kb.text('📦 Install gh', 'gh:install').text('‹ Back', 'gh:back')
+  }
   for (const a of ghAccountsCache ?? []) {
     if (a.host !== 'github.com') continue   // switch/logout below are pinned to github.com
     if (!a.active) kb.text(`🔁 ${a.user}`, `gh:switch:${a.user}`)
@@ -4533,14 +4466,15 @@ const TOPIC_SWEEP_MS = 2 * 60_000
 bot.on('callback_query:data', async ctx => {
   const data = ctx.callbackQuery.data
 
-  // Pinned-message quick actions → the same pickers as /sessions, /model, /mode, /settings.
-  if (data === 'st:model' || data === 'st:mode' || data === 'st:settings') {
+  // Pinned-message quick actions → the same pickers as /model, /effort, /mode, /settings.
+  if (data === 'st:model' || data === 'st:effort' || data === 'st:mode' || data === 'st:settings') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
       return
     }
     await ctx.answerCallbackQuery().catch(() => {})
     if (data === 'st:model') await doModelPicker(ctx)
+    else if (data === 'st:effort') await doEffortPicker(ctx)
     else if (data === 'st:mode') await doModePicker(ctx)
     else await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
     return
@@ -4571,7 +4505,8 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // Status-card session actions → /compact (relay) and /clear (confirm + reset).
+  // Status-card session action → /compact (relay). st:clear stays handled for cards sent by
+  // older versions: a stale pin's 🧹 still resets rather than dead-ending.
   if (data === 'st:compact' || data === 'st:clear') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4606,7 +4541,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // /settings panel toggles → flip the setting and re-render the panel in place.
-  const setMatch = /^set:(pin|replymode|ship|digest|voice|batch|tts)$/.exec(data)
+  const setMatch = /^set:(pin|replymode|ship|voice|batch|tts)$/.exec(data)
   if (setMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4640,18 +4575,6 @@ bot.on('callback_query:data', async ctx => {
     } else if (setMatch[1] === 'batch') {
       a.batchAllow = a.batchAllow === false                 // flip (default on)
       saveAccess(a)
-    } else if (setMatch[1] === 'digest') {
-      // Set → tap turns it off; off → force-reply asks for the daily time.
-      if (a.digestAt) {
-        a.digestAt = undefined; saveAccess(a); armDigest()
-      } else {
-        const thread = ctx.callbackQuery.message?.message_thread_id
-        const sent = await bot.api.sendMessage(String(ctx.chat!.id),
-          '🗞 What time each day should the digest arrive? Reply like <code>08:00</code> (server time).',
-          { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}), reply_markup: { force_reply: true, input_field_placeholder: '08:00' } }).catch(() => null)
-        if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'digesttime' })
-        return   // panel re-renders once the time lands
-      }
     }
     await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
     return
@@ -4709,7 +4632,7 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // GitHub sub-panel (settings → 🐙 GitHub): login (device-code relay), switch, logout.
-  const ghMatch = /^gh:(panel|back|add|switch:(\S+)|rm:(\S+))$/.exec(data)
+  const ghMatch = /^gh:(panel|back|add|install|switch:(\S+)|rm:(\S+))$/.exec(data)
   if (ghMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4718,6 +4641,18 @@ bot.on('callback_query:data', async ctx => {
     if (ghMatch[1] === 'back') {
       await ctx.answerCallbackQuery().catch(() => {})
       await ctx.editMessageText(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() }).catch(() => {})
+      return
+    }
+    if (ghMatch[1] === 'install') {
+      // Self-install gh (binary into the state dir) — the user never touches a terminal.
+      await ctx.answerCallbackQuery({ text: 'Installing…' }).catch(() => {})
+      await ctx.editMessageText('📦 Installing the GitHub CLI (~12MB)…').catch(() => {})
+      try { await provisionGh() } catch (e) {
+        await ctx.editMessageText(`❌ Couldn't install gh: ${escapeHtml(String((e as Error)?.message ?? e).slice(0, 200))}`,
+          { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('🔁 Retry', 'gh:install').text('‹ Back', 'gh:back') }).catch(() => {})
+        return
+      }
+      await ctx.editMessageText(await ghPanelText(), { parse_mode: 'HTML', reply_markup: ghPanelKeyboard() }).catch(() => {})
       return
     }
     if (ghMatch[1] === 'add') {
@@ -4744,7 +4679,7 @@ bot.on('callback_query:data', async ctx => {
         await edit(res.ok
           ? `✅ GitHub: logged in${res.user ? ` as <b>${escapeHtml(res.user)}</b>` : ''}.`
           : `❌ GitHub login failed: ${escapeHtml(res.error)}`)
-        ghAccountsCache = await ghAccounts().catch(() => ghAccountsCache)
+        await refreshGh()
       })()
       return
     }
@@ -4763,7 +4698,7 @@ bot.on('callback_query:data', async ctx => {
 
   // Voice-transcription sub-panel → switch backend (live; daemon reads .env per voice note).
   // Voice-replies sub-panel taps: mode/engine selection + provisioning side effects.
-  const ttsMatch = /^tts:(?:mode:(off|digest|all)|eng:(piper|openai|elevenlabs)|pv:(\d)|(back))$/.exec(data)
+  const ttsMatch = /^tts:(?:mode:(off|all)|eng:(piper|openai|elevenlabs)|pv:(\d)|(back))$/.exec(data)
   if (ttsMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
       await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
@@ -4776,7 +4711,7 @@ bot.on('callback_query:data', async ctx => {
     }
     const a = loadAccess()
     const tts = a.tts ?? { mode: 'off' as const, engine: 'piper' as const }
-    if (ttsMatch[1]) tts.mode = ttsMatch[1] as 'off' | 'digest' | 'all'
+    if (ttsMatch[1]) tts.mode = ttsMatch[1] as 'off' | 'all'
     if (ttsMatch[2]) tts.engine = ttsMatch[2] as TtsEngine
     if (ttsMatch[3] && PIPER_VOICES[Number(ttsMatch[3])]) tts.voice = PIPER_VOICES[Number(ttsMatch[3])].id
     a.tts = tts
@@ -6048,21 +5983,6 @@ bot.on('message:text', async ctx => {
             { parse_mode: 'HTML' })
           return
         }
-        // Daily digest time (settings → 🗞 Digest): validate HH:MM, schedule, confirm.
-        case 'digesttime': {
-          const m = /^(\d{1,2}):(\d{2})$/.exec(text.trim())
-          if (!m || +m[1] > 23 || +m[2] > 59) {
-            const again = await ctx.reply('❌ That doesn\'t look like a time — reply like <code>08:00</code>.',
-              { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: '08:00' } }).catch(() => null)
-            if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
-            return
-          }
-          const a2 = loadAccess()
-          a2.digestAt = `${m[1].padStart(2, '0')}:${m[2]}`
-          saveAccess(a2); armDigest()
-          await ctx.reply(`🗞 Daily digest scheduled for ${a2.digestAt} (server time). Turn off in /settings or with /digest off.`)
-          return
-        }
         // API key for a hosted TTS engine — stored in .env, the key message deleted from chat.
         case 'ttskey': {
           const key = text.trim()
@@ -6573,8 +6493,7 @@ setInterval(() => void sweepPermStorms(), 5_000).unref()
 setTimeout(() => void sweepUpdateChecks(), 5 * 60_000).unref()        // once shortly after boot…
 setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then daily
 
-// Daily digest (if scheduled) + budget tracking.
-armDigest()
+// Budget tracking.
 setInterval(() => void sweepBudget(), BUDGET_SWEEP_MS).unref()
 
 // ---- Bot startup loop (retry with backoff, daemon persists forever) ----
@@ -6610,7 +6529,6 @@ void (async () => {
               { command: 'reset', description: 'Clear the current conversation in place' },
               { command: 'stream', description: 'How replies arrive: thoughts · tools · hybrid · off' },
               { command: 'effort', description: 'Reasoning effort: low · medium · high · xhigh · max · auto' },
-              { command: 'digest', description: 'All-sessions digest now, or daily (/digest 08:00 · off)' },
               { command: 'budget', description: 'Daily $ cap with warnings (/budget 20 · off)' },
               { command: 'rewind', description: 'Open the checkpoint picker (undo a turn\'s changes)' },
               { command: 'cost', description: 'Show the session cost readout' },

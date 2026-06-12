@@ -40,7 +40,7 @@ The plugin cache is **keyed by the version string** in `.claude-plugin/plugin.js
 Claude Code treats it as "already installed" and **never re-copies the newer code** — even after the
 marketplace clone pulls a newer HEAD. The result: the daemon keeps running a frozen old build, and
 repo changes (new commands, fixes) silently never appear. Always do this when any
-`~/.claude/plugins/cache/better-claude-plugins/telegram/*/` dir already exists:
+`~/.claude/plugins/cache/pocket-claude/telegram/*/` dir already exists:
 
 1. **Stop the running daemon + watchdog** (otherwise they keep serving old code, and a restart
    would replay buffered inbound):
@@ -50,14 +50,14 @@ repo changes (new commands, fixes) silently never appear. Always do this when an
    rm -f ~/.claude/channels/telegram/daemon.sock ~/.claude/channels/telegram/*.pid
    ```
 2. **Refresh the source the cache is built from** — update the marketplace clone to current HEAD
-   (`/plugin marketplace update better-claude-plugins`, or `git -C
-   ~/.claude/plugins/marketplaces/better-claude-plugins pull`).
+   (`/plugin marketplace update pocket-claude`, or `git -C
+   ~/.claude/plugins/marketplaces/pocket-claude pull`).
 3. **Make sure the version was bumped.** If the marketplace clone's `plugin.json` version equals an
    existing cache dir name, the cache will NOT refresh on its own. The maintainer must bump the
    version on every shipped change (see the repo `CLAUDE.md` "Deploy loop"). If you're installing and
    the version wasn't bumped, **delete the stale cache dir(s)** so the restart re-copies:
    ```sh
-   rm -rf ~/.claude/plugins/cache/better-claude-plugins/telegram/*/   # forces a clean re-copy
+   rm -rf ~/.claude/plugins/cache/pocket-claude/telegram/*/   # forces a clean re-copy
    ```
 4. Continue with the install; Step 4 below verifies the **running** build matches what you expect.
 
@@ -220,21 +220,21 @@ and gets the prereq sorted. Set it up yourself, in order:
    Pass the same `<model>` and device you wrote to `.env`. Big models on a slow link take a few
    minutes — it's one-time and unattended, and it's the whole point: everything's ready before the
    user's first note. (Verify with a real transcription after Step 3's restart using the bundled
-   helper if you want: `"$VENV/bin/python" "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)transcribe_local.py" <some.oga> <model>`.)
+   helper if you want: `"$VENV/bin/python" "$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ | sort -V | tail -1)transcribe_local.py" <some.oga> <model>`.)
 
 ## 2. Install the plugin + wire the hooks/convention
 - In `~/.claude/settings.json` add the marketplace, enable the plugin, and add the
   daemon-resilience hook + (optionally) point the model:
 ```json
 "extraKnownMarketplaces": {
-  "better-claude-plugins": { "source": { "source": "github", "repo": "casualsav/better-claude-telegram" } }
+  "pocket-claude": { "source": { "source": "github", "repo": "casualsav/pocket-claude" } }
 },
-"enabledPlugins": { "telegram@better-claude-plugins": true },
+"enabledPlugins": { "telegram@pocket-claude": true },
 "statusLine": { "type": "command", "command": "bash ~/.claude/statusline-command.sh" },
 "hooks": {
   "SessionStart": [ { "hooks": [
-    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts\" >/dev/null 2>&1 || true" },
-    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)stamp-transcript.ts\" >/dev/null 2>&1 || true" }
+    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts\" >/dev/null 2>&1 || true" },
+    { "type": "command", "command": "bun \"$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ 2>/dev/null | sort -V | tail -1)stamp-transcript.ts\" >/dev/null 2>&1 || true" }
   ] } ]
 }
 ```
@@ -270,9 +270,9 @@ The second hook (`stamp-transcript.ts`) writes each session's transcript path on
   can keep it current automatically (the updater swaps the content between them; a marker-less
   legacy block is migrated into markers on the first update):
   ```
-  <!-- BEGIN better-claude-telegram (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->
+  <!-- BEGIN pocket-claude (off-mcp convention — auto-synced by /update; edits inside are overwritten) -->
   …contents of off-mcp/CLAUDE.md…
-  <!-- END better-claude-telegram -->
+  <!-- END pocket-claude -->
   ```
 
 ## 3. Restart Claude Code (the one restart)
@@ -296,9 +296,9 @@ pgrep -fa daemon.ts        # one daemon — note the path: it must be the NEWEST
 tail -5 ~/.claude/channels/telegram/daemon.log   # want "polling as @<bot>", NOT an EACCES crash
 # running build == newest cache version (catches the stale-cache trap from §0.6):
 pgrep -fa daemon.ts | grep -o 'telegram/[^/]*/'
-ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1   # should match
+ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ | sort -V | tail -1   # should match
 # grammy resolved to the pinned good version (not 1.43.x):
-cat "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)node_modules/grammy/package.json" | grep '"version"'
+cat "$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ | sort -V | tail -1)node_modules/grammy/package.json" | grep '"version"'
 ```
 If the running daemon path is an **older** version dir than the newest on disk, you're on stale
 code — go back to §0.6 and force-refresh. Telegram clients also **cache** the command menu, so
@@ -313,7 +313,7 @@ given in Step 1? Their first DM returns a pairing code; approve with `/telegram:
 **If the user chose MCP mode (Step 0.7), enable it now** — the plugin is installed, so flip the
 server on so it auto-loads for every plain `claude` session:
 ```sh
-DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)
+DIR=$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ | sort -V | tail -1)
 [ -f "$DIR/mcp.json.disabled" ] && mv "$DIR/mcp.json.disabled" "$DIR/.mcp.json"   # MCP on
 ```
 Then they launch work sessions with **plain `claude`** (no flag) — the MCP server loads every
@@ -331,7 +331,7 @@ time. To later turn it off: `/telegram:configure mcp off` or `/settings`.
 presence of the plugin's `.mcp.json`, so don't just skip — actively confirm it's renamed aside,
 in case a previous install or a re-download left one in place:
 ```sh
-DIR=$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ | sort -V | tail -1)
+DIR=$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ | sort -V | tail -1)
 [ -f "$DIR/.mcp.json" ] && mv "$DIR/.mcp.json" "$DIR/mcp.json.disabled"   # MCP off (off-MCP mode)
 ```
 Off-MCP keeps the plugin's MCP server disabled, so a plain `claude` is already plugin-less — no

@@ -3,11 +3,44 @@
 // in a throwaway detached tmux session: we scrape the one-time code off the pane, relay it to
 // Telegram, press Enter for it, and poll the pane until gh reports the outcome. Side-effect free
 // on import (daemon.ts is not), so the status parser is unit-testable.
+import { existsSync, mkdirSync, unlinkSync } from 'node:fs'
+import { join } from 'node:path'
 import { exec, sleep } from './proc.ts'
 import { capturePane } from './pane-io.ts'
 import { stripAnsi } from './prompt.ts'
+import { STATE_DIR } from './common.ts'
 
 export type GhAccount = { host: string; user: string; active: boolean }
+
+// The gh binary to drive: a PATH install wins; otherwise the bridge-managed copy (provisionGh
+// below) so the whole flow works on a host where nobody ever installed gh from a terminal.
+const GH_DIR = join(STATE_DIR, 'gh')
+const GH_MANAGED_BIN = join(GH_DIR, 'gh')
+export function ghBin(): string {
+  return existsSync(GH_MANAGED_BIN) ? GH_MANAGED_BIN : 'gh'
+}
+
+// Download the latest gh release binary into the state dir (~12MB, no root needed) — same
+// self-provisioning pattern as Piper. Idempotent; throws with a short reason on failure.
+export async function provisionGh(): Promise<void> {
+  if (await ghInstalled()) return
+  if (process.platform !== 'linux') throw new Error('auto-install only works on Linux — install gh from https://cli.github.com')
+  mkdirSync(GH_DIR, { recursive: true })
+  const arch = (await exec('uname', ['-m'], { timeout: 2000 })).stdout.trim()
+  const a = arch === 'aarch64' || arch === 'arm64' ? 'arm64' : 'amd64'
+  const rel = await fetch('https://api.github.com/repos/cli/cli/releases/latest',
+    { headers: { 'user-agent': 'pocket-claude' } })
+  if (!rel.ok) throw new Error(`couldn't look up the latest gh release (HTTP ${rel.status})`)
+  const tag = ((await rel.json()) as { tag_name?: string }).tag_name   // e.g. v2.62.0
+  if (!tag) throw new Error('release lookup returned no version tag')
+  const ver = tag.replace(/^v/, '')
+  const tarball = join(GH_DIR, 'gh.tar.gz')
+  const url = `https://github.com/cli/cli/releases/download/${tag}/gh_${ver}_linux_${a}.tar.gz`
+  await exec('curl', ['-fsSL', '-o', tarball, url], { timeout: 300_000, maxBuffer: 1 << 20 })
+  await exec('tar', ['-xzf', tarball, '-C', GH_DIR, '--strip-components=2', `gh_${ver}_linux_${a}/bin/gh`], { timeout: 60_000 })
+  try { unlinkSync(tarball) } catch {}
+  if (!(await ghInstalled())) throw new Error('gh installed but won\'t run')
+}
 
 // Parse `gh auth status` output. Modern gh (≥2.40, multi-account):
 //   ✓ Logged in to github.com account alice (keyring)
@@ -27,14 +60,14 @@ export function parseGhAuthStatus(out: string): GhAccount[] {
 }
 
 export async function ghInstalled(): Promise<boolean> {
-  try { await exec('gh', ['--version'], { timeout: 5000 }); return true } catch { return false }
+  try { await exec(ghBin(), ['--version'], { timeout: 5000 }); return true } catch { return false }
 }
 
 // All known gh accounts. `gh auth status` exits 1 when nothing is logged in, and its report has
 // moved between stdout and stderr across versions — parse both, on success or failure alike.
 export async function ghAccounts(): Promise<GhAccount[]> {
   try {
-    const { stdout, stderr } = await exec('gh', ['auth', 'status'], { timeout: 15000 })
+    const { stdout, stderr } = await exec(ghBin(), ['auth', 'status'], { timeout: 15000 })
     return parseGhAuthStatus(`${stdout}\n${stderr}`)
   } catch (e) {
     const err = e as { stdout?: string; stderr?: string }
@@ -49,12 +82,12 @@ function shortErr(e: unknown): string {
 
 // null = ok; otherwise the first error line for the user.
 export async function ghSwitch(user: string): Promise<string | null> {
-  try { await exec('gh', ['auth', 'switch', '--hostname', 'github.com', '--user', user], { timeout: 10000 }); return null }
+  try { await exec(ghBin(), ['auth', 'switch', '--hostname', 'github.com', '--user', user], { timeout: 10000 }); return null }
   catch (e) { return shortErr(e) }
 }
 
 export async function ghLogout(user: string): Promise<string | null> {
-  try { await exec('gh', ['auth', 'logout', '--hostname', 'github.com', '--user', user], { timeout: 10000 }); return null }
+  try { await exec(ghBin(), ['auth', 'logout', '--hostname', 'github.com', '--user', user], { timeout: 10000 }); return null }
   catch (e) { return shortErr(e) }
 }
 
@@ -70,7 +103,7 @@ export async function runGhLogin(onCode: (code: string, url: string) => void): P
   // BROWSER=true makes gh's "opening browser" step succeed silently (no GUI on the host); gh then
   // simply polls GitHub until the user authorizes from their own device. The exit marker + sleep
   // keep the pane alive after gh exits so the final output stays capturable.
-  const cmd = 'BROWSER=true gh auth login --hostname github.com --git-protocol https --web --skip-ssh-key 2>&1; echo "GH_EXIT=$?"; sleep 600'
+  const cmd = `BROWSER=true '${ghBin().replace(/'/g, `'\\''`)}' auth login --hostname github.com --git-protocol https --web --skip-ssh-key 2>&1; echo "GH_EXIT=$?"; sleep 600`
   let pane: string
   try {
     const { stdout } = await exec('tmux',
@@ -99,6 +132,10 @@ export async function runGhLogin(onCode: (code: string, url: string) => void): P
         if (u) url = u[1].replace(/[).,]+$/, '')
         break
       }
+      // gh asks Y/n confirms (e.g. "Authenticate Git with your GitHub credentials?") even with
+      // every flag supplied — answer yes so the device code can appear. The (Y/n) marker is gone
+      // from the line once answered, so this never double-fires.
+      if (/\(Y\/n\)\s*$/m.test(cap)) await exec('tmux', ['send-keys', '-t', pane, 'y', 'Enter'], { timeout: 3000 }).catch(() => {})
     }
     if (!code) return { ok: false, error: 'no sign-in code appeared — is the gh CLI installed and able to reach github.com?' }
     await exec('tmux', ['send-keys', '-t', pane, 'Enter'], { timeout: 3000 }).catch(() => {})   // its "Press Enter to open …" prompt

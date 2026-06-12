@@ -280,10 +280,10 @@ function patchSettings(mode: Mode): void {
   } else mkdirSync(join(homedir(), '.claude'), { recursive: true })
 
   s.extraKnownMarketplaces = { ...(s.extraKnownMarketplaces || {}),
-    'better-claude-plugins': { source: { source: 'github', repo: 'casualsav/better-claude-telegram' } } }
-  s.enabledPlugins = { ...(s.enabledPlugins || {}), 'telegram@better-claude-plugins': true }
+    'pocket-claude': { source: { source: 'github', repo: 'casualsav/pocket-claude' } } }
+  s.enabledPlugins = { ...(s.enabledPlugins || {}), 'telegram@pocket-claude': true }
   s.statusLine = { type: 'command', command: 'bash ~/.claude/statusline-command.sh' }
-  const hookCmd = 'bun "$(ls -d ~/.claude/plugins/cache/better-claude-plugins/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts" >/dev/null 2>&1 || true'
+  const hookCmd = 'bun "$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ 2>/dev/null | sort -V | tail -1)ensure-daemon.ts" >/dev/null 2>&1 || true'
   s.hooks = s.hooks || {}
   const sessionStart = (s.hooks.SessionStart ||= [])
   const already = JSON.stringify(sessionStart).includes('ensure-daemon.ts')
@@ -327,7 +327,7 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 // ---- main ----
 async function main(): Promise<void> {
-  console.log(C.b('\n  better-claude-telegram — off-MCP setup\n'))
+  console.log(C.b('\n  pocket-claude — off-MCP setup\n'))
   const mode = await checkDeps()
   const cfg = await interview()
   writeConfig(cfg)

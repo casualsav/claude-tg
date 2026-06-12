@@ -20,7 +20,7 @@ it respawns `claude -c` in that cwd and delivers the message, instead of "couldn
 `/queue <prompt>` — per-session backlog (/later alias) that injects when the session goes idle. "When you're
 free" to complement /schedule's "at 3pm".
 
-## 4. Morning digest — ✅ DONE (v0.1.71)
+## 4. Morning digest — ✅ DONE (v0.1.71) · ❌ REMOVED (v0.1.127)
 One scheduled card across all sessions: what each did, what's blocked on you, cost, limit burn.
 All the data already exists (transcripts, usage snapshots, statusline).
 

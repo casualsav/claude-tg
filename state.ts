@@ -57,7 +57,6 @@ export type ReplyTarget =
   | { kind: 'md'; path: string; display: string }                // contents for a /md file
   | { kind: 'acctname'; thread?: number }                        // name for a new Claude account (settings → Accounts → ➕)
   | { kind: 'newsession'; anchor?: boolean }                     // folder for /new in General (spawn → own topic; anchor → becomes the General base session)
-  | { kind: 'digesttime' }                                       // daily time for the digest (settings → 🗞 Digest)
   | { kind: 'ttskey'; engine: 'openai' | 'elevenlabs' }          // API key for a hosted TTS engine (settings → 🔊 Voice replies)
 export const replyTargets = new Map<string, ReplyTarget>()
 

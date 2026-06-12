@@ -15,7 +15,7 @@
 set -euo pipefail
 
 MODE="${1:-off-mcp}"
-COMMENT="# better-claude-telegram: Telegram-bridged Claude Code launchers (${MODE})"
+COMMENT="# pocket-claude: Telegram-bridged Claude Code launchers (${MODE})"
 
 case "$MODE" in
   off-mcp)
@@ -25,7 +25,7 @@ EOF
     ;;
   mcp)
     read -r -d '' DEFS <<'EOF' || true
-alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@better-claude-plugins --dangerously-skip-permissions'
+alias claude-tg='claude --dangerously-load-development-channels plugin:telegram@pocket-claude --dangerously-skip-permissions'
 EOF
     ;;
   *) echo "usage: setup-alias.sh [off-mcp|mcp]  (default: off-mcp)" >&2; exit 2 ;;
@@ -41,7 +41,7 @@ esac
 # form) so re-runs / mode switches replace cleanly, then append the fresh block.
 if [ -f "$RC" ]; then
   tmp=$(mktemp)
-  grep -vE '^# better-claude-telegram: (launch|Telegram-bridged)|^claude-tg\(\)|^claude-yolo\(\)|^alias claude-tg=|^alias claude-yolo=' "$RC" > "$tmp" || true
+  grep -vE '^# pocket-claude: (launch|Telegram-bridged)|^claude-tg\(\)|^claude-yolo\(\)|^alias claude-tg=|^alias claude-yolo=' "$RC" > "$tmp" || true
   cat "$tmp" > "$RC"
   rm -f "$tmp"
 fi

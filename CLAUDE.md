@@ -1,4 +1,4 @@
-# better-claude-telegram
+# pocket-claude
 
 A Claude Code ↔ Telegram bridge. Drive a Claude Code session from Telegram — send messages and
 files, get replies with native formatting, approve permission prompts with a tap, switch modes,
@@ -55,7 +55,7 @@ only to touch files the other user owns — ownership is left alone, group perms
 **`bun run deploy [patch|minor|major|x.y.z]`** (default `patch`) → test live → commit. The script
 (`scripts/deploy.ts`) does the whole ritual atomically: bumps `version` in both
 `.claude-plugin/plugin.json` and `marketplace.json`, syncs the git-tracked files into the cache
-(`~/.claude/plugins/cache/better-claude-plugins/telegram/<ver>/`) + the marketplace mirror,
+(`~/.claude/plugins/cache/pocket-claude/telegram/<ver>/`) + the marketplace mirror,
 installs deps if missing, type-checks in the cache (`bun build daemon.ts --target=bun` — grammy
 resolves only there), then restarts the daemon (the watchdog/SessionStart hook respawns it from the
 newest cache version) and verifies it came back on the new version. The type-check runs **before**
