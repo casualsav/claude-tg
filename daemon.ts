@@ -2075,9 +2075,20 @@ async function audioInboundText(
 ): Promise<{ text: string; transcribed: boolean }> {
   const provider = transcribeProvider()
   if (provider === 'off') { nudgeTranscribeOff(ctx); return { text: fallback, transcribed: false } }
+  // A failed transcription used to degrade to the bare placeholder with no explanation —
+  // the sender just saw Claude react to "(voice message)". Tell them what happened instead.
+  const warnFailed = (why: string): void => {
+    void bot.api.sendMessage(String(ctx.chat!.id),
+      `⚠️ Couldn't transcribe that voice note — ${why}. It went through as “${fallback}”.`,
+    ).catch(() => {})
+  }
   let path: string
   try { path = await downloadTelegramFile(file_id) }
-  catch (err) { process.stderr.write(`daemon: audio download failed: ${err}\n`); return { text: fallback, transcribed: false } }
+  catch (err) {
+    process.stderr.write(`daemon: audio download failed: ${err}\n`)
+    warnFailed('the audio download failed')
+    return { text: fallback, transcribed: false }
+  }
   try {
     // First local voice note before the engine is installed → provision on demand, then transcribe
     // this same note (no resend). The /settings voice toggle normally kicks this off, but a `local`
@@ -2094,7 +2105,10 @@ async function audioInboundText(
       if (!whisperReady()) return { text: fallback, transcribed: false }   // provisionWhisper already explained why
     }
     const transcript = await transcribe(path)
-    if (!transcript) return { text: fallback, transcribed: false }
+    if (!transcript) {
+      warnFailed(`the ${provider} backend returned nothing (key missing or engine error — see daemon.log)`)
+      return { text: fallback, transcribed: false }
+    }
     const caption = ctx.message?.caption
     return { text: caption ? `${transcript}\n\n[caption] ${caption}` : transcript, transcribed: true }
   } finally {
@@ -3605,13 +3619,27 @@ function toggleMcp(): void {
   } catch (e) { process.stderr.write(`daemon: mcp toggle failed: ${e}\n`) }
 }
 // Set/remove keys in .env, preserving everything else and the 600 perms.
+// Never rebuilds from a failed read: a .env that exists but can't be read aborts the write
+// instead of clobbering the whole config (this once reduced .env to a single line — the
+// 2026-06-11 token outage). The write is atomic (temp + rename) so a crash mid-write can't
+// leave a truncated file either.
 function writeEnvVars(updates: Record<string, string | null>): void {
   let lines: string[] = []
-  try { lines = readFileSync(ENV_FILE, 'utf8').split('\n') } catch {}
+  try { lines = readFileSync(ENV_FILE, 'utf8').split('\n') }
+  catch (e) {
+    if (existsSync(ENV_FILE)) {
+      process.stderr.write(`daemon: env write ABORTED — .env exists but is unreadable, refusing to clobber it: ${e}\n`)
+      return
+    }
+  }
   const keys = new Set(Object.keys(updates))
   const kept = lines.filter(l => l.trim() && !keys.has(l.split('=')[0]?.trim()))
   for (const [k, v] of Object.entries(updates)) if (v !== null) kept.push(`${k}=${v}`)
-  try { writeFileSync(ENV_FILE, kept.join('\n') + '\n', { mode: 0o600 }) } catch (e) { process.stderr.write(`daemon: env write failed: ${e}\n`) }
+  try {
+    const tmp = `${ENV_FILE}.tmp-${process.pid}`
+    writeFileSync(tmp, kept.join('\n') + '\n', { mode: 0o600 })
+    renameSync(tmp, ENV_FILE)
+  } catch (e) { process.stderr.write(`daemon: env write failed: ${e}\n`) }
 }
 function envHas(key: string): boolean {
   try { return new RegExp(`^${key}=\\S`, 'm').test(readFileSync(ENV_FILE, 'utf8')) } catch { return false }
@@ -4798,12 +4826,15 @@ bot.on('callback_query:data', async ctx => {
       await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
       return
     }
-    // off / groq / openai
-    writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })
+    // off / groq / openai — a keyed backend without its key would break voice silently,
+    // so don't commit the switch until the key is in .env.
     const needKey = (choice === 'groq' && !envHas('GROQ_API_KEY')) || (choice === 'openai' && !envHas('OPENAI_API_KEY'))
-    await ctx.answerCallbackQuery(needKey
-      ? { text: `Backend set to ${choice}. Add the API key in your terminal — for security, keys never go through chat: /telegram:configure transcribe ${choice}`, show_alert: true }
-      : undefined).catch(() => {})
+    if (needKey) {
+      await ctx.answerCallbackQuery({ text: `Not switched — ${choice} needs an API key first. Add it in your terminal (keys never go through chat): /telegram:configure transcribe ${choice}`, show_alert: true }).catch(() => {})
+      return
+    }
+    writeEnvVars({ TELEGRAM_TRANSCRIBE: choice })
+    await ctx.answerCallbackQuery().catch(() => {})
     await ctx.editMessageText(voiceText(), { parse_mode: 'HTML', reply_markup: voiceKeyboard() }).catch(() => {})
     return
   }
