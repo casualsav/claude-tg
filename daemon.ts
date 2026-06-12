@@ -4345,7 +4345,7 @@ bot.command(['cron', 'schedule'], async ctx => {
   // through to the force-reply so the message can be composed in a follow-up.
   const { ms, rest: oneShotText } = splitLeadingDuration(arg)
   if (!ms) {
-    await ctx.reply('Usage: <code>/cron 2h ping the server</code> — or <code>/cron 12h</code> then reply with the message.\nRecurring: <code>/cron every 09:00 …</code> | <code>every weekday 09:00 …</code> | <code>every mon 09:00 …</code>\nCron exprs: <code>/cron */30 9-17 * * 1-5 check CI</code> (min hour dom mon dow; timezone: <code>/cron tz</code>).\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/cron cancel</code>. <code>/schedule</code> works too.', { parse_mode: 'HTML' })
+    await ctx.reply('Usage: <code>/cron 2h ping the server</code> — or <code>/cron 12h</code> then reply with the message.\nRecurring: <code>/cron every 09:00 …</code> | <code>every weekday 09:00 …</code> | <code>every mon 09:00 …</code>\nCron exprs: <code>/cron */30 9-17 * * 1-5 check CI</code> (min hour dom mon dow; timezone: <code>/cron tz</code>).\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/cron cancel</code>.', { parse_mode: 'HTML' })
     return
   }
   if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
@@ -6426,7 +6426,7 @@ bot.on('message:text', async ctx => {
         case 'schedcompose': {
           const { ms, rest } = splitLeadingDuration(text.trim())
           if (!ms || !rest) {
-            await ctx.reply('Couldn\'t read that — send it as <b>time message</b>, e.g. <code>2h ping the server</code>. Try <code>/schedule</code> again.', { parse_mode: 'HTML' })
+            await ctx.reply('Couldn\'t read that — send it as <b>time message</b>, e.g. <code>2h ping the server</code>. Try <code>/cron</code> again.', { parse_mode: 'HTML' })
             return
           }
           if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
