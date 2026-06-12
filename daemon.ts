@@ -484,6 +484,7 @@ async function switchToMode(paneId: string, target: CcMode, watcher: PaneWatcher
   }
   const reached = await (watcher ? watcher.withInjection(run) : run())
   if (reached && paneId === focus.activePaneId) lastFocusedMode = reached
+  if (reached) void sessionForPane(paneId, false).then(sid => recordSessionMode(sid, reached)).catch(() => {})
   return reached
 }
 
@@ -491,6 +492,19 @@ async function switchToMode(paneId: string, target: CcMode, watcher: PaneWatcher
 // /resume can seed it — in DM mode the resume happens precisely when no pane is left alive
 // to read the mode from, and `claude --resume` restores the conversation but NOT the mode dial.
 let lastFocusedMode: CcMode = 'default'
+
+// Last mode observed PER SESSION (sid → mode), persisted across restarts. A topic revival
+// (spawnSession `-c` with the topic's sid) seeds from the session's OWN last mode — the focused
+// pane's mode is a different session entirely in forum-topics mode, which is why revived
+// sessions opened in ask/default. Recorded on every /mode switch and the focused-pane tracker.
+const SESSION_MODES_FILE = join(STATE_DIR, 'session-modes.json')
+const sessionModes = new Map<string, CcMode>(Object.entries(readJsonFile<Record<string, CcMode>>(SESSION_MODES_FILE, {})))
+function recordSessionMode(sid: string | null, mode: CcMode): void {
+  if (!sid || sessionModes.get(sid) === mode) return
+  sessionModes.set(sid, mode)
+  while (sessionModes.size > 200) sessionModes.delete(sessionModes.keys().next().value!)   // oldest-first cap
+  writeJsonFile(SESSION_MODES_FILE, Object.fromEntries(sessionModes))
+}
 
 // Prompt detection (pane-scrape → PromptInfo) lives in ./prompt.ts.
 
@@ -4392,8 +4406,11 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     // A resumed/continued session carries its own model/effort, but Claude Code does NOT
     // restore the permission mode — seed it with the last mode observed on a focused pane
     // (the 15s tracker + switchToMode keep it current while one is alive).
-    if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra) && lastFocusedMode !== 'default') {
-      inherit = { model: null, effort: null, mode: lastFocusedMode }
+    if (!inherit && /(?:^|\s)(?:--resume|-c)\b/.test(extra)) {
+      // Prefer the session's OWN last-known mode (topic revivals pass its sid); fall back to the
+      // focused pane's last mode for sid-less resumes (DM /resume).
+      const mode = (presetSessionId ? sessionModes.get(presetSessionId) : null) ?? lastFocusedMode
+      if (mode !== 'default') inherit = { model: null, effort: null, mode }
     }
     let target: string[] = []
     if (focus.activePaneId) {
@@ -6737,10 +6754,15 @@ setInterval(() => void updateSessionPin(), 10_000)
 // Remember the focused pane's permission mode (covers shift+tab changes made in the terminal,
 // which the daemon otherwise never sees) so /resume can inherit it after the pane exits.
 setInterval(() => void (async () => {
-  if (!focus.activePaneId) return
+  const pane = focus.activePaneId
+  if (!pane) return
   try {
-    const cap = await capturePane(focus.activePaneId)
-    if (onNormalPrompt(cap)) lastFocusedMode = detectCurrentMode(cap)
+    const cap = await capturePane(pane)
+    if (onNormalPrompt(cap)) {
+      const m = detectCurrentMode(cap)
+      lastFocusedMode = m
+      void sessionForPane(pane, false).then(sid => recordSessionMode(sid, m)).catch(() => {})
+    }
   } catch {}
 })(), 15_000).unref()
 // Context-fill warnings (50% / 75%) ride a light statusline poll of the focused pane —
