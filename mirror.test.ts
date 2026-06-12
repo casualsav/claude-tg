@@ -40,13 +40,13 @@ test('recentAssistantBlocks keeps only the last `max` blocks', () => {
   expect(recentAssistantBlocks(raw, 2)).toEqual(['● b', '● c'])
 })
 
-test('renderToolsMirror lists the latest 5 tools and a Done summary', () => {
-  const acts: Activity[] = Array.from({ length: 7 }, (_, i) => ({ tool: 'Read', detail: `f${i}` }))
+test('renderToolsMirror lists the latest 10 tools and a Done summary', () => {
+  const acts: Activity[] = Array.from({ length: 12 }, (_, i) => ({ tool: 'Read', detail: `f${i}` }))
   const out = renderToolsMirror(acts, true)
   const lines = out.split('\n')
-  expect(lines.length).toBe(6)                 // 5 tools + Done
+  expect(lines.length).toBe(11)                // 10 tools + Done
   expect(lines[0]).toContain('f2')             // oldest two (f0,f1) fell off
-  expect(lines.at(-1)).toBe('✅ <b>Done</b> · 7 steps')
+  expect(lines.at(-1)).toBe('✅ <b>Done</b> · 12 steps')
 })
 
 test('renderToolsMirror pluralizes a single step correctly', () => {
@@ -86,17 +86,16 @@ test('renderDigestMirror shows live/idle header + blocks', () => {
   expect(renderDigestMirror('● hi there', false)).toContain('hi there')
 })
 
-test('renderThoughtsMirror counts visual paragraphs, never more than 5', () => {
-  // 4 feed items but the first has two paragraphs — the window must cap VISUAL thoughts at 5,
-  // so a 5-item feed with a multi-paragraph item can't render 6.
+test('renderThoughtsMirror counts visual paragraphs, never more than 10', () => {
+  // 10 feed items but the first has two paragraphs — the window must cap VISUAL thoughts at 10,
+  // so a 10-item feed with a multi-paragraph item can't render 11.
   const feed: FeedItem[] = [
     { kind: 'text', text: 'p1\n\np2' },
-    { kind: 'text', text: 'p3' }, { kind: 'text', text: 'p4' },
-    { kind: 'text', text: 'p5' }, { kind: 'text', text: 'p6' },
+    ...Array.from({ length: 9 }, (_, i) => ({ kind: 'text' as const, text: `p${i + 3}` })),
   ]
   const out = renderThoughtsMirror(feed, false)
-  expect(out).not.toContain('p1')   // oldest paragraph fell off
-  for (const p of ['p2', 'p3', 'p4', 'p5', 'p6']) expect(out).toContain(p)
+  expect(out).not.toContain('p1\n')   // oldest paragraph fell off (p1 alone — p10/p11 contain "p1")
+  for (const p of ['p2', 'p3', 'p4', 'p5', 'p6', 'p7', 'p8', 'p9', 'p10', 'p11']) expect(out).toContain(p)
 })
 
 test('splitThoughtParagraphs keeps fenced code blocks glued', () => {

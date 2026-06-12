@@ -49,10 +49,10 @@ export function initMirror(d: MirrorDeps): void {
 
 const MIRROR_THROTTLE_MS = 3000
 const MIRROR_BLOCKS = 8        // digest mode: max ● blocks shown
-const MIRROR_TOOLS = 5         // tools mode: max tool rows shown (newest replaces oldest until ✅ Done)
+const MIRROR_TOOLS = 10        // tools mode: max tool rows shown (newest replaces oldest until ✅ Done)
 const MIRROR_FINALIZE_TICKS = 3   // ~4.5s sustained idle (RELAY_POLL_MS=1500) before capping the card
-const MIRROR_FEED = 5        // hybrid: max interleaved items shown (matches tools & thoughts)
-const MIRROR_THOUGHTS = 5    // thoughts mode: max thoughts shown (oldest falls off as new flow in)
+const MIRROR_FEED = 10       // hybrid: max interleaved items shown (matches tools & thoughts)
+const MIRROR_THOUGHTS = 10   // thoughts mode: max thoughts shown (oldest falls off as new flow in)
 // The status footer (verb · elapsed · tokens) is DISABLED for now — it doesn't track reliably yet
 // (verb/token scraping off the spinner line is flaky). The whole machinery (the footer method,
 // fmtElapsed, the verb/token scrape in syncBody) is kept intact; flip this to re-enable it
@@ -178,15 +178,15 @@ export function renderHybridMirror(feed: FeedItem[], done: boolean): string {
   }
   if (done) lines.push('✅ <b>Done</b>')
   // Keep the HTML valid under the card cap: drop oldest lines first, then hard-cap safely.
-  let body = lines.join('\n\n')
-  while (body.length > 3500 && lines.length > 1) { lines.shift(); body = lines.join('\n\n') }
+  let body = lines.join('\n')
+  while (body.length > 3500 && lines.length > 1) { lines.shift(); body = lines.join('\n') }
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   return body
 }
 
 // Split a narration block into its visual paragraphs (blank-line separated), keeping fenced
 // code blocks glued. On the card, paragraphs within one block render exactly like separate
-// thoughts (a blank line apart inside the blockquote), so the 5-thought window must count
+// thoughts (a blank line apart inside the blockquote), so the MIRROR_THOUGHTS window must count
 // PARAGRAPHS — counting feed items let a multi-paragraph block show 6+ visual thoughts.
 export function splitThoughtParagraphs(text: string): string[] {
   const out: string[] = []
