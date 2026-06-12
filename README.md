@@ -59,7 +59,7 @@ Any other `/slash` command is relayed straight to Claude Code.
 
 ## Upgrading
 
-Just run /upgrade tg to upgrade the Telegram bot. Bonus: running /upgrade claude upgrades Claude.
+Just run /upgrade tg from inside the bot to upgrade. Bonus: running /upgrade claude upgrades Claude.
 
 ## Uninstalling
 
