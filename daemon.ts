@@ -6335,6 +6335,24 @@ bot.on('message:text', async ctx => {
           else { await ctx.reply('✅ Sent your answer.'); await verifyPromptClosed(paneId) }
           return
         }
+        // Stuck-screen dump → type the reply verbatim into the wedged pane (raw keys + Enter,
+        // not the inbound queue — the queue is exactly what failed to deliver).
+        case 'stucktext': {
+          const paneId = target.paneId
+          if (!paneId || !(await paneAlive(paneId))) {
+            await ctx.reply('That session\'s pane is gone.')
+            return
+          }
+          await withPaneInjection(paneId, async () => {
+            await sendKeysLiteral(paneId, text)
+            await waitForSettle(paneId, 150, 2000)
+            await sendKeys(paneId, ['Enter'])
+            await waitForSettle(paneId, 300, 5000)
+          })
+          resetPromptDedup(paneId)
+          await ctx.reply('⌨️ Typed into the terminal.')
+          return
+        }
         // Relayed sign-in link → inject the code into the pane's login input field, not the
         // agent's inbound queue.
         case 'authurl': {
