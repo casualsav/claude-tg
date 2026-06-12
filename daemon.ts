@@ -3417,6 +3417,19 @@ async function sweepBudget(): Promise<void> {
 }
 const BUDGET_SWEEP_MS = 60_000
 
+// The /budget panel: today's spend vs the cap + a set-cap button (same pattern as /stream).
+// The button drops a force-reply; the answer lands in replyTargets (kind 'budget').
+function budgetPanelText(): string {
+  const cap = loadAccess().budgetDaily
+  const spent = budgetSpent(readBudgetState(new Date().toISOString().slice(0, 10)))
+  return cap
+    ? `💸 Budget — <b>$${spent.toFixed(2)} of $${cap.toFixed(2)} today (${Math.round((spent / cap) * 100)}%)</b>\n<i>warns at 80% and at the cap</i>`
+    : `💸 Budget — <b>$${spent.toFixed(2)} today · no cap</b>\n<i>set a cap to get 80% and 100% warnings</i>`
+}
+function budgetPanelKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text(loadAccess().budgetDaily ? '✏️ Change cap' : '✏️ Set cap', 'budget:set')
+}
+
 bot.command('budget', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
@@ -3429,11 +3442,7 @@ bot.command('budget', async ctx => {
     return
   }
   if (arg) { await ctx.reply('Usage: <code>/budget 20</code> · <code>/budget off</code> · bare shows today.', { parse_mode: 'HTML' }); return }
-  const st = readBudgetState(new Date().toISOString().slice(0, 10))
-  const spent = budgetSpent(st)
-  await ctx.reply(a.budgetDaily
-    ? `💸 Today: $${spent.toFixed(2)} of $${a.budgetDaily.toFixed(2)} (${Math.round((spent / a.budgetDaily) * 100)}%).`
-    : `💸 Today: $${spent.toFixed(2)} — no cap set (<code>/budget 20</code> to set one).`, { parse_mode: 'HTML' })
+  await ctx.reply(budgetPanelText(), { parse_mode: 'HTML', reply_markup: budgetPanelKeyboard() })
 })
 
 // ---- Autonomous loop (/loop) ----
@@ -4835,6 +4844,23 @@ bot.on('callback_query:data', async ctx => {
     await respawnTerminalMirror()   // re-spawn the live card below in the new style
     await ctx.answerCallbackQuery({ text: `Stream → ${streamCap(replyMode())}` }).catch(() => {})
     await ctx.editMessageText(streamText(), { parse_mode: 'HTML', reply_markup: streamKeyboard() }).catch(() => {})
+    return
+  }
+
+  // /budget panel's set button — drop a force-reply asking for the cap; the answer refreshes
+  // the panel in place (panelMsgId rides along in the reply target).
+  if (data === 'budget:set') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const thread = ctx.callbackQuery.message?.message_thread_id
+    const sent = await ctx.reply(
+      '💸 Reply with the daily cap in dollars — e.g. <code>20</code> — or <code>off</code> to remove it.',
+      { parse_mode: 'HTML', ...(thread ? { message_thread_id: thread } : {}), reply_markup: { force_reply: true, input_field_placeholder: '20' } },
+    ).catch(() => null)
+    if (sent) replyTargets.set(`${ctx.chat?.id}:${sent.message_id}`, { kind: 'budget', panelMsgId: ctx.callbackQuery.message?.message_id })
     return
   }
 
@@ -6425,6 +6451,30 @@ bot.on('message:text', async ctx => {
             ? `✅ Wrote <code>${escapeHtml(target.display)}</code> (${contents.length} chars).`
             : `❌ Couldn't write <code>${escapeHtml(target.display)}</code>: ${escapeHtml(res.err)}`,
             { parse_mode: 'HTML' })
+          return
+        }
+        // "✏️ Set cap" on the /budget panel → the reply is the daily $ cap (or 'off'). A bad
+        // value re-arms the prompt; success refreshes the panel above in place.
+        case 'budget': {
+          const v = text.trim().toLowerCase().replace(/^\$/, '')
+          const a = loadAccess()
+          if (v === 'off' || v === '0') a.budgetDaily = undefined
+          else {
+            const n = parseFloat(v)
+            if (!Number.isFinite(n) || n <= 0) {
+              const again = await ctx.reply(
+                '❌ Couldn\'t read that — reply with a dollar amount like <code>20</code>, or <code>off</code>.',
+                { parse_mode: 'HTML', reply_markup: { force_reply: true, input_field_placeholder: '20' } }).catch(() => null)
+              if (again) replyTargets.set(`${ctx.chat?.id}:${again.message_id}`, target)
+              return
+            }
+            a.budgetDaily = n
+          }
+          saveAccess(a)
+          await ctx.reply(a.budgetDaily
+            ? `💸 Daily budget set to $${a.budgetDaily.toFixed(2)} — I'll warn at 80% and at the cap.`
+            : '💸 Daily budget off.')
+          if (target.panelMsgId) await bot.api.editMessageText(Number(ctx.chat!.id), target.panelMsgId, budgetPanelText(), { parse_mode: 'HTML', reply_markup: budgetPanelKeyboard() }).catch(() => {})
           return
         }
         // API key for a hosted TTS engine — stored in .env, the key message deleted from chat.
