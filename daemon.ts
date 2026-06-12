@@ -4147,29 +4147,39 @@ bot.command('mcp', async ctx => {
   await ctx.reply(`🔌 MCP mode is <b>${mcpEnabled() ? 'ON' : 'OFF'}</b> <i>(new sessions; relaunch to apply)</i>.\nToggle with <code>/mcp on</code> | <code>off</code>.`, { parse_mode: 'HTML' })
 })
 
-// One-line descriptions of each stream mode, shared by /stream and the usage hint.
+// The /stream panel: current mode + a one-tap cycle button. Shared by the bare command and the
+// button's in-place refresh.
 const STREAM_DESC: Record<'thoughts' | 'actions' | 'off', string> = {
-  thoughts: 'a silent self-updating card of Claude’s thoughts + tool summaries, plus the conclusion block(s).',
-  actions: 'a silent self-updating card of tool calls (collapsed history + live tail), plus the conclusion block(s).',
-  off: 'just the final message — no live mirror.',
+  thoughts: 'Claude’s thoughts + tool summaries, live',
+  actions: 'tool calls — collapsed history + live tail',
+  off: 'no live card, just the final reply',
+}
+const STREAM_ORDER = ['thoughts', 'actions', 'off'] as const
+const streamNext = (m: 'thoughts' | 'actions' | 'off') => STREAM_ORDER[(STREAM_ORDER.indexOf(m) + 1) % STREAM_ORDER.length]
+const streamCap = (m: string) => m.charAt(0).toUpperCase() + m.slice(1)
+function streamText(): string {
+  const m = replyMode()
+  return `💬 Stream — <b>${streamCap(m)}</b>\n<i>${STREAM_DESC[m]}</i>`
+}
+function streamKeyboard(): InlineKeyboard {
+  return new InlineKeyboard().text(`🔁 Switch to ${streamCap(streamNext(replyMode()))}`, 'stream:cycle')
 }
 
-// /stream thoughts|actions|off sets how Claude's text reaches you (default thoughts); bare shows it.
+// /stream thoughts|actions|off sets how Claude's text reaches you (default thoughts); bare shows
+// the panel with the cycle button.
 bot.command('stream', async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   if (arg === 'thoughts' || arg === 'actions' || arg === 'tools' || arg === 'off') {   // 'tools' kept as a typed alias for muscle memory
     const mode = arg === 'tools' ? 'actions' : arg
     const access = loadAccess(); access.replyMode = mode; saveAccess(access)
-    await ctx.reply(`✅ Stream mode changed to <b>${mode.charAt(0).toUpperCase() + mode.slice(1)}</b>`, { parse_mode: 'HTML' })
+    await ctx.reply(`✅ Stream mode changed to <b>${streamCap(mode)}</b>`, { parse_mode: 'HTML' })
     await respawnTerminalMirror()   // a mode change shouldn't leave the old card stranded above this confirmation
     return
   } else if (arg) {
     await ctx.reply('Usage: <code>/stream thoughts | actions | off</code>', { parse_mode: 'HTML' }); return
   }
-  // Bare /stream — just report the current mode and how to change it.
-  const m = replyMode()
-  await ctx.reply(`💬 Stream mode is <b>${m}</b> — ${STREAM_DESC[m]}\nChange with <code>/stream thoughts | actions | off</code>.`, { parse_mode: 'HTML' })
+  await ctx.reply(streamText(), { parse_mode: 'HTML', reply_markup: streamKeyboard() })
 })
 
 // ---- /md: create a markdown file in the active session's working directory ----
@@ -4788,6 +4798,21 @@ bot.on('callback_query:data', async ctx => {
     else if (data === 'st:effort') await doEffortPicker(ctx)
     else if (data === 'st:mode') await doModePicker(ctx)
     else await ctx.reply(settingsText(), { parse_mode: 'HTML', reply_markup: settingsKeyboard() })
+    return
+  }
+
+  // /stream panel's cycle button — flip to the next mode and refresh the panel in place.
+  if (data === 'stream:cycle') {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const access = loadAccess()
+    access.replyMode = streamNext(replyMode())
+    saveAccess(access)
+    await respawnTerminalMirror()   // re-spawn the live card below in the new style
+    await ctx.answerCallbackQuery({ text: `Stream → ${streamCap(replyMode())}` }).catch(() => {})
+    await ctx.editMessageText(streamText(), { parse_mode: 'HTML', reply_markup: streamKeyboard() }).catch(() => {})
     return
   }
 
