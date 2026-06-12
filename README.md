@@ -1,8 +1,8 @@
 ## Pocket Claude
 
-This plugin gives you complete Claude Code CLI control from your phone with the ability to create and manage multiple sessions instantly thanks to tmux. 
+The gosl of this repo is to have full control of Claude Code through Telegram without ever having to open the terminal after the initial sdtup. Sessions persist thanks to tmux. 
 
-Send messages and files, voice notes, use slash commands, see Claude's thought process as it works, approve permission prompts, answer questions, change settings, and more. 
+Send messages and files, voice notes, use slash commands, see Claude's extended thinking as it works, create and manage multiple sessions, and more, with a convenient status bar that shows your settings, 5h/weekly usage, and context window size. 
 
 ## Requirements
 
