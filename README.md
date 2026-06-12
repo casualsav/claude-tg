@@ -10,7 +10,7 @@ Send messages and files, voice notes, use slash commands, see Claude's thought p
 
 ## Installation: 
 
-Just point Claude Code at this repo and tell it to install it. It will install any dependencies if missing and walk you through setup. 
+Start Claude in a tmux session, point it at this repo, and tell it to install it. It will install any dependencies if missing and walk you through setup. 
 
 
 ## Launch
