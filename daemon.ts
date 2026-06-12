@@ -2723,7 +2723,7 @@ function startHelpText(paired: boolean): string {
     `♾️ <code>/loop</code> a goal until its check passes · 💸 <code>/budget</code> cap · 👤 <code>/account</code>\n` +
     `🔊 Voice replies (free local TTS) · ✏️ edit your last message to correct it\n` +
     `🛑 <code>/stop</code> to interrupt · ⚙️ <code>/settings</code> for the rest\n\n` +
-    `🖼️ Set this image as my profile picture — save it, then @BotFather → Edit Bot → Botpic.`
+    `🖼️ Save &amp; set this image as my profile picture`
 
   if (paired) return guide
   return guide +
