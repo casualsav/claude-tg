@@ -386,7 +386,7 @@ adoptable pane.
   from the transcript), on by default.
 - **/sessions** (list · `/sessions #` switch · `/sessions name # <label>`), **/mode** & **/model**
   pickers, **/cost**, **/context**, **/stop**, **/new**, **/terminal**.
-- **Auto-continue** when a usage limit resets — armed per hit via a button on the limit notice (self-verifies + retries).
+- **Auto-continue** when a usage limit resets — scheduled automatically on every hit, cancellable via a button on the limit notice (self-verifies + retries).
 
 ## Notes
 - The daemon runs **standalone** (relaunched by the SessionStart hook), so it survives closing

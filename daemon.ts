@@ -87,7 +87,7 @@ import {
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
 import { synthesize, provisionPiper, piperReady, engineStatus, PIPER_VOICES, DEFAULT_PIPER_VOICE, type TtsEngine } from './voice-out.ts'
-import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, type Recurrence } from './time.ts'
+import { parseDuration, formatDuration, fmtWhen, splitLeadingDuration, nextRecurrence, recurrenceLabel, parseCron, nextCron, type Recurrence } from './time.ts'
 import {
   initScheduler, loadScheduledMsgs, cancelScheduled, addScheduled, scheduledCount,
   scheduledListText, scheduledCancelKeyboard, scheduleDashboard, MAX_TIMEOUT,
@@ -1673,9 +1673,10 @@ function maybeWarnContext(pct: number | null): void {
 // period can't re-fire while it's still active — and so the pane-scrape and snapshot paths
 // can't double-fire across a snapshot going stale. Drives weekly resets too: a 7d
 // reset is just a `fireAt` days out, well within setTimeout's range.
-// The ⛔ message carries one "▶️ Auto-continue" button — the per-hit choice: tapped → the
-// scheduled reset is armed to type "continue" automatically; untapped → the reset ping
-// arrives with a manual Continue button instead. (Replaces the old global /autocontinue toggle.)
+// Auto-continue is armed by default: the hit schedules a "continue" at the reset instant, and
+// the ⛔ message carries one "✖️ Cancel" button — tapped, the reset ping arrives with a manual
+// Continue button instead. (Was opt-in via an "▶️ Auto-continue" button; usage:arm still works
+// for old messages.)
 function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: string | null = focus.activePaneId, account: Account = MAIN_ACCOUNT): void {
   const key = `hit:${Math.round(fireAt / 60_000)}`
   const prev = usageHitState.get(account.name)
@@ -1685,16 +1686,16 @@ function actOnLimitHit(fireAt: number, type: string, banner?: string, origin: st
   const chats = loadAccess().allowFrom
   if (chats.length === 0) return
   const who = account.name === 'main' ? '' : ` (<b>${escapeHtml(account.name)}</b> account)`
-  const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\nI'll ping you when it resets — or tap below and I'll continue automatically.`
+  const note = `\n\n⏰ Resets in ${formatDuration(Math.max(0, fireAt - Date.now()))}.\n▶️ I'll continue automatically when it resets — tap below if you'd rather I didn't.`
   const head = banner ? escapeHtml(banner) : `Out of your ${escapeHtml(type)} limit.`
-  const kb = new InlineKeyboard().text('▶️ Auto-continue when it resets', `usage:arm:${account.name}`)
+  const kb = new InlineKeyboard().text('✖️ Cancel auto-continue', `usage:disarm:${account.name}`)
   // Route the immediate banner to the session that hit the limit (its topic in forum mode).
   void (async () => {
     for (const { chat, thread } of await outboundTargetsFor(origin)) {
       await bot.api.sendMessage(chat, `⛔ <b>Claude hit the usage limit${who ? '</b>' + who + '<b>' : ''}.</b>\n${head}${note}`, { parse_mode: 'HTML', reply_markup: kb, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
     }
   })()
-  scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats)
+  scheduleReset(account.name, fireAt + RESET_GRACE_MS, chats, 0, true)   // armed by default; the button disarms
 }
 
 // Poll each account's statusline snapshot: drive warnings + limit handling off exact numbers.
@@ -2718,7 +2719,7 @@ function startHelpText(paired: boolean): string {
     `🧠 <code>/model</code> · 🕹️ <code>/mode</code> · 🎚️ <code>/effort</code> · 📡 <code>/stream</code> live activity\n` +
     `✅ Permission taps — ⚡ or allow all this turn\n` +
     `📝 <code>/diff</code> + Commit · Push · PR buttons · 🐙 GitHub sign-in from /settings (gh installs itself)\n` +
-    `🔎 <code>/find</code> any session · ⏰ <code>/queue @reset</code> · 🔁 <code>/schedule every 09:00</code> · ⏪ <code>/rewind</code>\n` +
+    `🔎 <code>/find</code> any session · ⏰ <code>/queue @reset</code> · 🔁 <code>/cron</code> jobs (full cron exprs) · ⏪ <code>/rewind</code>\n` +
     `♾️ <code>/loop</code> a goal until its check passes · 💸 <code>/budget</code> cap · 👤 <code>/account</code>\n` +
     `🔊 Voice replies (free local TTS) · ✏️ edit your last message to correct it\n` +
     `🛑 <code>/stop</code> to interrupt · ⚙️ <code>/settings</code> for the rest\n\n` +
@@ -3527,12 +3528,21 @@ function scheduleReset(account: string, fireAt: number, chats: string[], attempt
   resetTimers.set(account, setTimeout(() => { resetTimers.delete(account); void fireResetNotification(account, chats, attempt, auto) }, delay))
 }
 
-// Arm auto-continue on an account's pending scheduled reset (the ⛔ button's action). Returns
+// Arm auto-continue on an account's pending scheduled reset (old ⛔ messages' button). Returns
 // the fire time when armed, or null if no reset is pending (already fired / never scheduled).
 function armScheduledReset(account: string): number | null {
   const e = readResetSchedules()[account]
   if (!e || e.fireAt <= Date.now()) return null
   scheduleReset(account, e.fireAt, e.chats, e.attempt ?? 0, true)
+  return e.fireAt
+}
+
+// Disarm it (the ⛔ message's Cancel button): the reset still pings, but with a manual Continue
+// button instead of typing "continue" itself. Same null contract as armScheduledReset.
+function disarmScheduledReset(account: string): number | null {
+  const e = readResetSchedules()[account]
+  if (!e || e.fireAt <= Date.now()) return null
+  scheduleReset(account, e.fireAt, e.chats, e.attempt ?? 0, false)
   return e.fireAt
 }
 
@@ -3963,11 +3973,13 @@ async function pasteToPane(paneId: string, text: string): Promise<boolean> {
 const DEFAULT_TZ = 'America/Los_Angeles'
 const DOW_NAMES: Record<string, number> = { sun: 0, mon: 1, tue: 2, wed: 3, thu: 4, fri: 5, sat: 6 }
 
-bot.command('schedule', async ctx => {
+// /cron — the scheduler (one-shot, plain-language recurring, and full cron expressions).
+// /schedule is the backup alias: same handler, same store, same list.
+bot.command(['cron', 'schedule'], async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim()
   if (!arg || /^(cancel|list|dash)/i.test(arg)) { await scheduleDashboard(ctx); return }
-  // `/schedule tz <IANA>` — the wall-clock timezone for recurring schedules.
+  // `/cron tz <IANA>` — the wall-clock timezone for recurring schedules.
   const tzMatch = /^tz(?:\s+(\S+))?$/i.exec(arg)
   if (tzMatch) {
     const access = loadAccess()
@@ -3977,10 +3989,37 @@ bot.command('schedule', async ctx => {
       access.scheduleTz = tzMatch[1]
       saveAccess(access)
     }
-    await ctx.reply(`🌐 Recurring schedules use <b>${escapeHtml(access.scheduleTz ?? DEFAULT_TZ)}</b>.\nChange with <code>/schedule tz &lt;IANA name&gt;</code>.`, { parse_mode: 'HTML' })
+    await ctx.reply(`🌐 Recurring schedules use <b>${escapeHtml(access.scheduleTz ?? DEFAULT_TZ)}</b>.\nChange with <code>/cron tz &lt;IANA name&gt;</code>.`, { parse_mode: 'HTML' })
     return
   }
-  // Recurring (ROADMAP #11): `/schedule every 09:00 msg` · `every weekday 09:00 msg` ·
+  // Full cron grammar: `/cron */30 9-17 * * 1-5 check CI`. Five fields then the message; tried
+  // before the other grammars (a cron expr never parses as `every …` or a leading duration).
+  const cronMatch = /^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.+)$/s.exec(arg)
+  if (cronMatch && parseCron(cronMatch[1])) {
+    const [, expr, text] = cronMatch
+    const tz = loadAccess().scheduleTz ?? DEFAULT_TZ
+    // Guard against expressions that would hammer the session (and your usage): require ≥5 min
+    // between fires across the first few occurrences.
+    let t = Date.now()
+    const fires: number[] = []
+    for (let i = 0; i < 5; i++) { const n = nextCron(expr, t, tz); if (n === null) break; fires.push(n); t = n }
+    if (fires.length === 0) { await ctx.reply('❌ That expression never fires (check day-of-month/month).'); return }
+    for (let i = 1; i < fires.length; i++) {
+      if (fires[i] - fires[i - 1] < 5 * 60_000) { await ctx.reply('❌ That fires more often than every 5 minutes — too hot for a Claude session. Loosen the expression.'); return }
+    }
+    const recur: Recurrence = { kind: 'cron', expr, tz }
+    const { paneId, thread } = await targetPaneOf(ctx)
+    const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
+    const cwd = paneId ? await paneCwd(paneId).catch(() => undefined) ?? undefined : undefined
+    addScheduled({ id: randomBytes(4).toString('hex'), fireAt: fires[0], chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text, thread, recur, cwd })
+    await ctx.reply(
+      `🔁 Scheduled <b>${escapeHtml(recurrenceLabel(recur))}</b> (${escapeHtml(tz)}) → <b>${escapeHtml(label)}</b>\n` +
+      `Next: ${fires.slice(0, 3).map(fmtWhen).join(' · ')}\n\n${escapeHtml(text)}\n\n` +
+      `${cwd ? `If the session is gone at fire time, I'll start one in <code>${escapeHtml(cwd)}</code>. ` : ''}Cancel with <code>/cron cancel</code>.`,
+      { parse_mode: 'HTML' })
+    return
+  }
+  // Recurring (ROADMAP #11): `/cron every 09:00 msg` · `every weekday 09:00 msg` ·
   // `every monday 09:00 msg`. Fires on the configured wall clock, re-arms after each delivery.
   const recurMatch = /^every\s+(?:(day|daily|weekday|weekdays|sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)\s+)?(\d{1,2}):(\d{2})\s+(.+)$/is.exec(arg)
   if (recurMatch) {
@@ -3994,16 +4033,17 @@ bot.command('schedule', async ctx => {
       : { kind: 'weekly', hh, mm, dow: DOW_NAMES[w.slice(0, 3)], tz }
     const { paneId, thread } = await targetPaneOf(ctx)
     const label = paneId ? (sessionNames.get(paneId) || await paneLabel(paneId)) : 'this session'
+    const cwd = paneId ? await paneCwd(paneId).catch(() => undefined) ?? undefined : undefined
     const fireAt = nextRecurrence(recur, Date.now())
-    addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text, thread, recur })
-    await ctx.reply(`🔁 Scheduled <b>${recurrenceLabel(recur)}</b> (${escapeHtml(tz)}) → <b>${escapeHtml(label)}</b>; next ${fmtWhen(fireAt)}:\n\n${escapeHtml(text)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+    addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text, thread, recur, cwd })
+    await ctx.reply(`🔁 Scheduled <b>${recurrenceLabel(recur)}</b> (${escapeHtml(tz)}) → <b>${escapeHtml(label)}</b>; next ${fmtWhen(fireAt)}:\n\n${escapeHtml(text)}\n\nCancel with <code>/cron cancel</code>.`, { parse_mode: 'HTML' })
     return
   }
   // One-shot: `/schedule <time> <message>` queues immediately; bare `/schedule <time>` falls
   // through to the force-reply so the message can be composed in a follow-up.
   const { ms, rest: oneShotText } = splitLeadingDuration(arg)
   if (!ms) {
-    await ctx.reply('Usage: <code>/schedule 2h ping the server</code> — or <code>/schedule 12h</code> then reply with the message.\nRecurring: <code>/schedule every 09:00 …</code> | <code>every weekday 09:00 …</code> | <code>every mon 09:00 …</code> (timezone: <code>/schedule tz</code>).\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/schedule cancel</code>.', { parse_mode: 'HTML' })
+    await ctx.reply('Usage: <code>/cron 2h ping the server</code> — or <code>/cron 12h</code> then reply with the message.\nRecurring: <code>/cron every 09:00 …</code> | <code>every weekday 09:00 …</code> | <code>every mon 09:00 …</code>\nCron exprs: <code>/cron */30 9-17 * * 1-5 check CI</code> (min hour dom mon dow; timezone: <code>/cron tz</code>).\nUnits: <code>s m h d w</code> (e.g. <code>1h30m</code>). Cancel with <code>/cron cancel</code>. <code>/schedule</code> works too.', { parse_mode: 'HTML' })
     return
   }
   if (ms > MAX_TIMEOUT) { await ctx.reply('That\'s too far out — max ~24 days.'); return }
@@ -4014,7 +4054,7 @@ bot.command('schedule', async ctx => {
   const fireAt = Date.now() + ms
   if (oneShotText) {
     addScheduled({ id: randomBytes(4).toString('hex'), fireAt, chatId: String(ctx.chat?.id), paneId, sessionLabel: label, text: oneShotText, thread })
-    await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(label)}</b>:\n\n${escapeHtml(oneShotText)}\n\nCancel with <code>/schedule cancel</code>.`, { parse_mode: 'HTML' })
+    await ctx.reply(`✅ Scheduled in <b>${formatDuration(ms)}</b> → <b>${escapeHtml(label)}</b>:\n\n${escapeHtml(oneShotText)}\n\nCancel with <code>/cron cancel</code>.`, { parse_mode: 'HTML' })
     return
   }
   const sent = await ctx.reply(
@@ -4152,7 +4192,7 @@ async function applyInheritedSettings(paneId: string, inherit: InheritedSettings
   } catch (e) { process.stderr.write(`daemon: inherit settings for ${paneId} failed: ${e}\n`) }
 }
 
-async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT): Promise<boolean> {
+async function spawnSession(dir: string, extra = '', presetSessionId?: string, account: Account = MAIN_ACCOUNT): Promise<string | null> {
   try {
     // tmux's `new-window -c` silently falls back to $HOME when it can't chdir into `dir` (e.g.
     // another user's 700 folder) — the session then runs in the wrong place, stuck on a trust
@@ -4188,8 +4228,8 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
       registerSpawnedPane(newPane)   // bind/announce now (works even under FORCE_PANE)
       if (inherit) void applyInheritedSettings(newPane, inherit)
     }
-    return true
-  } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return false }
+    return newPane || null
+  } catch (e) { process.stderr.write(`daemon: spawn session in ${dir} failed: ${e}\n`); return null }
 }
 
 // Friendly last-activity stamp: relative for the last day, absolute date+time beyond that.
@@ -4845,9 +4885,31 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
-  // "Auto-continue" button on the ⛔ limit-hit message → arm that account's pending scheduled
-  // reset to type "continue" automatically, drop the button, and confirm. Bare "usage:arm"
-  // (pre-multi-account messages) reads as main.
+  // "Cancel auto-continue" on the ⛔ limit-hit message → disarm the account's pending scheduled
+  // reset; it still pings at reset, with a manual Continue button.
+  const disarmMatch = /^usage:disarm:([A-Za-z0-9_-]+)$/.exec(data)
+  if (disarmMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    const fireAt = disarmScheduledReset(disarmMatch[1])
+    await ctx.editMessageReplyMarkup({ reply_markup: undefined }).catch(() => {})
+    if (!fireAt) {
+      await ctx.answerCallbackQuery({ text: 'No pending reset — the limit may have already reset.', show_alert: true }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery({ text: 'Auto-continue cancelled.' }).catch(() => {})
+    const thread = ctx.callbackQuery.message?.message_thread_id
+    await bot.api.sendMessage(String(ctx.chat!.id),
+      `✖️ Auto-continue cancelled — I'll still ping you with a ▶️ Continue button when the limit resets (in ${formatDuration(Math.max(0, fireAt - Date.now()))}).`,
+      thread ? { message_thread_id: thread } : {}).catch(() => {})
+    return
+  }
+
+  // "Auto-continue" button on OLD ⛔ limit-hit messages (pre-default-arm) → arm that account's
+  // pending scheduled reset to type "continue" automatically, drop the button, and confirm.
+  // Bare "usage:arm" (pre-multi-account messages) reads as main.
   const armMatch = /^usage:arm(?::([A-Za-z0-9_-]+))?$/.exec(data)
   if (armMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
@@ -6463,6 +6525,17 @@ initScheduler({
     paneId === focus.activePaneId && focus.paneWatcher
       ? injectPaste(paneId, focus.paneWatcher, text)
       : pasteToPane(paneId, text),
+  // A recurring job's session died → revive one in its folder, wait for the REPL prompt, deliver.
+  reviveAndInject: async (cwd, text) => {
+    const pane = await spawnSession(cwd, '', isTopicMode() ? genSessionId() : undefined)
+    if (!pane) return null
+    for (let i = 0; i < 45; i++) {   // claude boots in a few seconds; trust prompts are pre-answered
+      await sleep(1000)
+      const cap = stripAnsi(await capturePane(pane).catch(() => ''))
+      if (/[❯>]\s*$/m.test(cap) || /\? for shortcuts/.test(cap)) break
+    }
+    return (await pasteToPane(pane, text)) ? pane : null
+  },
 })
 loadScheduledMsgs()
 loadTopics()   // forum-topics mode: load the persisted group + session<->topic map at startup
@@ -6518,7 +6591,7 @@ void (async () => {
               { command: 'stop', description: 'Interrupt the current task (Esc)' },
               { command: 'status', description: 'Re-post the status pin at the bottom' },
               { command: 'settings', description: 'Channel settings — mirror, pin, MCP, voice' },
-              { command: 'schedule', description: 'Schedule a message (/schedule 12h · every 09:00 · cancel)' },
+              { command: 'cron', description: 'Schedule messages (/cron 12h · every 09:00 · */30 9-17 * * 1-5 · cancel)' },
               { command: 'queue', description: 'Queue a prompt for idle, or @reset for the 5h rollover (/queue clear)' },
               { command: 'loop', description: 'Run a goal on repeat until a check passes (/loop <goal> · status · stop)' },
               { command: 'md', description: 'Create a .md file in the working dir, then reply with its contents' },

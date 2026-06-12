@@ -23,6 +23,10 @@ type SchedulerDeps = {
   // Deliver `text` into a pane, returning whether it landed. The daemon implements this with
   // its own focus state: inject (with watcher pause) if the pane is focused, else plain paste.
   injectToPane: (paneId: string, text: string) => Promise<boolean>
+  // Recurring job whose session is gone: spawn a fresh session in `cwd`, wait for the REPL, and
+  // deliver there — cron jobs outlive their sessions. Returns the new pane id, or null when the
+  // spawn/delivery failed.
+  reviveAndInject: (cwd: string, text: string) => Promise<string | null>
 }
 
 let deps: SchedulerDeps
@@ -74,6 +78,17 @@ async function deliverScheduled(msg: ScheduledMessage): Promise<void> {
     }
   }
   if (!msg.paneId || !(await paneAlive(msg.paneId))) {
+    // Recurring jobs outlive sessions: revive one in the job's folder and deliver there. The new
+    // pane becomes the job's target so the next fire injects directly.
+    if (msg.recur && msg.cwd) {
+      note(`⏰ <b>${escapeHtml(msg.sessionLabel)}</b> is gone — starting a session in <code>${escapeHtml(msg.cwd)}</code> for the scheduled job…`)
+      const pane = await deps.reviveAndInject(msg.cwd, msg.text)
+      if (pane) { msg.paneId = pane; saveScheduledMsgs() }   // next fire injects directly
+      note(pane
+        ? `📤 Sent the scheduled message to the new session:\n\n${escapeHtml(msg.text)}`
+        : `⚠️ Couldn't start a session in <code>${escapeHtml(msg.cwd)}</code> — this run was skipped.`)
+      return
+    }
     note(`⏰ Couldn't send your scheduled message — <b>${escapeHtml(msg.sessionLabel)}</b> is gone:\n\n${escapeHtml(msg.text)}`)
     return
   }
@@ -114,7 +129,7 @@ export function scheduledCancelKeyboard(): InlineKeyboard {
 
 export async function scheduleDashboard(ctx: Context): Promise<void> {
   if (scheduledMsgs.length === 0) {
-    await ctx.reply('📅 <b>No scheduled messages.</b>\n\nSchedule one with <code>/schedule 2h ping the server</code>, or tap ➕ to compose one.',
+    await ctx.reply('📅 <b>No scheduled messages.</b>\n\nSchedule one with <code>/cron 2h ping the server</code> (also: <code>every 09:00 …</code> or a 5-field cron expr), or tap ➕ to compose one.',
       { parse_mode: 'HTML', reply_markup: new InlineKeyboard().text('➕ Add', 'sched:add') })
     return
   }

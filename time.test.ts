@@ -80,3 +80,48 @@ t2('recurrenceLabel renders', () => {
   e2(recurrenceLabel({ kind: 'daily', hh: 9, mm: 5, tz: 'UTC' })).toBe('daily 09:05')
   e2(recurrenceLabel({ kind: 'weekly', hh: 7, mm: 0, dow: 5, tz: 'UTC' })).toBe('Fri 07:00')
 })
+
+// ---- cron expressions ----
+import { parseCron, nextCron, describeCron } from './time.ts'
+import { test as t3, expect as e3 } from 'bun:test'
+
+t3('parseCron accepts steps, ranges, lists, names; rejects junk', () => {
+  e3(parseCron('*/15 * * * *')).not.toBeNull()
+  e3(parseCron('0 9-17 * * mon-fri')).not.toBeNull()
+  e3(parseCron('0,30 9 1,15 jan-jun *')).not.toBeNull()
+  e3(parseCron('0 9 * * 7')).not.toBeNull()       // 7 = Sunday
+  e3(parseCron('* * * *')).toBeNull()             // 4 fields
+  e3(parseCron('61 * * * *')).toBeNull()          // minute out of range
+  e3(parseCron('* * * * 8')).toBeNull()           // dow out of range
+  e3(parseCron('foo * * * *')).toBeNull()
+})
+
+t3('nextCron: every 15 min from a known instant', () => {
+  const after = Date.UTC(2026, 5, 12, 10, 7)   // 10:07 UTC
+  e3(nextCron('*/15 * * * *', after, 'UTC')).toBe(Date.UTC(2026, 5, 12, 10, 15))
+})
+
+t3('nextCron: weekday window honors tz and skips the weekend', () => {
+  const friEvening = Date.UTC(2026, 5, 13, 2, 0)   // Fri Jun 12 2026, 19:00 PDT
+  const next = nextCron('0 9 * * 1-5', friEvening, 'America/Los_Angeles')!
+  e3(new Date(next).toUTCString()).toContain('Mon, 15 Jun 2026')
+  e3(next).toBe(Date.UTC(2026, 5, 15, 16, 0))      // 09:00 PDT
+})
+
+t3('nextCron: dom OR dow when both are restricted (standard cron rule)', () => {
+  // Fires on the 15th OR on Mondays. From Sat Jun 13 2026, the next is Mon Jun 15 (both),
+  // then from Jun 15 12:01 UTC the next Monday is Jun 22 — before the next 15th (Jul 15).
+  const next = nextCron('0 12 15 * 1', Date.UTC(2026, 5, 15, 12, 1), 'UTC')!
+  e3(new Date(next).toUTCString()).toContain('Mon, 22 Jun 2026')
+})
+
+t3('nextCron: impossible date returns null', () => {
+  e3(nextCron('0 0 30 2 *', Date.UTC(2026, 5, 12), 'UTC')).toBeNull()   // Feb 30
+})
+
+t3('describeCron labels the common shapes', () => {
+  e3(describeCron('*/15 * * * *')).toBe('every 15 min')
+  e3(describeCron('0 9 * * *')).toBe('daily 09:00')
+  e3(describeCron('30 8 * * 1-5')).toBe('weekdays 08:30')
+  e3(describeCron('0 9 1 * *')).toBe('cron 0 9 1 * *')
+})
