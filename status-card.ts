@@ -85,6 +85,14 @@ export function lastModelInTranscript(file: string): string | null {
   }
   return null
 }
+// The Claude Code build a session is actually RUNNING, from its transcript (every entry stamps
+// it). The installed binary can be newer — the native build auto-updates underneath live sessions.
+export function lastVersionInTranscript(file: string): string | null {
+  let data = ''
+  try { data = readFileSync(file, 'utf8') } catch { return null }
+  const m = data.match(/"version":"(\d+\.\d+\.\d+[^"]*)"/g)
+  return m?.length ? m[m.length - 1].slice(11, -1) : null
+}
 // The session's working plan: the most recent TodoWrite state in its transcript (ROADMAP #16).
 // Whole-file read matches lastModelInTranscript's pattern (the pin tick already pays it).
 type TodoState = { total: number; done: number; active: string | null }

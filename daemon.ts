@@ -82,7 +82,8 @@ import {
 import {
   initStatusCard, statusCardText, statusKeyboard, updateSessionPin, updateTopicPins,
   removeSessionPins, refreshSessionPin, sessionPins, pinTextCache, persistSessionPins,
-  clearAllPins, clearTopicPins, createSessionPin, lastModelInTranscript, prettyModel, modeBadge,
+  clearAllPins, clearTopicPins, createSessionPin, lastModelInTranscript, lastVersionInTranscript,
+  prettyModel, modeBadge,
 } from './status-card.ts'
 import { TypingPresence } from './typing.ts'
 import { transcribe, transcribeProvider, transcribeStatus } from './voice.ts'
@@ -2961,22 +2962,41 @@ async function activeSessionId(): Promise<string | null> {
 // running claude, then relaunch `claude --resume <id>` in the SAME pane. Keeping the pane id keeps
 // the watcher (and this bridge) pointed at it; keeping the session id keeps the conversation.
 async function restartFocusedSession(chat: string): Promise<void> {
+  if (!focus.activePaneId || !focus.paneWatcher) {
+    await bot.api.sendMessage(chat, '⚠️ No active session to restart.', { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+  await restartPaneSession(focus.activePaneId, chat)
+}
+
+// Exit + resume ANY bridge pane's session in place (same pane keeps the bridge pointed at it,
+// same session id keeps the conversation). Re-applies the session's permission mode afterwards —
+// the resume restores the conversation but not the mode dial.
+async function restartPaneSession(pane: string, chat: string): Promise<void> {
   const dm = (t: string) => bot.api.sendMessage(chat, t, { parse_mode: 'HTML' }).catch(() => {})
-  const pane = focus.activePaneId
-  if (!pane || !focus.paneWatcher) { await dm('⚠️ No active session to restart.'); return }
-  const id = await activeSessionId()
-  if (!id) { await dm('⚠️ Couldn’t find this session’s id to resume — start a new session manually to pick up the update.'); return }
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = cwd ? await transcriptForPane(pane, cwd) : null
+  const id = file ? basename(file, '.jsonl') : null
+  if (!id) { await dm('⚠️ Couldn’t find this session’s id to resume — restart it manually to pick up the update.'); return }
   await dm('♻️ Restarting this session on the new Claude…')
-  await focus.paneWatcher.withInjection(async () => {
+  const mode = detectCurrentMode(await capturePane(pane).catch(() => ''))
+  // An alt-account session must resume under its config dir — the pane's shell doesn't export
+  // CLAUDE_CONFIG_DIR (the launcher env-prefixes it), so the resume line has to re-prefix.
+  const account = await paneAccount(pane)
+  const envPrefix = account.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
+  const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  const run = async () => {
     await sendKeys(pane, ['/exit', 'Enter'])
     for (let i = 0; i < 40 && (await paneCommand(pane)) === 'claude'; i++) await waitForSettle(pane, 200, 1500)
     // Relaunch by ABSOLUTE path to the binary `claude install` manages (claudeBin), not bare
     // `claude` — a stale npm-global claude earlier on the pane's PATH would otherwise resume the old
     // version. `hash -r` stays as hygiene (clears any cached lookup) but the absolute path is what
     // guarantees the resumed session runs the freshly-installed build regardless of PATH ordering.
-    await sendKeys(pane, [`hash -r; ${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
+    await sendKeys(pane, [`hash -r; ${envPrefix}${claudeBin()} --allow-dangerously-skip-permissions --resume ${id}`, 'Enter'])
     await waitForSettle(pane, 400, 30_000)
-  })
+  }
+  await (watcher ? watcher.withInjection(run) : run())
+  if (mode !== 'default') await switchToMode(pane, mode, watcher)
   await dm('✅ Session restarted on the new Claude — your conversation was resumed.')
 }
 
@@ -3004,6 +3024,35 @@ async function updateClaude(chat: string): Promise<void> {
   else await dm('No active session to resume — start one to use the new Claude.')
 }
 
+
+// Claude's native build auto-updates the BINARY silently while live sessions keep running the
+// old build until restarted — and nothing announces that. Compare each session's transcript
+// version to the installed binary and offer a one-tap restart, once per session+binary pair.
+const staleSessionNotified = new Map<string, string>()   // paneId → installed version already flagged
+async function sweepSessionVersions(): Promise<void> {
+  if (loadAccess().updateChecks === false) return
+  const installed = await claudeVersion()
+  if (!installed) return
+  for (const pane of [...offMcpPanes]) {
+    try {
+      if (staleSessionNotified.get(pane) === installed) continue
+      const cwd = await paneCwd(pane).catch(() => null)
+      const file = cwd ? await transcriptForPane(pane, cwd) : null
+      const running = file ? lastVersionInTranscript(file) : null
+      if (!running) continue
+      let newer = false
+      try { newer = Bun.semver.order(installed, running) > 0 } catch {}
+      if (!newer) continue
+      staleSessionNotified.set(pane, installed)
+      const kb = new InlineKeyboard().text('♻️ Restart session', `claudeupd:restart:${pane}`)
+      for (const { chat, thread } of await outboundTargetsFor(pane)) {
+        await bot.api.sendMessage(chat,
+          `🧠 Claude auto-updated to <b>v${escapeHtml(installed)}</b> — this session is still running <b>v${escapeHtml(running)}</b>. Restart to pick it up (the conversation resumes in place).`,
+          { parse_mode: 'HTML', reply_markup: kb, disable_notification: true, ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
+      }
+    } catch {}
+  }
+}
 
 async function showUpdateDashboard(ctx: Context): Promise<void> {
   const claudeVer = await claudeVersion()
@@ -5132,11 +5181,14 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // "Restart session now" under a finished Claude update.
-  if (data === 'claudeupd:restart') {
+  const claudeRestartMatch = /^claudeupd:restart(?::(%\d+))?$/.exec(data)
+  if (claudeRestartMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Restarting…' }).catch(() => {})
     await ctx.editMessageReplyMarkup().catch(() => {})
-    void restartFocusedSession(String(ctx.chat?.id))
+    const pane = claudeRestartMatch[1]   // pane-targeted (stale-session notice) or the focused one
+    if (pane) void restartPaneSession(pane, String(ctx.chat?.id))
+    else void restartFocusedSession(String(ctx.chat?.id))
     return
   }
 
@@ -6625,6 +6677,9 @@ setInterval(() => void sweepDeletedTopics(), TOPIC_SWEEP_MS).unref()
 setInterval(() => void sweepLaterQueues(), LATER_SWEEP_MS).unref()
 setInterval(() => void sweepLoops(), LOOP_SWEEP_MS).unref()
 setInterval(() => void sweepPermStorms(), 5_000).unref()
+// Stale-session sweep: hourly (auto-update can land any time), first pass shortly after boot.
+setTimeout(() => void sweepSessionVersions(), 3 * 60_000).unref()
+setInterval(() => void sweepSessionVersions(), 3_600_000).unref()
 setTimeout(() => void sweepUpdateChecks(), 5 * 60_000).unref()        // once shortly after boot…
 setInterval(() => void sweepUpdateChecks(), 24 * 3_600_000).unref()   // …then daily
 
