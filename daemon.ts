@@ -182,7 +182,10 @@ if (!STATIC) setInterval(checkApprovals, 5000).unref()
 // ---- Bot ----
 
 const bot = new Bot(TOKEN)
-initStatusCard({ bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername })
+initStatusCard({
+  bot, transcriptForPane, lastKnownModel: () => lastKnownModel, botUsername: () => botUsername,
+  usageSnapshotForPane: async pane => readUsageSnapshot(undefined, await paneAccount(pane)),
+})
 initUpdates({ bot })
 initPromptRelay({ bot, outboundTargetsFor, flushPendingText, transcriptForPane, lastRelayedUuid: () => lastRelayedUuid, resetPromptDedup, verifyPromptClosed, paneKeys })
 initQueue({ bot, outboundTargetsFor, deliverToPane: (pane, text) => pane === focus.activePaneId && focus.paneWatcher ? injectText(pane, focus.paneWatcher, text) : pasteToPane(pane, text) })

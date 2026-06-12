@@ -1,7 +1,7 @@
 import { test, expect } from 'bun:test'
 import {
   toolBadge, recentAssistantBlocks, renderToolsMirror, renderThoughtsMirror,
-  renderHybridMirror, renderDigestMirror, splitThoughtParagraphs,
+  renderHybridMirror, renderDigestMirror, splitThoughtParagraphs, renderToolRun,
 } from './mirror.ts'
 import type { Activity, FeedItem } from './transcript.ts'
 
@@ -53,7 +53,7 @@ test('renderToolsMirror pluralizes a single step correctly', () => {
   expect(renderToolsMirror([{ tool: 'Bash', detail: 'ls' }], true)).toContain('1 step')
 })
 
-test('renderThoughtsMirror leads with 💭, drops non-text, appends Done', () => {
+test('renderThoughtsMirror leads with 💭, folds tools into a summary, appends Done', () => {
   const feed: FeedItem[] = [
     { kind: 'text', text: 'thinking hard' },
     { kind: 'tool', tool: 'Bash', detail: 'ls' },
@@ -61,12 +61,28 @@ test('renderThoughtsMirror leads with 💭, drops non-text, appends Done', () =>
   const out = renderThoughtsMirror(feed, true)
   expect(out.startsWith('<blockquote>💭')).toBe(true)   // thoughts render shaded in a blockquote
   expect(out).toContain('thinking hard')
+  expect(out).toContain('Ran 1 shell command')   // the tool call folds into the aggregate line
   expect(out).not.toContain('Bash')
   expect(out).toContain('✅ <b>Done</b>')
 })
 
-test('renderThoughtsMirror with no narration yields just Done when done', () => {
-  expect(renderThoughtsMirror([{ kind: 'tool', tool: 'Bash', detail: 'x' }], true)).toBe('✅ <b>Done</b>')
+test('renderThoughtsMirror with no narration shows the tool summary and Done', () => {
+  expect(renderThoughtsMirror([{ kind: 'tool', tool: 'Bash', detail: 'x' }], true))
+    .toBe('<i>Ran 1 shell command</i>\n\n✅ <b>Done</b>')
+})
+
+test('renderToolRun aggregates search/read/bash and lists edits with line deltas', () => {
+  const run: Array<Extract<FeedItem, { kind: 'tool' }>> = [
+    { kind: 'tool', tool: 'Grep', detail: 'foo' }, { kind: 'tool', tool: 'Glob', detail: '*.ts' },
+    { kind: 'tool', tool: 'Grep', detail: 'bar' },
+    { kind: 'tool', tool: 'Read', detail: '/a/b.ts' }, { kind: 'tool', tool: 'Read', detail: '/a/c.ts' },
+    { kind: 'tool', tool: 'Bash', detail: 'ls' }, { kind: 'tool', tool: 'Bash', detail: 'pwd' },
+    { kind: 'tool', tool: 'Edit', detail: '/x/status-card.ts', lines: 3 },
+    { kind: 'tool', tool: 'WebFetch', detail: 'https://e.com' },
+  ]
+  const lines = renderToolRun(run)
+  expect(lines[0]).toBe('<i>Searched 3 patterns, read 2 files, ran 2 shell commands, fetch</i>')
+  expect(lines[1]).toBe('✏️ <code>status-card.ts</code> <i>+3</i>')
 })
 
 test('renderHybridMirror interleaves thoughts and tool badges', () => {

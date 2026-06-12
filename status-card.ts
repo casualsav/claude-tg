@@ -24,6 +24,9 @@ type StatusCardDeps = {
   transcriptForPane: (pane: string | null, cwd: string | null) => Promise<string | null>
   lastKnownModel: () => string | null   // last /model picker reading (daemon mutable)
   botUsername: () => string             // set once the bot connects
+  // The pane's account-level usage snapshot (usage.json, written by statusline-command.sh on
+  // every draw; null when stale) — resolved in daemon (paneAccount + readUsageSnapshot).
+  usageSnapshotForPane: (pane: string) => Promise<{ fiveHour?: { pct: number; resetsAt: number }; sevenDay?: { pct: number; resetsAt: number } } | null>
 }
 let deps: StatusCardDeps
 export function initStatusCard(d: StatusCardDeps): void { deps = d }
@@ -119,6 +122,19 @@ export function lastTodosInTranscript(file: string): TodoState | null {
   } catch { return null }
 }
 
+// Live countdown to a reset epoch in the statusline's own duration style ("54m" / "2h13m" /
+// "4d2h"), so the snapshot's epoch renders like the scraped field it replaces. null when the
+// epoch is unknown (0) or already past.
+function fmtResetIn(resetsAt: number): string | null {
+  const ms = resetsAt - Date.now()
+  if (!resetsAt || ms <= 0) return null
+  const m = Math.ceil(ms / 60_000)
+  if (m < 60) return `${m}m`
+  const h = Math.floor(m / 60)
+  if (h < 24) return `${h}h${m % 60 ? `${m % 60}m` : ''}`
+  return `${Math.floor(h / 24)}d${h % 24 ? `${h % 24}h` : ''}`
+}
+
 // Family name only — "Opus" / "Sonnet" / "Haiku" / "Fable" (no version), for the pin tagline.
 export function prettyModel(id: string | null): string | null {
   if (!id) return id
@@ -169,6 +185,18 @@ export async function statusCardText(paneId: string | null): Promise<string> {
     if (file) todos = lastTodosInTranscript(file)
   } catch {}
   const branch = cwd ? await gitBranch(cwd) : null
+
+  // Account-level 5h/7d override: an idle pane's statusline never re-renders, so its scraped
+  // percentages freeze at the last draw — every inactive topic's card slowly drifts from the
+  // truth. The rate windows are ACCOUNT-wide, and any active session of the account keeps the
+  // usage snapshot fresh, so prefer it whenever it's live; the scrape stays as the fallback
+  // (and still supplies the per-session fields: context, cost, times).
+  const snap = await deps.usageSnapshotForPane(paneId).catch(() => null)
+  if (snap?.fiveHour || snap?.sevenDay) {
+    status ??= { ctxPct: null, tokens: null, cost: null, sessionTime: null, apiTime: null, h5: null, d7: null, effort: null, think: false, model: null }
+    if (snap.fiveHour) status.h5 = { pct: Math.round(snap.fiveHour.pct), reset: fmtResetIn(snap.fiveHour.resetsAt) ?? status.h5?.reset ?? '—' }
+    if (snap.sevenDay) status.d7 = { pct: Math.round(snap.sevenDay.pct), reset: fmtResetIn(snap.sevenDay.resetsAt) ?? status.d7?.reset ?? '—' }
+  }
 
   // Head badges: model · think · effort · mode, then session (5h) · weekly (7d) · context. Mode
   // sits in the identity cluster (emoji + short word, same grammar as "⚡ high") rather than

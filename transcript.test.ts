@@ -106,7 +106,7 @@ test('currentTurnFeed interleaves narration + tools, dropping the conclusion tex
   // 'done' is the conclusion (relayed as its own message) — it must NOT appear in the card.
   expect(currentTurnFeed(f)).toEqual([
     { kind: 'text', text: 'looking' },
-    { kind: 'tool', tool: 'Read', detail: '/x' },
+    { kind: 'tool', tool: 'Read', detail: '/x', lines: null },
   ])
 })
 

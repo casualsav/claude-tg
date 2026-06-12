@@ -202,20 +202,74 @@ export function splitThoughtParagraphs(text: string): string[] {
   return out
 }
 
-// Thoughts-only card: just Claude's narration, rendered (not raw markdown) with a blank line
-// between thoughts and no 💭 prefix.
+// A run of consecutive tool calls (between two thoughts) folded into compact summary lines:
+// one aggregate sentence ("Searched 3 patterns, read 2 files, ran 2 shell commands"), then one
+// line per file edit with its net line delta. The thoughts card shows the work narrative this
+// way without the hybrid card's per-call noise.
+export function renderToolRun(run: Array<Extract<FeedItem, { kind: 'tool' }>>): string[] {
+  let searched = 0, read = 0, ran = 0
+  const other = new Map<string, number>()
+  const editLines: string[] = []
+  for (const it of run) {
+    if (it.tool === 'Grep' || it.tool === 'Glob') searched++
+    else if (it.tool === 'Read') read++
+    else if (it.tool === 'Bash') ran++
+    else if (it.tool === 'Edit' || it.tool === 'MultiEdit' || it.tool === 'Write' || it.tool === 'NotebookEdit') {
+      const file = it.detail.split('/').pop() || it.detail || 'file'
+      const n = it.lines
+      const delta = n ? ` <i>${n > 0 ? `+${n}` : `−${-n}`}</i>` : ''
+      editLines.push(`✏️ <code>${escapeHtml(file)}</code>${delta}`)
+    } else {
+      const [, label] = toolBadge(it.tool)
+      other.set(label, (other.get(label) ?? 0) + 1)
+    }
+  }
+  const parts: string[] = []
+  if (searched) parts.push(`searched ${searched} pattern${searched === 1 ? '' : 's'}`)
+  if (read) parts.push(`read ${read} file${read === 1 ? '' : 's'}`)
+  if (ran) parts.push(`ran ${ran} shell command${ran === 1 ? '' : 's'}`)
+  for (const [label, n] of other) parts.push(n > 1 ? `${escapeHtml(label)} ×${n}` : escapeHtml(label))
+  const sentence = parts.join(', ')
+  return [
+    ...(sentence ? [`<i>${sentence[0].toUpperCase()}${sentence.slice(1)}</i>`] : []),
+    ...editLines,
+  ]
+}
+
+// Thoughts card: Claude's narration rendered in shaded blockquotes, with each run of tool calls
+// between thoughts folded into renderToolRun's compact summary lines.
 export function renderThoughtsMirror(feed: FeedItem[], done: boolean): string {
-  const thoughts = feed
-    .filter((it): it is Extract<FeedItem, { kind: 'text' }> => it.kind === 'text')
-    .flatMap(it => splitThoughtParagraphs(it.text))
-    .slice(-MIRROR_THOUGHTS)   // keep only the latest few; oldest fall off as new thoughts flow in
-  const rendered = thoughts.map(t => mdToTelegramHtml(t).trim()).filter(Boolean)
-  let body = rendered.join('\n\n')
-  while (body.length > 3500 && rendered.length > 1) { rendered.shift(); body = rendered.join('\n\n') }
+  // Build the display blocks first: thought PARAGRAPHS (the visual unit — see
+  // splitThoughtParagraphs) and tool-summary lines, in feed order.
+  type Block = { thought: boolean; html: string }
+  const blocks: Block[] = []
+  let run: Array<Extract<FeedItem, { kind: 'tool' }>> = []
+  const flushRun = () => { if (run.length) { for (const html of renderToolRun(run)) blocks.push({ thought: false, html }); run = [] } }
+  for (const it of feed) {
+    if (it.kind === 'tool') { run.push(it); continue }
+    flushRun()
+    for (const p of splitThoughtParagraphs(it.text)) {
+      const html = mdToTelegramHtml(p).trim()
+      if (html) blocks.push({ thought: true, html })
+    }
+  }
+  flushRun()
+  // Window to the latest few blocks, then merge ADJACENT thought paragraphs into one shaded
+  // blockquote (💭 leads it) with the summary lines sitting between the quotes.
+  const render = (win: Block[]): string => {
+    const out: string[] = []
+    let quote: string[] = []
+    const flushQuote = () => { if (quote.length) { out.push(`<blockquote>💭 ${quote.join('\n\n')}</blockquote>`); quote = [] } }
+    for (const b of win) { if (b.thought) quote.push(b.html); else { flushQuote(); out.push(b.html) } }
+    flushQuote()
+    return out.join('\n')
+  }
+  let win = blocks.slice(-MIRROR_THOUGHTS)
+  let body = render(win)
+  while (body.length > 3500 && win.length > 1) { win = win.slice(1); body = render(win) }
   if (body.length > 3500) body = chunkHtml(body, 3500)[0] ?? body.slice(0, 3500)
   if (!body) return done ? '✅ <b>Done</b>' : ''
-  const head = `<blockquote>💭 ${body}</blockquote>`   // thoughts shaded in a blockquote; ✅ Done stays outside it (tried plain — shaded reads better)
-  return done ? `${head}\n\n✅ <b>Done</b>` : head
+  return done ? `${body}\n\n✅ <b>Done</b>` : body
 }
 
 // ---- The card lifecycle (shared by the focused card and per-pane aux cards) ----

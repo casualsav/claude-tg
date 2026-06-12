@@ -319,7 +319,24 @@ export function turnInProgress(file: string): boolean {
 
 // The current turn's chronological feed of what Claude said and did — text narration and tool
 // calls interleaved in transcript order — for the hybrid mirror card. Subagent output skipped.
-export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string }
+// `lines` is the net line delta of a file edit (+grew / −shrank; null for non-edit tools),
+// shown by the thoughts-stream tool summaries.
+export type FeedItem = { kind: 'text'; text: string } | { kind: 'tool'; tool: string; detail: string; lines?: number | null }
+
+// Net line delta of a file-mutating tool call, approximated from the tool INPUT (new vs old
+// string line counts) — no tool_result parsing needed, and close enough for a feed badge.
+function editLineDelta(name: string, input: unknown): number | null {
+  const o = input as Record<string, unknown> | null
+  const lines = (s: unknown) => (typeof s === 'string' && s ? s.split('\n').length : 0)
+  if (name === 'Write') return lines(o?.content)
+  if (name === 'Edit') return lines(o?.new_string) - lines(o?.old_string)
+  if (name === 'MultiEdit' && Array.isArray(o?.edits)) {
+    let net = 0
+    for (const e of o!.edits as Array<Record<string, unknown>>) net += lines(e?.new_string) - lines(e?.old_string)
+    return net
+  }
+  return null
+}
 // `concluded` = the turn has ended (pass it at card finalize, false while the turn is live). The
 // turn's REPLY — its last main-thread assistant text block — is relayed as its own message, so when
 // the turn has concluded we drop it here, otherwise it "folds" into the live card. The stop_reason
@@ -355,7 +372,7 @@ export function currentTurnFeed(file: string, concluded = false): FeedItem[] {
         if (concluded && i === replyEntry && bi === replyBlock) return   // the reply → its own message, never the card
         if (narration) out.push({ kind: 'text', text: b.text.trim() })
       } else if (b?.type === 'tool_use' && typeof b.name === 'string' && !isReactionToolUse(b)) {
-        out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input) })
+        out.push({ kind: 'tool', tool: b.name, detail: toolDetail(b.input), lines: editLineDelta(b.name, b.input) })
       }
     })
   }
