@@ -34,6 +34,22 @@ export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*[mGKHFJABCDsuhl]/g, '').replace(/\x1b\([AB]/g, '')
 }
 
+// One capture, many detectors: every relay tick runs the same pane text through the whole
+// detector chain (working/limited/user/permission/login/…), and each detector independently
+// split + ANSI-stripped the full capture. Memoize the stripped lines for the most recent
+// capture — the chain passes the SAME string, so the === hit is a reference check and the
+// strip happens once per capture instead of once per detector. Single entry by design: a
+// second pane's capture just recomputes (correctness never depends on a hit). Callers treat
+// the returned array as read-only.
+let _linesKey = ''
+let _linesVal: string[] = []
+export function paneLines(paneText: string): string[] {
+  if (paneText === _linesKey && _linesVal.length) return _linesVal
+  _linesKey = paneText
+  _linesVal = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
+  return _linesVal
+}
+
 // A line that is nothing but box-drawing chars / whitespace (a border or divider).
 const BOXY_LINE = /^[╭╮╰╯─│\s]*$/
 // Glyphs that begin a tool-result / output / bullet line — never a question.
@@ -134,7 +150,7 @@ function parseOptions(region: string[], re: RegExp): PromptOption[] | null {
 // the daemon recognises it to auto-submit once every question is answered — and its
 // "Ready to submit your answers?" line appears nowhere else.
 export function isSubmitScreen(paneText: string): boolean {
-  return /ready to submit your answers/i.test(stripAnsi(paneText))
+  return paneLines(paneText).some(l => /ready to submit your answers/i.test(l))
 }
 
 export function detectUserPrompt(paneText: string): PromptInfo | null {
@@ -142,7 +158,7 @@ export function detectUserPrompt(paneText: string): PromptInfo | null {
   // it's driven programmatically, not relayed — keep it out of detection entirely.
   if (isSubmitScreen(paneText)) return null
 
-  const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
+  const lines = paneLines(paneText)
 
   // Find the live select-menu footer: the lowest line carrying the hint, which
   // must sit at the bottom of the pane. A footer with more than one non-blank
@@ -209,7 +225,7 @@ const DASH_DIVIDER = /^[\s╌┄┈─—-]*$/
 const SOLID_RULE = /^[\s─]{4,}$/
 
 export function detectPermissionPrompt(paneText: string): PermissionPrompt | null {
-  const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
+  const lines = paneLines(paneText)
 
   // The permission footer, at the very bottom (≤1 non-blank line below → live, not a
   // scrolled-up past prompt).
@@ -273,7 +289,7 @@ const LOGIN_ANCHOR = /select login method|select login|log ?in with|how would yo
 const LOGIN_OPT = /^\s*(?:│\s*)?(?:[_❯►▶•]\s*)?(\d+)[.)]\s+(.+?)\s*$/
 
 export function detectLoginPrompt(paneText: string): { options: PromptOption[] } | null {
-  const lines = paneText.split('\n').map(l => stripAnsi(l).trimEnd())
+  const lines = paneLines(paneText)
   if (!lines.some(l => LOGIN_ANCHOR.test(l))) return null
 
   // The "Esc to cancel" footer, live at the very bottom (≤1 non-blank line below).
@@ -310,7 +326,7 @@ export function detectLoginPrompt(paneText: string): { options: PromptOption[] }
 // clear it. We recognise it by its distinctive first option + a live "Enter to confirm" footer.
 const USAGE_CHOICE_OPT = /stop and wait for (?:the )?limit to reset/i
 export function isUsageLimitChoice(paneText: string): boolean {
-  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  const lines = paneLines(paneText)   // trimEnd-only delta vs the old un-trimmed strip — all tests here are trailing-ws-insensitive
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/enter to confirm/i.test(lines[i])) { footerIdx = i; break }
@@ -335,7 +351,7 @@ export function isUsageLimitChoice(paneText: string): boolean {
 // who navigates to a different scope (or "Back") in the terminal is never overridden.
 const PLUGIN_USER_SCOPE = /install for you \(user scope\)/i
 export function isPluginInstallUserScope(paneText: string): boolean {
-  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  const lines = paneLines(paneText)
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/enter to select/i.test(lines[i])) { footerIdx = i; break }
@@ -354,7 +370,7 @@ export function isPluginInstallUserScope(paneText: string): boolean {
 export type CcMode = 'default' | 'acceptEdits' | 'plan' | 'auto' | 'bypassPermissions'
 
 export function detectCurrentMode(paneText: string): CcMode {
-  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  const lines = paneLines(paneText)
   // Drop the "✗ Auto-update failed…" footer line first — its "Auto" otherwise matches the
   // auto-mode test, making every mode read as 'auto' (broke the /mode picker's live update).
   const footer = lines.slice(-5).filter(l => !/auto-update/i.test(l)).join(' ').toLowerCase()
@@ -370,7 +386,7 @@ export function detectCurrentMode(paneText: string): CcMode {
 // detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and
 // report "another screen" instead of silently switching/mis-reporting.
 export function onNormalPrompt(paneText: string): boolean {
-  const lines = paneText.split('\n').map(l => stripAnsi(l))
+  const lines = paneLines(paneText)
   const tail = lines.slice(-8).join('\n').toLowerCase()
   if (/shift\+tab to cycle|\? for shortcuts|esc to interrupt/.test(tail)) return true
   // The footer hint rotates with CC version/state ("← for agents", "@ for file paths", …), so all
