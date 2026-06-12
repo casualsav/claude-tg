@@ -15,7 +15,6 @@ Send messages and files, voice notes, use slash commands, see Claude's extended 
 - A Telegram bot token from [@BotFather](https://t.me/BotFather).
 - `tmux` — required for some features. Core messaging works without it via MCP.
 - Linux or macOS (on Windows, run inside [WSL2](https://learn.microsoft.com/windows/wsl/) — native Windows has no `tmux`).
-- Optional, for voice notes: local Whisper (auto-provisioned) or a Groq/OpenAI API key.
 
 ## Installation: 
 
