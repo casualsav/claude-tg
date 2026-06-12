@@ -39,9 +39,9 @@ which instance this invocation targets**, in priority order:
    colon `:`. So `/telegram:configure 123456:ABC…` has no id; `/telegram:configure work 123456:ABC…`
    targets id `work`.)
 2. **Otherwise, the current pane's id.** The session you're in may be tagged for an instance (it was
-   launched with `pocket-claude <id>`). Read it:
+   launched with `claude-tg <id>`). Read it:
    `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`. If non-empty (e.g. `work`),
-   use it — so a user who ran `pocket-claude work` can just type `/telegram:configure <token>` here and
+   use it — so a user who ran `claude-tg work` can just type `/telegram:configure <token>` here and
    it targets the `work` bridge (the very session they're in).
 3. **Otherwise** → id `1` (the default).
 
@@ -54,8 +54,8 @@ are fully isolated.
 **After writing a NEW slot's token,** bring its daemon up now (it isn't covered by the already-running
 hook until the next session start): run `bun ~/.claude/channels/telegram/ensure-daemon.js` — it
 enumerates every configured instance and launches any that's down. The new daemon then auto-discovers
-and adopts the tagged pane (e.g. the `pocket-claude <id>` session the user is in). For panes elsewhere,
-tell the user to launch them with **`pocket-claude <id>`**.
+and adopts the tagged pane (e.g. the `claude-tg <id>` session the user is in). For panes elsewhere,
+tell the user to launch them with **`claude-tg <id>`**.
 
 Strip the leading instance id (if present) before parsing the rest of the arguments below.
 
@@ -211,7 +211,7 @@ DIR=$(ls -d ~/.claude/plugins/cache/pocket-claude/telegram/*/ | sort -V | tail -
 - **`on`/`off`** → do the rename (skip if already in that state).
 
 Then tell the user it applies to **sessions started afterward** (Claude Code loads MCP servers
-at launch) — and that off-MCP `pocket-claude` sessions don't load the plugin's MCP server anyway
+at launch) — and that off-MCP `claude-tg` sessions don't load the plugin's MCP server anyway
 (it ships disabled), so this doesn't affect them. (You can also flip this from
 Telegram with `/settings`.)
 

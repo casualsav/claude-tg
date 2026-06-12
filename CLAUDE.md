@@ -19,10 +19,10 @@ Follow **[`off-mcp/INSTALL.md`](off-mcp/INSTALL.md)** step by step — it is wri
 2. Add the marketplace + enable the plugin + add the `SessionStart` daemon hook in
    `~/.claude/settings.json`, and append `off-mcp/CLAUDE.md` to `~/.claude/CLAUDE.md`.
 3. Have the user restart Claude Code once → the daemon comes up fully configured.
-4. Launch a bridge session with `pocket-claude` (auto-added shell function:
+4. Launch a bridge session with `claude-tg` (auto-added shell function:
    `tmux set -p @tg_bridge "${1:-1}"; claude --allow-dangerously-skip-permissions` — the `@tg_bridge`
    tmux pane option, valued by instance slot, is the adopt marker (decoupled from claude's args);
-   bypass is switchable on demand. `pocket-claude N` routes to
+   bypass is switchable on demand. `claude-tg N` routes to
    a second bridge — see multi-instance below) — the daemon finds it automatically.
 
 Don't guess config values — ask. The only non-automatable bits are getting the token from the

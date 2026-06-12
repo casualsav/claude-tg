@@ -13,7 +13,7 @@ State dir: `~/.claude/channels/telegram/` · plugin cache:
 **Symptom:** `git clone https://github.com/...` → `fatal: could not read Username for
 'https://github.com'`.
 **Cause:** repo is private; plain git has no credentials.
-**Fix:** `gh repo clone casualsav/pocket-claude` (uses the authenticated `gh` token).
+**Fix:** `gh repo clone casualsav/claude-tg` (uses the authenticated `gh` token).
 **Repo idea:** note the `gh` clone in the README for private/preview installs.
 
 ## 2. Stale/partial plugin cache → grammy `EACCES` (the big one)
@@ -63,16 +63,16 @@ the first-use delay. Working as designed — documented here for completeness.
 ## 5. `scripts/setup-alias.sh` adds the wrong alias for off-MCP (resolved)
 **Symptom (historical):** the alias script wrote the MCP/channel-load launcher for off-MCP.
 **Resolved:** `setup-alias.sh` is mode-aware — off-MCP is now
-a shell function `pocket-claude() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }`
+a shell function `claude-tg() { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; claude --allow-dangerously-skip-permissions; }`
 (the `@tg_bridge` tmux pane option, valued by instance slot, is the daemon's adopt marker —
 decoupled from claude's args; the plugin's MCP ships disabled so the session is already plugin-less;
 `--allow-…` starts in a normal mode with bypass switchable on demand from `/mode`;
-`pocket-claude N` routes to bridge N).
+`claude-tg N` routes to bridge N).
 
 ## 6. Inbound delivery needs a bridge-signature tmux pane (most common "it's not working")
 **Symptom:** bot is paired and polling, but Telegram messages never reach a Claude session.
 **Cause:** off-MCP delivers inbound by **typing into a tmux pane**. The daemon auto-discovers a
-pane only if it carries the **`@tg_bridge` tmux pane option** (set by the `pocket-claude` alias; see
+pane only if it carries the **`@tg_bridge` tmux pane option** (set by the `claude-tg` alias; see
 `findOffMcpPanes`, `daemon.ts`). A bare `claude` pane, or a Claude session **not running inside
 tmux**, is never adopted — so there's nowhere to deliver.
 **Extra gotcha:** spawning the session **detached** (e.g. `tmux new-session -d`) lands on the
@@ -80,15 +80,15 @@ tmux**, is never adopted — so there's nowhere to deliver.
 past it, so the pane is never drivable.
 **Fix:** launch the work session **interactively** in tmux and complete onboarding once:
 ```sh
-source ~/.bashrc        # load the pocket-claude alias
+source ~/.bashrc        # load the claude-tg alias
 tmux new -s tg          # or attach to existing tmux
-pocket-claude               # fn: tmux set -p @tg_bridge "${1:-1}" ; claude --allow-dangerously-skip-permissions ; pick a theme on first run
+claude-tg               # fn: tmux set -p @tg_bridge "${1:-1}" ; claude --allow-dangerously-skip-permissions ; pick a theme on first run
 ```
 The daemon then discovers and adopts the pane (log: `adopted off-MCP pane …`), announces the
 session to Telegram, and inbound starts flowing. Note: the *dev/terminal* session you ran the
 install from is **not** the bridge target and cannot receive Telegram messages.
 **Repo idea:** when a message arrives with no adoptable pane, have the bot reply with a hint
-("no active session — launch `pocket-claude` in tmux"). Consider detecting the onboarding screen and
+("no active session — launch `claude-tg` in tmux"). Consider detecting the onboarding screen and
 surfacing a clearer state than silent non-delivery.
 
 ---
@@ -101,4 +101,4 @@ surfacing a clearer state than silent non-delivery.
   left disabled (`mcp.json.disabled`). `~/.claude/CLAUDE.md`: off-MCP convention appended.
 - Daemon runs detached from the cache (PPID 1), `polling as @yourbot`; `tg` CLI on
   PATH; `tg react 0 0 👍` → `chat 0 is not allowlisted` (proves the wire + access gate).
-- **Remaining user step:** run `pocket-claude` interactively in tmux to give the daemon a pane.
+- **Remaining user step:** run `claude-tg` interactively in tmux to give the daemon a pane.

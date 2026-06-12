@@ -1087,14 +1087,14 @@ let adoptedPaneId: string | null = null
 // Bridge opt-in marker: a tmux *pane* user-option set on panes that should be adopted. It lives at
 // the tmux layer, so it's fully decoupled from claude's CLI/argv (no fragile launch flag a claude
 // version bump can reject — `--tg` did exactly that) and from autonomy mode. Daemon-spawned panes
-// set it themselves (see spawnSession); a user-launched bridge session sets it via the pocket-claude
+// set it themselves (see spawnSession); a user-launched bridge session sets it via the claude-tg
 // alias (`tmux set -p @tg_bridge <instance-id>`). A plain claude pane without it is never grabbed.
 const BRIDGE_PANE_OPT = '@tg_bridge'
 
 // The marker's VALUE is the instance id, so multiple daemons on the SAME user/tmux server (each
 // with its own TELEGRAM_STATE_DIR + bot token) adopt only their own panes instead of fighting over
 // every marked pane. Explicit TELEGRAM_INSTANCE_ID wins; otherwise the default state dir keeps the
-// legacy id "1" (so existing `@tg_bridge=1` tags + the pocket-claude launcher (né claude-tg) keep working with no
+// legacy id "1" (so existing `@tg_bridge=1` tags + the claude-tg launcher (briefly named pocket-claude) keep working with no
 // migration), and any custom state dir derives a stable id from its basename. Sanitised to a safe
 // token (the value is read back through a tab-delimited list-panes format).
 const DEFAULT_STATE_DIR = join(homedir(), '.claude', 'channels', 'telegram')
@@ -1103,7 +1103,7 @@ function resolveInstanceId(): string {
   if (explicit) return explicit.replace(/[^A-Za-z0-9_-]/g, '') || '1'
   if (STATE_DIR === DEFAULT_STATE_DIR) return '1'
   // The state dir `…/telegram-<id>` maps to instance id `<id>` — the value the user passes to
-  // `pocket-claude <id>` (which tags the pane `@tg_bridge <id>`). The id is arbitrary: a number ("2")
+  // `claude-tg <id>` (which tags the pane `@tg_bridge <id>`). The id is arbitrary: a number ("2")
   // or a name ("work"). The default `…/telegram` is id "1". (Legacy `telegram<id>` with no
   // separator is tolerated too.)
   const id = basename(STATE_DIR).replace(/^telegram[-_]?/, '')
@@ -1117,8 +1117,8 @@ if (INSTANCE_ID !== '1') process.stderr.write(`daemon: bridge instance id = ${IN
 // --sdk-url …/v1/code/sessions/cse_…` child. The bridge must NOT drive such a pane: it's already
 // owned by another controller, so typing into it would fight claude.ai for the same session.
 // The @tg_bridge tag can't gate this on its own — the tag lives on the *pane* and outlives the
-// claude that set it (it's sticky: pocket-claude sets it, adoptPane re-stamps it). So a pane launched
-// via pocket-claude, then reused to run `claude remote-control` after that first claude exits, is still
+// claude that set it (it's sticky: claude-tg sets it, adoptPane re-stamps it). So a pane launched
+// via claude-tg, then reused to run `claude remote-control` after that first claude exits, is still
 // tagged and would be adopted. We detect the live remote-control process instead. Returns the set
 // of every ancestor pid of any remote-control process, so a pane whose pane_pid is in the set is
 // hosting one. Linux /proc-based; any failure yields an empty set (no exclusion — fail open to the
@@ -1204,7 +1204,7 @@ function adoptPane(paneId: string): void {
   offMcpPanes.add(paneId)
   // Stamp the adopt marker on the pane itself so it stays discoverable across daemon restarts and
   // pane respawns — the discoverPanes rescan only adopts @tg_bridge-tagged panes, so a pane bound
-  // via the persisted adopted-pane file or the "Switch" button (not the pocket-claude alias) would
+  // via the persisted adopted-pane file or the "Switch" button (not the claude-tg alias) would
   // otherwise get dropped on the next rescan. Self-heals those, plus sessions launched before the
   // tag convention existed. Fire-and-forget; idempotent.
   void exec('tmux', ['set-option', '-p', '-t', paneId, BRIDGE_PANE_OPT, INSTANCE_ID], { timeout: 2000 }).catch(() => {})
@@ -1480,7 +1480,7 @@ async function hintNoSession(params: InboundParams): Promise<void> {
   lastNoSessionHintTs = Date.now()
   await bot.api.sendMessage(chat,
     '🕳️ <b>No active session</b> — your message is buffered. Start one in tmux to receive it:\n' +
-    '<code>pocket-claude</code>   — safe start, bypass on demand from /mode\n' +
+    '<code>claude-tg</code>   — safe start, bypass on demand from /mode\n' +
     'The daemon auto-discovers the pane (the alias tags it with the <code>@tg_bridge</code> tmux option) and replays anything buffered.',
     { parse_mode: 'HTML' }).catch(() => {})
 }
@@ -2355,7 +2355,7 @@ async function handleModeCommand(
 
   if (reached === null) {
     const notAvailableMsg = target === 'bypassPermissions'
-      ? 'Not available — this session was launched without bypass enabled. Relaunch with pocket-claude (bypass-on-demand).'
+      ? 'Not available — this session was launched without bypass enabled. Relaunch with claude-tg (bypass-on-demand).'
       : target === 'auto'
       ? 'Not available — auto mode requires a qualifying plan or prior detection.'
       : `Could not switch to ${modeLabel(target)}.`
@@ -4541,7 +4541,7 @@ bot.command('resume', async ctx => {
 // /account — multi-account management. Bare: list the registered Claude accounts (config dirs)
 // with login + usage state. `add <name>` registers ~/.claude-<name> and seeds its settings.json
 // (statusline + hooks) so bridge sessions on it work out of the box; `remove <name>` unregisters
-// (files kept). Sessions pin to an account at launch: `pocket-claude 1 <name>`.
+// (files kept). Sessions pin to an account at launch: `claude-tg 1 <name>`.
 bot.command('account', async ctx => {
   if (!dmCommandGate(ctx)) return
   const [sub, name] = (ctx.match ?? '').toString().trim().split(/\s+/)
@@ -4633,9 +4633,9 @@ bot.command('restart', async ctx => {
     return
   }
   await ctx.reply('♻️ Restarting the session — <code>/exit</code> then resume…', { parse_mode: 'HTML' })
-  // Preserve bypass-on-demand: relaunch with the same flag the pocket-claude alias uses. `-c` continues
+  // Preserve bypass-on-demand: relaunch with the same flag the claude-tg alias uses. `-c` continues
   // the most recent conversation in the cwd — i.e. the one we just exited. The relaunch is typed
-  // into the pane's SHELL (which doesn't export CLAUDE_CONFIG_DIR — pocket-claude env-prefixes it),
+  // into the pane's SHELL (which doesn't export CLAUDE_CONFIG_DIR — claude-tg env-prefixes it),
   // so an alt-account session must carry its config dir explicitly or it'd restart under main.
   const acct = await paneAccount(paneId)
   const envPrefix = acct.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${acct.configDir.replace(/'/g, `'\\''`)}' `
@@ -4912,7 +4912,7 @@ bot.on('callback_query:data', async ctx => {
     }
     if (acctMatch[3]) {
       // 🚀 Launch a session on this account — the from-Telegram path (the terminal is launch-once;
-      // pocket-claude 1 <name> stays as the terminal equivalent). Spawned in the focused session's
+      // claude-tg 1 <name> stays as the terminal equivalent). Spawned in the focused session's
       // folder (else $HOME); a first-time account hits the login screen, whose URL relays here.
       const acct = accountByName(acctMatch[3])
       if (!acct) { await ctx.answerCallbackQuery({ text: 'Unknown account.' }).catch(() => {}); return }

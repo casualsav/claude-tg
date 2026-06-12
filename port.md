@@ -75,7 +75,7 @@ Topics move from cwd-keyed to **session-keyed** so one project can host several 
 topic (decided: `/new` in a topic spawns a same-project sibling session/topic).
 
 - **Stable id.** Pane ids churn; cwd isn't unique anymore. Stamp each adopted session with a generated
-  `sessionId` token written to a tmux pane option (e.g. `@tg_session`) at `pocket-claude` adoption, and
+  `sessionId` token written to a tmux pane option (e.g. `@tg_session`) at `claude-tg` adoption, and
   store it in `topics.json`. It survives daemon restarts (the pane option persists); a tmux-server
   restart drops every pane anyway, so nothing is orphaned.
 - **Resolver.** `paneForSession(sessionId)` finds the live pane whose `@tg_session` matches (replacing

@@ -33,7 +33,7 @@ If the user runs multiple bridges, **resolve which instance this targets** (an i
 number *or* a name), in priority order:
 1. **Explicit leading instance id** in `$ARGUMENTS` (e.g. `/telegram:access work pair <code>`).
 2. **Otherwise, the current pane's id:** `tmux display-message -p -t "$TMUX_PANE" '#{@tg_bridge}' 2>/dev/null`
-   — if non-empty (e.g. `work`), use it, so inside a `pocket-claude work` session you can just run
+   — if non-empty (e.g. `work`), use it, so inside a `claude-tg work` session you can just run
    `/telegram:access pair <code>` and it targets that bridge.
 3. **Otherwise** → id `1`.
 

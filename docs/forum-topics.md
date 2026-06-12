@@ -37,7 +37,7 @@ churn across tmux/daemon restarts):
 
 ## Lifecycle
 
-- **Session adopted** (`pocket-claude`): if no topic is bound for its cwd, `createForumTopic`
+- **Session adopted** (`claude-tg`): if no topic is bound for its cwd, `createForumTopic`
   (title = project dir / git branch), store the mapping, drop a status pin in the new topic.
 - **Branch / context change:** `editForumTopic` to rename the topic.
 - **Session ends** (pane gone): `closeForumTopic` — keep the history; `reopenForumTopic` if it returns.

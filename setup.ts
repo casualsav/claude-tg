@@ -338,21 +338,21 @@ function patchSettings(mode: Mode): void {
   if (mode === 'off-mcp') {
     const bashrc = join(homedir(), process.env.SHELL?.includes('zsh') ? '.zshrc' : '.bashrc')
     // One launch FUNCTION taking an optional instance slot (default 1) and an optional account
-    // name: `pocket-claude`, `pocket-claude 2`, `pocket-claude 1 work`. The adopt marker is `tmux set -p
+    // name: `claude-tg`, `claude-tg 2`, `claude-tg 1 work`. The adopt marker is `tmux set -p
     // @tg_bridge <slot>` — a tmux PANE option, so it never touches claude's args (decoupled from
     // the autonomy flag, immune to claude rejecting unknown flags) and the slot routes the pane to
     // the matching bridge daemon. The account arg pins the session to an alternate config dir
-    // (~/.claude-<name>, the /account convention) via CLAUDE_CONFIG_DIR. `pocket-claude` starts with
+    // (~/.claude-<name>, the /account convention) via CLAUDE_CONFIG_DIR. `claude-tg` starts with
     // --allow-dangerously-skip-permissions (normal start, bypass switchable on demand from /mode).
     const want: [string, string][] = [
-      ['pocket-claude', 'pocket-claude()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }'],
+      ['claude-tg', 'claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }'],
     ]
     const cur = existsSync(bashrc) ? readFileSync(bashrc, 'utf8') : ''
-    // Match the function form or a legacy alias. Installs that still have the old `claude-tg`
-    // launcher get `pocket-claude` added alongside it (the old name keeps working untouched).
+    // Match the function form or a legacy alias. Installs that still have the old `pocket-claude`
+    // launcher get `claude-tg` added alongside it (the old name keeps working untouched).
     const missing = want.filter(([n]) => !new RegExp(`(^|\\n)\\s*${n}\\s*\\(\\)|alias ${n}=`).test(cur)).map(([, a]) => a)
-    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launcher → ${bashrc} (pocket-claude)`)) }
-    else console.log(C.dim('  • pocket-claude launcher already present'))
+    if (missing.length) { appendFileSync(bashrc, `\n${missing.join('\n')}\n`); console.log(C.ok(`  ✓ launcher → ${bashrc} (claude-tg)`)) }
+    else console.log(C.dim('  • claude-tg launcher already present'))
   }
 }
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -380,13 +380,13 @@ async function main(): Promise<void> {
   } else {
     console.log('Config is written and the plugin is wired. To finish:')
     console.log(`  1. ${C.b('Restart Claude Code once')} — the SessionStart hook brings the daemon up, fully configured.`)
-    if (mode === 'off-mcp') console.log(`  2. Launch work sessions with ${C.b('pocket-claude')} inside ${C.b('tmux')} — the daemon auto-adopts the pane.`)
+    if (mode === 'off-mcp') console.log(`  2. Launch work sessions with ${C.b('claude-tg')} inside ${C.b('tmux')} — the daemon auto-adopts the pane.`)
     else console.log(`  2. ${C.b('MCP mode:')} the wizard left the server enabled; launch work sessions with plain ${C.b('claude')}.`)
     console.log(`  3. Message your bot — it should reply.${cfg.telegramId ? '' : ' (Approve your first DM\'s pairing code with /telegram:access pair <code>.)'}`)
   }
   if (mode === 'off-mcp') {
     console.log(`\n${C.b('Launch alias')} ${C.dim('(reload your shell or `source` the rc first):')}`)
-    console.log(`  ${C.b('pocket-claude')}    starts safe — permission prompts relay to Telegram; flip to full bypass on demand from /mode`)
+    console.log(`  ${C.b('claude-tg')}    starts safe — permission prompts relay to Telegram; flip to full bypass on demand from /mode`)
     console.log(C.dim('  It bridges automatically (tags the pane with the @tg_bridge tmux option). Run inside tmux.'))
   }
   console.log(C.dim('\n  Voice replies (TTS), live stream mode, budgets and more are configurable from chat: /settings.'))

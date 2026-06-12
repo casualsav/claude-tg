@@ -69,7 +69,7 @@ the user and let them pick:
 | --- | --- | --- |
 | Per-request cost | **Zero** — no MCP server; replies are read from the transcript | ~700 tokens of tool schemas **+** an instruction block injected on **every** request |
 | Requires | **tmux** (the daemon drives the session's pane) | nothing — works without tmux |
-| Launch with | `pocket-claude` (off-MCP launch alias; tags the pane `@tg_bridge`) | plain `claude` |
+| Launch with | `claude-tg` (off-MCP launch alias; tags the pane `@tg_bridge`) | plain `claude` |
 | Functions | **Full** — reply, react, edit, files, permission prompts, every command | Full (identical) |
 
 Both modes expose the exact same features (reactions, file send/receive, permission buttons,
@@ -79,7 +79,7 @@ tools. **Off-MCP is recommended** unless the user genuinely can't use tmux.
 The MCP server ships **disabled** (`mcp.json.disabled`), so off-MCP is the out-of-the-box
 default. **Record the user's choice now** — you act on it after the plugin is installed (Step 5):
 
-- **Off-MCP (default):** leave the server disabled; work sessions launch with `pocket-claude`.
+- **Off-MCP (default):** leave the server disabled; work sessions launch with `claude-tg`.
 - **MCP:** after the plugin is installed, **enable it** — rename `mcp.json.disabled` → `.mcp.json`
   in the plugin dir (or run `/telegram:configure mcp on`). Once enabled, the MCP server **loads
   automatically on every plain `claude` launch** — the *only* ways it won't load are starting
@@ -347,15 +347,15 @@ a bridge session. The signature the daemon scans for is the **`@tg_bridge` tmux 
 **value is the instance slot** — a marker set at the tmux layer, so it never touches claude's args
 (immune to claude rejecting unknown flags, and decoupled from autonomy mode). **Auto-add the
 launcher function that tags the pane then launches** — append to the user's `~/.bashrc` (or
-`~/.zshrc`). It takes an optional slot (default `1`), so `pocket-claude` is the default bridge and
-`pocket-claude 2` routes to a second one; an optional second arg pins the session to an alternate
-Claude account (`pocket-claude 1 work` → `CLAUDE_CONFIG_DIR=~/.claude-work`, see `/account`):
+`~/.zshrc`). It takes an optional slot (default `1`), so `claude-tg` is the default bridge and
+`claude-tg 2` routes to a second one; an optional second arg pins the session to an alternate
+Claude account (`claude-tg 1 work` → `CLAUDE_CONFIG_DIR=~/.claude-work`, see `/account`):
 ```sh
-pocket-claude()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }  # safe start, bypass on demand
+claude-tg()   { tmux set -p @tg_bridge "${1:-1}" 2>/dev/null; if [ -n "$2" ]; then CLAUDE_CONFIG_DIR="$HOME/.claude-$2" claude --allow-dangerously-skip-permissions; else claude --allow-dangerously-skip-permissions; fi; }  # safe start, bypass on demand
 ```
-Then **tell the user:** launch work sessions with **`pocket-claude`**. The `@tg_bridge` pane option is
+Then **tell the user:** launch work sessions with **`claude-tg`**. The `@tg_bridge` pane option is
 the bridge marker; the launch flag is the autonomy choice:
-- **`pocket-claude`** uses `--allow-dangerously-skip-permissions` — Claude starts in a normal mode where
+- **`claude-tg`** uses `--allow-dangerously-skip-permissions` — Claude starts in a normal mode where
   permission prompts are **relayed to Telegram** (Yes / allow-all / No buttons), and you can switch
   **into full bypass on demand** from the `/mode` picker. The safe, fully-remote-controllable default.
 
@@ -366,18 +366,18 @@ approve remotely.
 
 That's it — the daemon **auto-discovers** the pane and binds automatically (no `TELEGRAM_FORCE_PANE`,
 no restart). Several bridge panes? It asks which to use; to pin one, set `TELEGRAM_FORCE_PANE=<pane
-id>` in `.env`. Your own MCP servers still load if you pass them (`pocket-claude --mcp-config ~/my-mcp.json`).
+id>` in `.env`. Your own MCP servers still load if you pass them (`claude-tg --mcp-config ~/my-mcp.json`).
 
 ## 6. Verify end to end
 From Telegram, message the session → you get its reply (read from the transcript), no MCP
 loaded. Ask it to "send me a file with `tg`" to confirm outbound actions.
 
 **If inbound never reaches the session (pin shows "No active session"):** the daemon only
-auto-adopts a pane carrying the **`@tg_bridge` tmux pane option** (set by the `pocket-claude`
+auto-adopts a pane carrying the **`@tg_bridge` tmux pane option** (set by the `claude-tg`
 alias). A session started with a bare `claude` (no marker) is **not** adopted —
 check with `tmux show-options -p @tg_bridge` in the pane, and confirm in `daemon.log` you see
 `adopted off-MCP pane …`
-or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `pocket-claude`;
+or `focus pinned to …`. Fixes, in order of preference: (a) relaunch the work session with `claude-tg`;
 or (b) pin the existing pane explicitly — get its id with
 `tmux list-panes -a -F '#{pane_id} #{pane_current_command}'`, then set
 `TELEGRAM_FORCE_PANE=<pane id>` in `.env` and restart the daemon. (`%`-ids are valid only while
@@ -405,8 +405,8 @@ adoptable pane.
   - Configure it from your terminal: **`/telegram:configure work <token>`** (writes the token to
     `telegram-work/.env` and starts that bridge's daemon), then **`/telegram:access work pair <code>`**
     to approve your DM into *its* allowlist — isolated from the default bridge.
-  - Launch its work panes with **`pocket-claude work`** (the launcher functions take the id). Each daemon
+  - Launch its work panes with **`claude-tg work`** (the launcher functions take the id). Each daemon
     adopts only panes whose `@tg_bridge` equals its own id, so they never cross-talk. (Inside such a
     session you can drop the id — the skills read it off the pane.) For a memorable shortcut a user
-    can add their own wrapper, e.g. `alias work-bot='pocket-claude work'`.
+    can add their own wrapper, e.g. `alias work-bot='claude-tg work'`.
   - `ensure-daemon` enumerates every configured instance, so all bridges come back up after a reboot.

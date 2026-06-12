@@ -3,7 +3,7 @@
 // The default account ("main") is ~/.claude; extra accounts live in their own config dirs
 // (convention: ~/.claude-<name>) and are registered in STATE_DIR/accounts.json as
 // { "<name>": "<configDir>" }. A session is pinned to an account by CLAUDE_CONFIG_DIR at
-// launch (the pocket-claude alias' second arg, or spawnSession's configDir), and a PANE's account
+// launch (the claude-tg alias' second arg, or spawnSession's configDir), and a PANE's account
 // is derived from its stamped @tg_transcript path — the transcript lives under
 // <configDir>/projects/, so no extra per-pane marker is needed.
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
@@ -62,7 +62,7 @@ export function accountForProjectsDir(root: string): Account {
   return listAccounts().find(a => projectsDirOf(a) === root) ?? MAIN_ACCOUNT
 }
 
-// Register a new account: <name> → ~/.claude-<name> (the pocket-claude launcher convention), and
+// Register a new account: <name> → ~/.claude-<name> (the claude-tg launcher convention), and
 // seed its config dir so bridge sessions work out of the box — the statusline (usage snapshot +
 // pin data) and the SessionStart hooks (daemon relauncher + transcript stamp) are read from THIS
 // config dir's settings.json, so without the seed an alt-account session would neither stamp its
