@@ -1,8 +1,6 @@
-## Pocket Claude
+## Claude-tg
 
-The goal of this repo is to have full control of Claude Code through Telegram without ever having to open the terminal after the initial setup. Sessions persist thanks to tmux. 
-
-Send messages and files, voice notes, use slash commands, see Claude's extended thinking as it works, create and manage multiple sessions, and more, with a convenient status bar that shows your settings, 5h/weekly usage, and context window size. 
+Full control of Claude Code through Telegram without ever having to open the terminal. Intuitive design with every feature available in the CLI and some extras.
 
 <p align="center">
   <img src="assets/telegram-demo.jpg" width="380" alt="Claude Code driven from Telegram — live thinking, pinned status card with model, usage and context">
