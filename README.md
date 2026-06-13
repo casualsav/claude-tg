@@ -24,8 +24,9 @@ For multi-session, add the Telegram bot as an admin with full rights in a Telegr
 
 ## Usage
 
-Once paired, just message your bot — text goes to Claude, and replies come back
-formatted. Bot commands:
+Send text, media, and voice messages through Telegram. In multi-session mode, adding new group topics starts a new session, deleting a topic closes that session. 
+
+Bot commands:
 
 | Command | What it does |
 | --- | --- |
@@ -52,9 +53,9 @@ formatted. Bot commands:
 | `/terminal` | Show recent terminal activity (40 lines) |
 | `/schedule` | Queue a message into a session for later (`/schedule 12h` · `/schedule cancel`) |
 | `/pin` | Toggle the pinned status message (`/pin on` \| `off` \| `refresh`) |
-| `/settings` | Channel settings panel — live mirror, pin, MCP mode, voice transcription |
+| `/settings` | Channel settings panel — Claude.ai accounts, Github accounts, voice transcription, and more |
 
-Any other `/slash` command is relayed straight to Claude Code.
+All other `/slash` commands are relayed straight to Claude Code.
 
 
 ## Upgrading
