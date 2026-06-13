@@ -1351,6 +1351,43 @@ function emitInbound(params: InboundParams, targetPane?: string | null): void {
   }
 }
 
+// ---- Split-message merge ----
+// Telegram clients hard-split an outgoing message over 4096 chars; the parts arrive as
+// back-to-back updates and would otherwise inject as separate prompts — part 1's Enter starts
+// Claude's turn before part 2 lands. So a text part at/near the limit is held briefly and the
+// next text part on the same route is glued on: direct concat when the previous part was an
+// exact-limit cut (restores a mid-word split), newline otherwise. A short part, the hold
+// timeout, or a non-text follow-up flushes/delivers as usual; the merged message keeps part 1's
+// meta (message_id). Normal-length messages bypass the hold entirely — no added latency.
+const SPLIT_HOLD_MS = 2500
+const SPLIT_PART_MIN = 4000
+type SplitPending = { params: InboundParams; targetPane: string | null | undefined; timer: ReturnType<typeof setTimeout>; lastPartLen: number }
+const pendingSplitMerges = new Map<string, SplitPending>()
+function flushSplitMerge(key: string): void {
+  const p = pendingSplitMerges.get(key)
+  if (!p) return
+  clearTimeout(p.timer)
+  pendingSplitMerges.delete(key)
+  emitInbound(p.params, p.targetPane)
+}
+// partLen = length of this text part, or null for a non-mergeable message (attachment/image).
+function deliverInbound(key: string, params: InboundParams, targetPane: string | null | undefined, partLen: number | null): void {
+  const prev = pendingSplitMerges.get(key)
+  if (prev && partLen !== null) {
+    clearTimeout(prev.timer)
+    pendingSplitMerges.delete(key)
+    const seam = prev.lastPartLen >= 4096 ? '' : '\n'
+    params = { ...prev.params, content: prev.params.content + seam + params.content }
+    process.stderr.write(`daemon: merged split message part (${partLen} chars) into ${params.meta.message_id ?? '?'}\n`)
+  } else if (prev) flushSplitMerge(key)   // non-text follow-up: deliver the held text first, in order
+  if (partLen !== null && partLen >= SPLIT_PART_MIN) {
+    const timer = setTimeout(() => flushSplitMerge(key), SPLIT_HOLD_MS)
+    pendingSplitMerges.set(key, { params, targetPane, timer, lastPartLen: partLen })
+    return
+  }
+  emitInbound(params, targetPane)
+}
+
 // Deliver inbound to a NON-focused topic pane: format the same channel block and paste it (no
 // watcher to pause), serialized through the shared inject chain so two messages can't interleave.
 function pasteInbound(paneId: string, params: InboundParams): void {
@@ -6263,7 +6300,9 @@ async function handleInbound(
       else void generalAnchorLost(chat_id)
     }
   }
-  emitInbound(params, targetPane)
+  // Long prompts Telegram split client-side re-merge into one injection (see deliverInbound).
+  const mergeKey = `${chat_id}:${typeof threadId === 'number' ? threadId : 'dm'}:${from.id}`
+  deliverInbound(mergeKey, params, targetPane, imagePath || attachmentPath || attach ? null : content.length)
 }
 
 // ---- Dead-session revival (ROADMAP #2) ----
