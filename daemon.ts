@@ -684,6 +684,31 @@ if (t) await import(t)
 // A focused pane's cwd barely changes, but the relay tick resolves it every 1.5s — each call a
 // tmux subprocess spawn. Cache it briefly so a steady pane costs one spawn per few seconds, not
 // per tick. The short TTL still picks up a real `cd` within seconds.
+// Telegram flood-limits sends with a 429 carrying `retry_after` (seconds). A relayed reply that
+// hits one must NOT be dropped — the relay cursor has already advanced past its uuid (see
+// relayLoopTick), so a swallowed send is a permanent loss. Wait out `retry_after` and retry,
+// capped so a persistently failing chat can't wedge the relay. Non-429 errors are terminal (log
+// and give up, as before). Returns true once the chunk is delivered.
+async function sendChunkRetrying(chat_id: string, text: string, extra: Record<string, unknown>): Promise<boolean> {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    try {
+      await bot.api.sendMessage(chat_id, text, extra)
+      return true
+    } catch (e) {
+      if (e instanceof GrammyError && e.error_code === 429) {
+        const wait = ((e.parameters?.retry_after ?? 2) + 1) * 1000   // +1s buffer past the window
+        process.stderr.write(`daemon: relay send 429, waiting ${wait}ms (attempt ${attempt + 1})\n`)
+        await sleep(wait)
+        continue
+      }
+      process.stderr.write(`daemon: transcript relay send failed: ${e}\n`)
+      return false
+    }
+  }
+  process.stderr.write(`daemon: transcript relay send gave up after 429 retries (chat ${chat_id})\n`)
+  return false
+}
+
 // Send agent markdown to chats using the same render/chunk path as the reply tool. In forum-topics
 // mode the caller passes a threadId so the message lands in the session's own topic.
 async function sendAgentText(chats: string[], text: string, threadId?: number): Promise<void> {
@@ -695,7 +720,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
   const extra = threadId ? { ...base, message_thread_id: threadId } : base
   for (const chat_id of chats) {
     for (const c of chunks) {
-      await bot.api.sendMessage(chat_id, c, extra).catch(e => process.stderr.write(`daemon: transcript relay send failed: ${e}\n`))
+      await sendChunkRetrying(chat_id, c, extra)
     }
   }
   if (access.tts?.mode === 'all') void sendTtsVoice(text, chats.map(chat => ({ chat, thread: threadId })))
