@@ -384,6 +384,37 @@ or (b) pin the existing pane explicitly — get its id with
 that tmux server lives.) The daemon also DMs a one-time hint when a message arrives with no
 adoptable pane.
 
+## 7. (Optional) Multiple GitHub accounts
+Only if the human pushes to repos owned by **different GitHub accounts** from these sessions
+(e.g. a personal + a work account). Skip it for a single account.
+
+The trap: `gh`'s own git credential helper only ever serves the **active** account's token, so
+every HTTPS push authenticates as whoever's active — switching with `gh auth switch` is global and
+races across the bridge's parallel sessions. The fix ships in this repo: `bin/gh-multi-credential`,
+a credential helper that picks the token **per repo owner** via `gh auth token -u <account>` (which
+returns any logged-in account's token regardless of active). No switching, concurrency-safe.
+
+1. The human logs in once per account — the **traditional** path: `gh auth login` (repeat for each).
+2. Install the helper to a **stable** path (NOT the version-keyed plugin cache — git points at it by
+   absolute path), then enable it for github.com:
+   ```bash
+   install -m 755 "$(dirname "$(command -v claude-tg 2>/dev/null || echo .)")/../bin/gh-multi-credential" \
+     ~/.local/bin/gh-multi-credential 2>/dev/null \
+     || install -m 755 bin/gh-multi-credential ~/.local/bin/gh-multi-credential   # run from the repo checkout
+   git config --global credential.https://github.com.useHttpPath true
+   git config --global --unset-all credential.https://github.com.helper
+   git config --global --add        credential.https://github.com.helper ""
+   git config --global --add        credential.https://github.com.helper "!$HOME/.local/bin/gh-multi-credential"
+   ```
+3. By default repo owner == account (`alice/repo` → account `alice`). For orgs/forks you push as a
+   different user, add `owner=account` lines to `~/.config/gh-multi-credential.map`. Unknown owners
+   fall back to the active account, so cloning anything else still works.
+4. Verify routing (token redacted) — each owner should resolve to its own account:
+   ```bash
+   printf 'protocol=https\nhost=github.com\npath=OWNER/repo.git\n\n' | git credential fill | grep '^username='
+   ```
+   Revert anytime: re-add the gh helper line (`!$(command -v gh) auth git-credential`) and unset `useHttpPath`.
+
 ## What you get, from Telegram
 - Two-way chat with the session; send/receive files; inbound voice notes transcribed.
 - **Permission prompts** relayed with tap-to-approve buttons.
