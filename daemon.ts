@@ -4807,9 +4807,21 @@ bot.command('files', async ctx => {
   if (!t) return
   const cwd = (await paneCwd(t.paneId).catch(() => null)) || '/'
   const full = `${url}/?start=${encodeURIComponent(cwd)}`
-  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,
-    { parse_mode: 'HTML', reply_markup: new InlineKeyboard().webApp('📂 Open Files', full),
-      ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) })
+  const kb = new InlineKeyboard().webApp('📂 Open Files', full)
+  // Telegram allows web_app inline buttons in PRIVATE chats ONLY (a group/topic send → BUTTON_TYPE_INVALID).
+  // So inline it in a DM; from a group/topic, DM the button to the sender and note it in the topic.
+  if (ctx.chat?.type === 'private') {
+    await ctx.reply(`📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`, { parse_mode: 'HTML', reply_markup: kb }).catch(() => {})
+    return
+  }
+  try {
+    await bot.api.sendMessage(String(ctx.from!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`, { parse_mode: 'HTML', reply_markup: kb })
+    await bot.api.sendMessage(String(ctx.chat!.id), '📂 Sent the Files button to our DM — tap it there (Telegram only allows Mini-App buttons in private chats).',
+      { ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(() => {})
+  } catch {
+    await bot.api.sendMessage(String(ctx.chat!.id), '⚠️ Couldn’t DM you the Files button — message me in a private chat first (send /start in our DM), then retry /files.',
+      { ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) }).catch(() => {})
+  }
 })
 
 // Inline-button handler for permission requests + mode cycling + prompt answers.
