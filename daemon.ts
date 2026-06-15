@@ -67,6 +67,7 @@ import {
 } from './topic-runtime.ts'
 import { startWebapp } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
+import { sendRichMessage, toInputRichMessage } from './richmsg.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
@@ -715,15 +716,25 @@ async function sendChunkRetrying(chat_id: string, text: string, extra: Record<st
 // mode the caller passes a threadId so the message lands in the session's own topic.
 async function sendAgentText(chats: string[], text: string, threadId?: number): Promise<void> {
   const access = loadAccess()
-  const render = access.renderMarkdown !== false
-  const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-  const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, access.chunkMode ?? 'length')
-  const base = render ? { parse_mode: 'HTML' as const } : {}
-  const extra = threadId ? { ...base, message_thread_id: threadId } : base
+  // The current render/chunk path — also the fallback when rich messages are off or error out.
+  const sendHtmlPath = async (chat_id: string): Promise<void> => {
+    const render = access.renderMarkdown !== false
+    const limit = Math.max(1, Math.min(access.textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
+    const chunks = render ? chunkHtml(mdToTelegramHtml(text), limit) : chunk(text, limit, access.chunkMode ?? 'length')
+    const base = render ? { parse_mode: 'HTML' as const } : {}
+    const extra = threadId ? { ...base, message_thread_id: threadId } : base
+    for (const c of chunks) await sendChunkRetrying(chat_id, c, extra)
+  }
   for (const chat_id of chats) {
-    for (const c of chunks) {
-      await sendChunkRetrying(chat_id, c, extra)
+    // Rich messages (Bot API 10.1) render Claude's markdown natively (tables/headings/code/collapsible)
+    // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
+    // failure (older Telegram, malformed markdown, network) falls back to the HTML/chunk path so the
+    // reply still lands; flag-off behavior is the HTML path unchanged.
+    if (access.richMessages) {
+      try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
+      catch (e) { process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`) }
     }
+    await sendHtmlPath(chat_id)
   }
   if (access.tts?.mode === 'all') void sendTtsVoice(text, chats.map(chat => ({ chat, thread: threadId })))
 }

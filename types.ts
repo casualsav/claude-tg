@@ -30,6 +30,7 @@ export type Access = {
   batchAllow?: boolean    // 2+ permission prompts in one turn offer "Allow all this turn" (default on)
   tts?: { mode: 'off' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
+  richMessages?: boolean  // outbound replies via Bot API 10.1 rich messages (native tables/headings/code); falls back to HTML on error (default off)
   replyMode?: 'thoughts' | 'actions' | 'off' | 'tools' | 'hybrid' | 'all' | 'final' | 'stream' | 'live'   // tools/hybrid/all/final/stream/live are legacy aliases
 }
 
