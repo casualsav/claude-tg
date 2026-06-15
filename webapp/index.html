@@ -56,6 +56,7 @@
 
 <div id="viewer">
   <div class="vhead">
+    <button id="vback">←</button>
     <span class="name" id="vname"></span>
     <button id="vedit" style="display:none">✏️</button>
     <button id="vsave" style="display:none">💾</button>
@@ -122,7 +123,7 @@ async function ls(path) {
   const list = $("list");
   list.innerHTML = "";
   if (data.parent) list.appendChild(row("⬆️", "..", "", () => ls(data.parent)));
-  if (WRITE) list.appendChild(row("➕", "New folder…", "", newFolder));
+  if (WRITE) { list.appendChild(row("📝", "New file…", "", newFile)); list.appendChild(row("➕", "New folder…", "", newFolder)); }
   for (const e of data.entries) {
     const ico = e.type === "dir" ? "📁" : e.type === "symlink" ? "🔗" : "📄";
     const meta = e.type === "dir" ? "" : fmtSize(e.size);
@@ -166,6 +167,8 @@ async function openFile(path) {
   $("viewer").classList.add("show");
 }
 $("vclose").onclick = () => $("viewer").classList.remove("show");
+// Back: leave the viewer and land in the folder the file lives in (robust even after a search).
+$("vback").onclick = () => { $("viewer").classList.remove("show"); ls(vPath ? (vPath.split("/").slice(0, -1).join("/") || "/") : cur); };
 
 // Edit: swap the <pre> for an editable textarea; Save POSTs /api/write with the mtime we read, so the
 // server 409s if the file changed underneath us. Edit/Save buttons only render when WRITE && text file.
@@ -206,6 +209,19 @@ async function newFolder() {
   if (!n) return;
   const d = await writeOp("/api/mkdir", { path: cur, name: n });
   if (d) { showOk("Folder created"); ls(cur); }
+}
+// New file: create it empty in the current folder, then open it straight into the editor to type contents.
+async function newFile() {
+  const n = prompt("New file name (e.g. notes.md):");
+  if (!n) return;
+  if (n === "." || n === ".." || /[\/\0]/.test(n)) { showErr("invalid name"); return; }
+  const path = (cur === "/" ? "" : cur) + "/" + n;
+  const d = await writeOp("/api/write", { path, content: "" });
+  if (!d) return;
+  showOk("Created");
+  await ls(cur);
+  await openFile(path);
+  if (WRITE && vEditable) $("vedit").click();   // jump into edit mode
 }
 
 async function download(path) {
