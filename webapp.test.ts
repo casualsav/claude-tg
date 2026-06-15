@@ -54,19 +54,35 @@ test('end-to-end: server serves ls/read for an allowlisted, signed request and 4
 
   const dir = await mkdtemp(join(tmpdir(), 'webapp-'))
   await writeFile(join(dir, 'hello.txt'), 'hi there')
+  await writeFile(join(dir, 'index.html'), '<!doctype html><title>files</title>')
   const server = startWebapp({ token: TOKEN, isAllowed: id => id === '42', log: () => {}, staticDir: dir, port: 0 })
   const base = `http://127.0.0.1:${server.port}`
   const auth = { Authorization: `tma ${sign({ auth_date: String(now()), user })}` }
   try {
+    // static shell is served WITHOUT auth (initData lives in the URL hash; server can't see it)
+    const shell = await fetch(`${base}/`)
+    expect(shell.status).toBe(200)
+    expect(await shell.text()).toContain('<title>files</title>')
+
     const ls = await (await fetch(`${base}/api/ls?path=${encodeURIComponent(dir)}`, { headers: auth })).json()
     expect(ls.entries.some((e: { name: string }) => e.name === 'hello.txt')).toBe(true)
 
     const rd = await (await fetch(`${base}/api/read?path=${encodeURIComponent(join(dir, 'hello.txt'))}`, { headers: auth })).json()
     expect(rd.content).toBe('hi there')
 
-    expect((await fetch(`${base}/api/ls?path=/`)).status).toBe(401)   // no initData
-
+    expect((await fetch(`${base}/api/ls?path=/`)).status).toBe(401)   // API: no initData
     const wrongUser = { Authorization: `tma ${sign({ auth_date: String(now()), user: JSON.stringify({ id: 7 }) })}` }
-    expect((await fetch(`${base}/api/ls?path=/`, { headers: wrongUser })).status).toBe(403)   // not allowlisted
+    expect((await fetch(`${base}/api/ls?path=/`, { headers: wrongUser })).status).toBe(403)   // API: not allowlisted
+  } finally { server.stop(true) }
+})
+
+test('serves the real SPA bundle from webapp/ at /', async () => {
+  const { startWebapp } = await import('./webapp.ts')
+  const { join } = await import('node:path')
+  const server = startWebapp({ token: TOKEN, isAllowed: () => true, log: () => {}, staticDir: join(import.meta.dir, 'webapp'), port: 0 })
+  try {
+    const html = await (await fetch(`http://127.0.0.1:${server.port}/`)).text()
+    expect(html).toContain('telegram-web-app.js')
+    expect(html).toContain('id="list"')
   } finally { server.stop(true) }
 })

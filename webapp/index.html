@@ -1,0 +1,165 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Files</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root {
+    --bg: var(--tg-theme-bg-color, #17212b);
+    --sec: var(--tg-theme-secondary-bg-color, #232e3c);
+    --text: var(--tg-theme-text-color, #f5f5f5);
+    --hint: var(--tg-theme-hint-color, #7d8b99);
+    --link: var(--tg-theme-link-color, #6ab3f3);
+    --btn: var(--tg-theme-button-color, #5288c1);
+    --btn-text: var(--tg-theme-button-text-color, #fff);
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { position: sticky; top: 0; background: var(--bg); padding: 10px 12px; border-bottom: 1px solid var(--sec); }
+  .crumbs { font-size: 13px; color: var(--hint); word-break: break-all; margin-bottom: 8px; }
+  .crumbs a { color: var(--link); text-decoration: none; }
+  .search { display: flex; gap: 6px; }
+  .search input { flex: 1; padding: 8px 10px; border-radius: 8px; border: none; background: var(--sec); color: var(--text); font-size: 14px; }
+  .search button { padding: 8px 12px; border: none; border-radius: 8px; background: var(--btn); color: var(--btn-text); }
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { padding: 11px 12px; border-bottom: 1px solid var(--sec); display: flex; gap: 10px; align-items: center; cursor: pointer; }
+  li:active { background: var(--sec); }
+  .ico { width: 20px; text-align: center; }
+  .name { flex: 1; word-break: break-all; }
+  .meta { color: var(--hint); font-size: 12px; white-space: nowrap; }
+  #viewer { position: fixed; inset: 0; background: var(--bg); display: none; flex-direction: column; }
+  #viewer.show { display: flex; }
+  .vhead { padding: 10px 12px; border-bottom: 1px solid var(--sec); display: flex; gap: 8px; align-items: center; }
+  .vhead .name { font-size: 14px; }
+  .vhead button { padding: 7px 11px; border: none; border-radius: 8px; background: var(--btn); color: var(--btn-text); }
+  pre { margin: 0; padding: 12px; overflow: auto; flex: 1; white-space: pre; font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
+  .notice { padding: 24px 16px; color: var(--hint); text-align: center; }
+  .err { background: #c0392b; color: #fff; padding: 8px 12px; font-size: 13px; display: none; }
+  .err.show { display: block; }
+</style>
+</head>
+<body>
+<header>
+  <div class="crumbs" id="crumbs"></div>
+  <div class="search">
+    <input id="q" placeholder="find in this folder…" inputmode="search">
+    <button id="go">Find</button>
+  </div>
+</header>
+<div class="err" id="err"></div>
+<ul id="list"></ul>
+
+<div id="viewer">
+  <div class="vhead">
+    <span class="name" id="vname"></span>
+    <button id="vdl">⬇️</button>
+    <button id="vclose">✕</button>
+  </div>
+  <pre id="vbody"></pre>
+  <div class="notice" id="vnotice" style="display:none"></div>
+</div>
+
+<script>
+const tg = window.Telegram && window.Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+const INIT = (tg && tg.initData) || "";
+const AUTH = { Authorization: "tma " + INIT };
+
+const $ = id => document.getElementById(id);
+const errBox = $("err");
+function showErr(m) { errBox.textContent = m; errBox.classList.add("show"); setTimeout(() => errBox.classList.remove("show"), 4000); }
+
+async function api(path, params) {
+  const u = new URL(path, location.origin);
+  for (const k in (params || {})) u.searchParams.set(k, params[k]);
+  const r = await fetch(u, { headers: AUTH });
+  if (!r.ok) { showErr("API " + r.status + (r.status === 401 ? " — open from Telegram" : r.status === 403 ? " — not authorized" : "")); throw new Error(r.status); }
+  return r.json();
+}
+
+function fmtSize(n) { if (n < 1024) return n + "B"; if (n < 1048576) return (n / 1024).toFixed(0) + "KB"; return (n / 1048576).toFixed(1) + "MB"; }
+
+let cur = new URLSearchParams(location.search).get("start") || "/";
+
+function renderCrumbs(path) {
+  const parts = path.split("/").filter(Boolean);
+  let acc = "";
+  const links = ['<a href="#" data-p="/">/</a>'];
+  for (const p of parts) { acc += "/" + p; links.push('<a href="#" data-p="' + acc + '">' + p + '</a>'); }
+  $("crumbs").innerHTML = links.join(" <span style=color:var(--hint)>›</span> ");
+  $("crumbs").querySelectorAll("a").forEach(a => a.onclick = e => { e.preventDefault(); ls(a.dataset.p); });
+}
+
+async function ls(path) {
+  let data;
+  try { data = await api("/api/ls", { path }); } catch { return; }
+  cur = data.path;
+  renderCrumbs(cur);
+  const list = $("list");
+  list.innerHTML = "";
+  if (data.parent) list.appendChild(row("⬆️", "..", "", () => ls(data.parent)));
+  for (const e of data.entries) {
+    const ico = e.type === "dir" ? "📁" : e.type === "symlink" ? "🔗" : "📄";
+    const meta = e.type === "dir" ? "" : fmtSize(e.size);
+    const full = (cur === "/" ? "" : cur) + "/" + e.name;
+    list.appendChild(row(ico, e.name, meta, e.type === "dir" ? () => ls(full) : () => openFile(full)));
+  }
+}
+
+function row(ico, name, meta, onclick) {
+  const li = document.createElement("li");
+  li.innerHTML = '<span class="ico"></span><span class="name"></span><span class="meta"></span>';
+  li.children[0].textContent = ico; li.children[1].textContent = name; li.children[2].textContent = meta;
+  li.onclick = onclick;
+  return li;
+}
+
+async function openFile(path) {
+  let data;
+  try { data = await api("/api/read", { path }); } catch { return; }
+  $("vname").textContent = path.split("/").pop();
+  const body = $("vbody"), notice = $("vnotice");
+  $("vdl").onclick = () => download(path);
+  if (data.binary || data.tooLarge) {
+    body.style.display = "none"; notice.style.display = "block";
+    notice.textContent = data.binary ? "Binary file — download to view." : "File too large to preview (" + fmtSize(data.size) + ") — download it.";
+  } else {
+    notice.style.display = "none"; body.style.display = "block";
+    body.textContent = data.content;
+  }
+  $("viewer").classList.add("show");
+}
+$("vclose").onclick = () => $("viewer").classList.remove("show");
+
+async function download(path) {
+  try {
+    const r = await fetch(new URL("/api/download?path=" + encodeURIComponent(path), location.origin), { headers: AUTH });
+    if (!r.ok) { showErr("download " + r.status); return; }
+    const blob = await r.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = path.split("/").pop();
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  } catch { showErr("download failed"); }
+}
+
+async function find() {
+  const q = $("q").value.trim();
+  if (!q) return ls(cur);
+  let data;
+  try { data = await api("/api/find", { root: cur, q }); } catch { return; }
+  renderCrumbs(cur);
+  const list = $("list"); list.innerHTML = "";
+  list.appendChild(row("🔍", q + " — " + data.matches.length + (data.capped ? "+" : "") + " match(es)", "", () => ls(cur)));
+  for (const m of data.matches) list.appendChild(row("📄", m.replace(cur === "/" ? "" : cur, "") || m, "", () => openFile(m)));
+}
+$("go").onclick = find;
+$("q").addEventListener("keydown", e => { if (e.key === "Enter") find(); });
+
+if (!INIT) $("list").innerHTML = '<div class="notice">Open this from the Telegram button — it carries the sign-in token.</div>';
+else ls(cur);
+</script>
+</body>
+</html>

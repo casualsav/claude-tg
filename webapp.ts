@@ -145,12 +145,12 @@ async function handleStatic(url: URL, deps: WebappDeps): Promise<Response> {
   return new Response(Bun.file(join(deps.staticDir, 'index.html')))   // SPA fallback
 }
 
-// initData arrives as `Authorization: tma <initData>` (or `?_auth=` for the initial document load,
-// which the SPA immediately replaces with the header on its API calls).
-function extractInitData(req: Request, url: URL): string | null {
+// initData arrives as `Authorization: tma <initData>` on API calls. (It cannot gate the initial
+// document load: Telegram delivers initData in the URL hash fragment, which the browser never sends
+// to the server — only client JS sees it, then attaches it to each /api/* call.)
+function extractInitData(req: Request): string | null {
   const auth = req.headers.get('authorization') || ''
-  if (auth.startsWith('tma ')) return auth.slice(4)
-  return url.searchParams.get('_auth')
+  return auth.startsWith('tma ') ? auth.slice(4) : null
 }
 
 export function startWebapp(deps: WebappDeps): ReturnType<typeof Bun.serve> {
@@ -160,13 +160,14 @@ export function startWebapp(deps: WebappDeps): ReturnType<typeof Bun.serve> {
     async fetch(req) {
       const url = new URL(req.url)
       const isApi = url.pathname.startsWith('/api/')
-      // Auth on every request (the document load too, so an unsigned URL can't even fetch the SPA).
-      const initData = extractInitData(req, url)
-      const v = initData ? verifyInitData(initData, deps.token, deps.maxInitDataAgeSec) : { ok: false, reason: 'no initData' } as InitDataResult
-      if (!v.ok) return isApi ? json({ error: 'unauthorized', reason: v.reason }, 401) : new Response('unauthorized', { status: 401 })
-      if (!deps.isAllowed(v.userId!)) {
-        deps.log(`webapp: denied user ${v.userId} (not in allowlist)`)
-        return isApi ? json({ error: 'forbidden' }, 403) : new Response('forbidden', { status: 403 })
+      // Auth gates the API only. The static SPA shell carries no data, and the initial document load
+      // can't send the initData header (it lives in the URL hash, invisible to the server) — so the
+      // SPA reads initData client-side and signs every /api/* call. All file access is behind the API.
+      if (isApi) {
+        const initData = extractInitData(req)
+        const v = initData ? verifyInitData(initData, deps.token, deps.maxInitDataAgeSec) : { ok: false, reason: 'no initData' } as InitDataResult
+        if (!v.ok) return json({ error: 'unauthorized', reason: v.reason }, 401)
+        if (!deps.isAllowed(v.userId!)) { deps.log(`webapp: denied user ${v.userId} (not in allowlist)`); return json({ error: 'forbidden' }, 403) }
       }
       try {
         return isApi ? await handleApi(url, deps) : await handleStatic(url, deps)
