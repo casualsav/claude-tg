@@ -7217,6 +7217,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       sessionPin: { value: a.sessionPin !== false, editable: true },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
+      richMessages: { value: a.richMessages === true, editable: true, label: 'native tables / code / headings (Bot API 10.1)' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },
@@ -7230,6 +7231,7 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
   switch (key) {
     case 'voice': setVoiceMode(truthy(value), userId); return null   // notice DMs the toggling user (not the group)
     case 'mcp': { if (truthy(value) !== mcpEnabled()) toggleMcp(); return null }
+    case 'richMessages': { const a = loadAccess(); a.richMessages = truthy(value); saveAccess(a); return null }
     case 'sessionPin': {
       const a = loadAccess(); a.sessionPin = truthy(value); saveAccess(a)
       if (a.sessionPin) void updateSessionPin(); else void removeSessionPins()

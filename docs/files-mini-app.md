@@ -157,3 +157,18 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
 3. ~~**Sensitive-path guard**~~ **DECIDED: no hard block** (the session already has full FS access);
    **audit-log every write** + a **soft warning** when editing `*.env` / under `~/.ssh` / obvious secrets.
 4. ~~**Baseline / Phase 0**~~ **DECIDED: skip the inline-keyboard explorer.** Mini App only.
+
+## 10. Shipped beyond v1 (2026-06-15)
+- **Console tabs** — the Mini App is now a 4-tab console (Files / Settings / Usage / Diff): ONE Main Mini
+  App with client-side tabs. New `webapp.ts` endpoints (`/api/settings` + `/api/settings/set`, `/api/usage`,
+  `/api/diff`) call daemon-injected deps (`webappReadSettings`/`webappSetSetting`/`webappReadUsage`/
+  `webappReadDiff`) that reuse `loadAccess`/`parseStatusline`/budget/`sendDiff` logic. Reads inherit the
+  initData+allowlist auth; settings mutations also gate on `WEBAPP_WRITE`. Writable toggles: voice, mcp,
+  sessionPin, stream/replyMode, richMessages (mode/model/effort are read-only — they drive the pane).
+- **Rich Messages (Bot API 10.1)** — outbound replies can render natively (tables/headings/code) via
+  `sendRichMessage` (`richmsg.ts`, raw HTTP — grammy 1.41.1 has no 10.1 types). Behind the `richMessages`
+  pref (default off; toggle in the Settings tab). Flag-off path is the unchanged markdown→HTML; the rich
+  path falls back to HTML on any error (a reply never drops) and honors `renderMarkdown:false`. Works in DM
+  AND topics (`sendRichMessage` supports `message_thread_id`). **Deferred:** live draft-streaming via
+  `sendRichMessageDraft` — it's private-chat-only (can't stream into supergroup topics), so the helper
+  exists but isn't wired into the MirrorCard. Verified live: the API returns `ok:true` for this bot.
