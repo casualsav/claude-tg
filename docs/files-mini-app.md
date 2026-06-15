@@ -83,11 +83,15 @@ All endpoints require valid initData; all resolve+canonicalize paths and refuse 
 - `GET  /api/download?path=…` → raw bytes, `Content-Disposition: attachment`.
 - `GET  /api/find?root=…&q=…&max=…` → `{ matches:[path…] }` (name/glob match, capped; skips `.git`,
   `node_modules` by default with a toggle).
-- `POST /api/edit-request` `{ path }` → does NOT write; tells the daemon to post the chat edit prompt
-  (code block + force_reply for small files, or the file as a document for large ones). The actual
-  **write is a daemon/grammy handler**, not a web endpoint — editing is chat-based (see §9.2). A shared
-  `writeFile(path, content)` helper does `.bak` + audit-log + mtime optimistic-concurrency.
-- Out of v1 (later, guarded): `mkdir`, `rename`, `delete`.
+- `GET  /api/ls` also returns `write: <bool>` so the SPA renders edit/delete controls only when enabled.
+- **Write endpoints (POST; require `TELEGRAM_WEBAPP_WRITE=1`, default off; whole-FS like reads; each
+  canonicalizes its path and is audited to `daemon.log`):**
+  - `POST /api/write` `{ path, content, mtime? }` → save a text file; backs the prior contents up to
+    `<path>.bak`; if `mtime` is sent and the on-disk mtime differs → `409` (optimistic concurrency).
+  - `POST /api/rm` `{ path }` → move the file/dir into the trash dir (`~/.tg-trash`, recoverable) — **not**
+    a hard delete.
+  - `POST /api/mkdir` `{ path, name }` → create a subfolder (`name` may not be `.`/`..` or contain `/`).
+  - `POST /api/rename` `{ path, newName }` → rename in place (same name rules; refuses to overwrite).
 
 ## 6. Config (opt-in; off by default)
 In `~/.claude/channels/telegram/.env` / `access.json`:
@@ -98,7 +102,9 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
   **in-group** and is the **recommended install pick**; `none` = use `WEBAPP_PUBLIC_URL`).
 - `WEBAPP_PUBLIC_URL=https://…` (stable domain / named tunnel; overrides cloudflared).
 - `WEBAPP_PORT=…` (localhost bind port; default e.g. 8787).
-- `WEBAPP_WRITE=true|false` (allow edits; default false → read-only explorer until enabled).
+- `WEBAPP_WRITE=true|false` (default false → read-only). When on, the Mini App gains in-app **edit /
+  delete-to-trash / new-folder / rename**; deletions go to `~/.tg-trash` (recoverable), overwrites keep
+  a `.bak`, every mutation is audited to `daemon.log`.
 
 ## 7. Phasing
 - **Phase 0 — inline baseline:** ~~inline-keyboard explorer~~ **skipped** (decided 2026-06-15). Mini App only.
@@ -142,6 +148,12 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
    - Writes go through a shared helper: write a `.bak`, audit to `daemon.log`, optimistic-concurrency on
      mtime. The Mini App's role is browse/view/download; its "✏️ Edit" button just asks the daemon to
      post the edit prompt into the chat — the write itself is a daemon (grammy) handler, not a web API.
+   **UPDATE (2026-06-15): superseded — now an in-app editor.** With the Mini App working in-group, the
+   chat round-trip was the wrong call. Editing is in-app: tap a text file → editable textarea → Save →
+   `POST /api/write` (carries the mtime → `409` on conflict; backs up to `.bak`). Delete (→ `~/.tg-trash`,
+   recoverable), new-folder, and rename are in-app too (see §5). All gated by `TELEGRAM_WEBAPP_WRITE=1`
+   (default off), initData-auth'd + audited; binary/oversize files stay download-only. No chat-based edit
+   / `/api/edit-request`.
 3. ~~**Sensitive-path guard**~~ **DECIDED: no hard block** (the session already has full FS access);
    **audit-log every write** + a **soft warning** when editing `*.env` / under `~/.ssh` / obvious secrets.
 4. ~~**Baseline / Phase 0**~~ **DECIDED: skip the inline-keyboard explorer.** Mini App only.

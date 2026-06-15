@@ -38,6 +38,9 @@
   .notice { padding: 24px 16px; color: var(--hint); text-align: center; }
   .err { background: #c0392b; color: #fff; padding: 8px 12px; font-size: 13px; display: none; }
   .err.show { display: block; }
+  .err.ok { background: #2e7d32; }
+  button.rowbtn { background: transparent; border: none; color: var(--hint); font-size: 18px; line-height: 1; padding: 2px 8px; cursor: pointer; }
+  textarea#vedit-area { margin: 0; padding: 12px; border: none; outline: none; flex: 1; width: 100%; resize: none; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace; }
 </style>
 </head>
 <body>
@@ -54,10 +57,13 @@
 <div id="viewer">
   <div class="vhead">
     <span class="name" id="vname"></span>
+    <button id="vedit" style="display:none">✏️</button>
+    <button id="vsave" style="display:none">💾</button>
     <button id="vdl">⬇️</button>
     <button id="vclose">✕</button>
   </div>
   <pre id="vbody"></pre>
+  <textarea id="vedit-area" style="display:none"></textarea>
   <div class="notice" id="vnotice" style="display:none"></div>
 </div>
 
@@ -70,6 +76,21 @@ const AUTH = { Authorization: "tma " + INIT };
 const $ = id => document.getElementById(id);
 const errBox = $("err");
 function showErr(m) { errBox.textContent = m; errBox.classList.add("show"); setTimeout(() => errBox.classList.remove("show"), 4000); }
+function showOk(m) { errBox.textContent = m; errBox.classList.add("show", "ok"); setTimeout(() => errBox.classList.remove("show", "ok"), 2500); }
+
+let WRITE = false;   // set from /api/ls (.write) — gates all edit/delete UI; mirrors WEBAPP_WRITE on the server
+
+// POST a JSON write op with auth; surface server errors (incl. 409 edit conflicts). Returns parsed body or null.
+async function writeOp(endpoint, body) {
+  try {
+    const r = await fetch(new URL(endpoint, location.origin), {
+      method: "POST", headers: { ...AUTH, "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) { showErr(d.reason || d.error || ("HTTP " + r.status)); return null; }
+    return d;
+  } catch { showErr("request failed"); return null; }
+}
 
 async function api(path, params) {
   const u = new URL(path, location.origin);
@@ -96,32 +117,45 @@ async function ls(path) {
   let data;
   try { data = await api("/api/ls", { path }); } catch { return; }
   cur = data.path;
+  WRITE = !!data.write;
   renderCrumbs(cur);
   const list = $("list");
   list.innerHTML = "";
   if (data.parent) list.appendChild(row("⬆️", "..", "", () => ls(data.parent)));
+  if (WRITE) list.appendChild(row("➕", "New folder…", "", newFolder));
   for (const e of data.entries) {
     const ico = e.type === "dir" ? "📁" : e.type === "symlink" ? "🔗" : "📄";
     const meta = e.type === "dir" ? "" : fmtSize(e.size);
     const full = (cur === "/" ? "" : cur) + "/" + e.name;
-    list.appendChild(row(ico, e.name, meta, e.type === "dir" ? () => ls(full) : () => openFile(full)));
+    list.appendChild(row(ico, e.name, meta, e.type === "dir" ? () => ls(full) : () => openFile(full), { path: full, type: e.type }));
   }
 }
 
-function row(ico, name, meta, onclick) {
+function row(ico, name, meta, onclick, opts) {
   const li = document.createElement("li");
   li.innerHTML = '<span class="ico"></span><span class="name"></span><span class="meta"></span>';
   li.children[0].textContent = ico; li.children[1].textContent = name; li.children[2].textContent = meta;
   li.onclick = onclick;
+  if (WRITE && opts && opts.path) {
+    const b = document.createElement("button");
+    b.className = "rowbtn"; b.textContent = "⋯";
+    b.onclick = e => { e.stopPropagation(); rowMenu(opts.path, opts.type); };
+    li.appendChild(b);
+  }
   return li;
 }
+
+let vPath = null, vMtime = 0, vEditable = false;
 
 async function openFile(path) {
   let data;
   try { data = await api("/api/read", { path }); } catch { return; }
   $("vname").textContent = path.split("/").pop();
-  const body = $("vbody"), notice = $("vnotice");
+  const body = $("vbody"), notice = $("vnotice"), ta = $("vedit-area");
+  vPath = path; vMtime = data.mtime || 0; vEditable = !data.binary && !data.tooLarge;
   $("vdl").onclick = () => download(path);
+  ta.style.display = "none"; $("vsave").style.display = "none";          // reset to view state every open
+  $("vedit").style.display = (WRITE && vEditable) ? "" : "none";
   if (data.binary || data.tooLarge) {
     body.style.display = "none"; notice.style.display = "block";
     notice.textContent = data.binary ? "Binary file — download to view." : "File too large to preview (" + fmtSize(data.size) + ") — download it.";
@@ -132,6 +166,47 @@ async function openFile(path) {
   $("viewer").classList.add("show");
 }
 $("vclose").onclick = () => $("viewer").classList.remove("show");
+
+// Edit: swap the <pre> for an editable textarea; Save POSTs /api/write with the mtime we read, so the
+// server 409s if the file changed underneath us. Edit/Save buttons only render when WRITE && text file.
+$("vedit").onclick = () => {
+  const ta = $("vedit-area");
+  ta.value = $("vbody").textContent;
+  $("vbody").style.display = "none"; ta.style.display = "block";
+  $("vedit").style.display = "none"; $("vsave").style.display = "";
+  ta.focus();
+};
+$("vsave").onclick = async () => {
+  const ta = $("vedit-area");
+  const d = await writeOp("/api/write", { path: vPath, content: ta.value, mtime: vMtime });
+  if (!d) return;   // error (incl. conflict) already surfaced
+  vMtime = d.mtime; $("vbody").textContent = ta.value;
+  ta.style.display = "none"; $("vbody").style.display = "block";
+  $("vsave").style.display = "none"; $("vedit").style.display = "";
+  showOk("Saved");
+};
+
+// Per-row ⋯ menu (rename / delete-to-trash); native Telegram popups when available, prompt() otherwise.
+function rowMenu(path, type) {
+  const name = path.split("/").pop() || path;
+  const act = id => {
+    if (id === "rename") { const nn = prompt('Rename "' + name + '" to:', name); if (nn && nn !== name) writeOp("/api/rename", { path, newName: nn }).then(d => { if (d) { showOk("Renamed"); ls(cur); } }); }
+    else if (id === "delete") confirmDelete(path, name);
+  };
+  if (tg && tg.showPopup) tg.showPopup({ title: name, message: "File actions", buttons: [{ id: "rename", text: "Rename" }, { id: "delete", type: "destructive", text: "Delete" }, { id: "cancel", type: "cancel" }] }, act);
+  else { const c = prompt('"' + name + '" — type R to rename, D to delete'); if (c === "R" || c === "r") act("rename"); else if (c === "D" || c === "d") act("delete"); }
+}
+function confirmDelete(path, name) {
+  const go = () => writeOp("/api/rm", { path }).then(d => { if (d) { showOk("Moved to trash"); ls(cur); } });
+  if (tg && tg.showConfirm) tg.showConfirm('Move "' + name + '" to trash?', ok => { if (ok) go(); });
+  else if (confirm('Move "' + name + '" to trash?')) go();
+}
+async function newFolder() {
+  const n = prompt("New folder name:");
+  if (!n) return;
+  const d = await writeOp("/api/mkdir", { path: cur, name: n });
+  if (d) { showOk("Folder created"); ls(cur); }
+}
 
 async function download(path) {
   try {

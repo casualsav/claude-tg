@@ -1,12 +1,13 @@
-// webapp.ts — Files Mini App backend (Phase 1, read-only). A small Bun.serve HTTP server that
-// serves the static SPA bundle and a JSON file API, authenticated by Telegram Mini App `initData`
-// (HMAC-signed with the bot token) and gated to the bridge allowlist. Bound to localhost; a
-// cloudflared quick tunnel (set up by the daemon) fronts it with public HTTPS. Editing is NOT here —
-// it is a chat-based grammy flow (see docs/files-mini-app.md §9.2). Dependencies are injected so this
-// module stays decoupled from daemon internals and unit-testable.
+// webapp.ts — Files Mini App backend. A small Bun.serve HTTP server that serves the static SPA bundle
+// and a JSON file API, authenticated by Telegram Mini App `initData` (HMAC-signed with the bot token)
+// and gated to the bridge allowlist. Bound to localhost; a tunnel (cloudflared quick tunnel or
+// Tailscale Funnel, set up by the daemon) fronts it with public HTTPS. Read endpoints are always on;
+// write endpoints (edit / delete-to-trash / mkdir / rename) require `canWrite` (TELEGRAM_WEBAPP_WRITE,
+// default off): they overwrite to a `.bak`, move deletions to a trash dir (recoverable), and audit
+// every mutation to daemon.log. Dependencies are injected so this module stays decoupled and testable.
 
 import { createHmac, timingSafeEqual } from 'node:crypto'
-import { readdir, stat, realpath } from 'node:fs/promises'
+import { readdir, stat, realpath, writeFile, copyFile, rename, mkdir, cp, rm } from 'node:fs/promises'
 import { resolve, basename, dirname, join, sep } from 'node:path'
 
 export interface WebappDeps {
@@ -19,6 +20,9 @@ export interface WebappDeps {
   maxReadBytes?: number                    // text read cap (default 512 KiB)
   maxFind?: number                         // find result cap (default 500)
   resolveStart?: (token: string) => string | null   // map a deep-link startapp token → starting cwd
+  canWrite?: boolean                       // enable write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
+  trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
+  maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
 }
 
 export interface InitDataResult { ok: boolean; userId?: string; reason?: string }
@@ -77,7 +81,7 @@ function makeMatcher(q: string): (name: string) => boolean {
   return name => name.toLowerCase().includes(lq)
 }
 
-async function handleApi(url: URL, deps: WebappDeps): Promise<Response> {
+async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: string): Promise<Response> {
   const maxRead = deps.maxReadBytes ?? 512 * 1024
   const maxFind = deps.maxFind ?? 500
 
@@ -93,7 +97,7 @@ async function handleApi(url: URL, deps: WebappDeps): Promise<Response> {
       return { name: d.name, type, size: s?.size ?? 0, mtime: s?.mtimeMs ?? 0 }
     }))
     entries.sort((a, b) => (a.type === 'dir' ? 0 : 1) - (b.type === 'dir' ? 0 : 1) || a.name.localeCompare(b.name))
-    return json({ path: dir, parent: dir === sep ? null : dirname(dir), entries })
+    return json({ path: dir, parent: dir === sep ? null : dirname(dir), entries, write: !!deps.canWrite })
   }
 
   if (url.pathname === '/api/read') {
@@ -143,6 +147,65 @@ async function handleApi(url: URL, deps: WebappDeps): Promise<Response> {
     return cwd ? json({ cwd }) : json({ error: 'unknown or expired token' }, 404)
   }
 
+  // ---- Write endpoints (POST; gated by canWrite = TELEGRAM_WEBAPP_WRITE, default off) ----
+  // Whole-FS like reads (the session already has full FS access), but guarded: explicit opt-in flag,
+  // overwrite backs the prior contents up to `.bak`, delete moves to a trash dir (recoverable), every
+  // mutation is audited. Paths are canonicalized by canon(); new-folder/rename names can't contain `/`.
+  if (['/api/write', '/api/rm', '/api/mkdir', '/api/rename'].includes(url.pathname)) {
+    if (!deps.canWrite) return json({ error: 'read-only', reason: 'editing disabled (set TELEGRAM_WEBAPP_WRITE=1)' }, 403)
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    const body = await req.json().catch(() => null) as Record<string, unknown> | null
+    if (!body) return json({ error: 'bad body' }, 400)
+    const audit = (m: string) => deps.log(`webapp: ${m} user=${userId}`)
+
+    if (url.pathname === '/api/write') {
+      const file = await canon(String(body.path || ''))
+      const content = String(body.content ?? '')
+      if (Buffer.byteLength(content, 'utf-8') > (deps.maxWriteBytes ?? 2 * 1024 * 1024)) return json({ error: 'too large' }, 413)
+      const st = await stat(file).catch(() => null)
+      if (st?.isDirectory()) return json({ error: 'is a directory' }, 400)
+      if (st && body.mtime != null && Math.abs(st.mtimeMs - Number(body.mtime)) > 1)
+        return json({ error: 'conflict', reason: 'file changed on disk since you opened it — reopen it', mtime: st.mtimeMs }, 409)
+      if (st) await copyFile(file, `${file}.bak`).catch(() => {})       // keep the prior contents recoverable
+      await writeFile(file, content, 'utf-8')
+      const ns = await stat(file)
+      audit(`write path=${file} bytes=${ns.size}${st ? ' (.bak saved)' : ' (new file)'}`)
+      return json({ ok: true, path: file, size: ns.size, mtime: ns.mtimeMs })
+    }
+
+    if (url.pathname === '/api/rm') {
+      const target = await canon(String(body.path || ''))
+      if (!(await stat(target).catch(() => null))) return json({ error: 'not found' }, 404)
+      if (!deps.trashDir) return json({ error: 'no trash dir configured' }, 500)
+      await mkdir(deps.trashDir, { recursive: true })
+      const dest = join(deps.trashDir, `${Date.now()}__${encodeURIComponent(target)}`)
+      try { await rename(target, dest) }
+      catch { await cp(target, dest, { recursive: true }); await rm(target, { recursive: true, force: true }) }   // cross-device fallback
+      audit(`trash path=${target} → ${dest}`)
+      return json({ ok: true, trashed: dest })
+    }
+
+    if (url.pathname === '/api/mkdir') {
+      const name = String(body.name || '')
+      if (!name || name === '.' || name === '..' || /[\/\0]/.test(name)) return json({ error: 'bad name' }, 400)
+      const dir = join(await canon(String(body.path || '')), name)
+      await mkdir(dir)
+      audit(`mkdir path=${dir}`)
+      return json({ ok: true, path: dir })
+    }
+
+    if (url.pathname === '/api/rename') {
+      const newName = String(body.newName || '')
+      if (!newName || newName === '.' || newName === '..' || /[\/\0]/.test(newName)) return json({ error: 'bad name' }, 400)
+      const src = await canon(String(body.path || ''))
+      const dest = join(dirname(src), newName)
+      if (await stat(dest).catch(() => null)) return json({ error: 'target exists' }, 409)
+      await rename(src, dest)
+      audit(`rename ${src} → ${dest}`)
+      return json({ ok: true, from: src, to: dest })
+    }
+  }
+
   return json({ error: 'unknown endpoint' }, 404)
 }
 
@@ -171,6 +234,7 @@ export function startWebapp(deps: WebappDeps): ReturnType<typeof Bun.serve> {
     async fetch(req) {
       const url = new URL(req.url)
       const isApi = url.pathname.startsWith('/api/')
+      let userId = ''
       // Auth gates the API only. The static SPA shell carries no data, and the initial document load
       // can't send the initData header (it lives in the URL hash, invisible to the server) — so the
       // SPA reads initData client-side and signs every /api/* call. All file access is behind the API.
@@ -182,9 +246,10 @@ export function startWebapp(deps: WebappDeps): ReturnType<typeof Bun.serve> {
           return json({ error: 'unauthorized', reason: v.reason }, 401)
         }
         if (!deps.isAllowed(v.userId!)) { deps.log(`webapp: denied user ${v.userId} (not in allowlist)`); return json({ error: 'forbidden' }, 403) }
+        userId = v.userId!
       }
       try {
-        return isApi ? await handleApi(url, deps) : await handleStatic(url, deps)
+        return isApi ? await handleApi(req, url, deps, userId) : await handleStatic(url, deps)
       } catch (e) {
         deps.log(`webapp: ${url.pathname} error: ${(e as Error).message}`)
         return json({ error: 'server error' }, 500)
