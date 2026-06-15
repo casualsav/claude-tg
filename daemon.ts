@@ -4794,6 +4794,24 @@ bot.command('rename', async ctx => {
 // the resulting pane change isn't mistaken for a new prompt/event.
 bot.command('stop', confirmStop)
 
+// /files — open the Files Mini App at this session's folder (web_app button carries the live tunnel
+// URL). MUST be registered before the catch-all bot.on('message:text') below, or /files gets pasted
+// into the pane instead of handled. References the WEBAPP_* config/helpers defined near boot (resolved
+// at call time). Boot of the server/tunnel itself is startFilesWebapp() down by the startup loop.
+bot.command('files', async ctx => {
+  if (!dmCommandGate(ctx)) return
+  if (!WEBAPP_ENABLED) { await ctx.reply('Files explorer is off. Enable it: set TELEGRAM_WEBAPP_ENABLED=1 in the bridge .env, then /restart the daemon.'); return }
+  const url = filesPublicUrl()
+  if (!url) { await ctx.reply('📂 Files server is starting (bringing up the tunnel) — try /files again in a few seconds.'); return }
+  const t = await commandTarget(ctx)
+  if (!t) return
+  const cwd = (await paneCwd(t.paneId).catch(() => null)) || '/'
+  const full = `${url}/?start=${encodeURIComponent(cwd)}`
+  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,
+    { parse_mode: 'HTML', reply_markup: new InlineKeyboard().webApp('📂 Open Files', full),
+      ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) })
+})
+
 // Inline-button handler for permission requests + mode cycling + prompt answers.
 // A topic the USER creates (Telegram's ➕ create-topic UI) becomes a session via a two-button
 // card: 📁 <focused cwd>/<topic name> (one tap — name a tab "money" while the main session runs
@@ -7156,21 +7174,6 @@ async function startFilesWebapp(): Promise<void> {
   }
 }
 void startFilesWebapp()
-
-// /files — open the Mini App at this session's folder (the web_app button carries the live tunnel URL).
-bot.command('files', async ctx => {
-  if (!dmCommandGate(ctx)) return
-  if (!WEBAPP_ENABLED) { await ctx.reply('Files explorer is off. Enable it: set TELEGRAM_WEBAPP_ENABLED=1 in the bridge .env, then /restart the daemon.'); return }
-  const url = filesPublicUrl()
-  if (!url) { await ctx.reply('📂 Files server is starting (bringing up the tunnel) — try /files again in a few seconds.'); return }
-  const t = await commandTarget(ctx)
-  if (!t) return
-  const cwd = (await paneCwd(t.paneId).catch(() => null)) || '/'
-  const full = `${url}/?start=${encodeURIComponent(cwd)}`
-  await bot.api.sendMessage(String(ctx.chat!.id), `📂 <b>Files</b> — <code>${escapeHtml(cwd)}</code>`,
-    { parse_mode: 'HTML', reply_markup: new InlineKeyboard().webApp('📂 Open Files', full),
-      ...(t.replyThread ? { message_thread_id: t.replyThread } : {}) })
-})
 
 // ---- Bot startup loop (retry with backoff, daemon persists forever) ----
 
