@@ -8,7 +8,7 @@
       "name": "telegram",
       "source": "./",
       "description": "claude-tg — drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
-      "version": "0.1.186"
+      "version": "0.1.187"
     }
   ]
 }

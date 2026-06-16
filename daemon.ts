@@ -6854,6 +6854,29 @@ bot.on('message:text', async ctx => {
     return
   }
 
+  // Bare control chord: a message that is *only* `ctrl+g` / `ctrl-g` / `ctrl g` / `^g` (whole
+  // message, single letter) is sent to the session pane as that chord instead of being typed — for
+  // TUI shortcuts a Telegram keyboard can't otherwise reach (e.g. the plan prompt's "ctrl+g to
+  // edit", ctrl+r to expand). Matched against the RAW text (not trimmed) so any extra character —
+  // a leading space, surrounding words ("ctrl+g for instance") — falls through to normal typing.
+  const chord = text.match(/^(?:ctrl|control)[-+ ]([a-z])$|^\^([a-z])$/i)
+  if (chord) {
+    const result = gate(ctx)
+    if (result.action !== 'deliver') {
+      if (result.action === 'pair') {
+        const lead = result.isResend ? 'Still pending' : 'Pairing required'
+        await ctx.reply(`🔗 ${lead} — run in Claude Code:\n\n/telegram:access pair ${result.code}`)
+      }
+      return
+    }
+    const t = await commandTarget(ctx)
+    if (!t) return
+    const letter = (chord[1] ?? chord[2]).toLowerCase()
+    const ok = await paneKeys(t.paneId, [`C-${letter}`], [200, 1500])
+    await ctx.reply(ok ? `⌨️ Sent <b>Ctrl+${letter.toUpperCase()}</b>` : '⚠️ Couldn’t reach the session pane.', { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   await handleInbound(ctx, text, undefined)
 })
 
