@@ -3424,8 +3424,8 @@ function runBridgeUpdate(chat: string): void {
 }
 
 // Bare /update opens the dashboard. Subcommands skip it: `tg` updates this bridge, `claude` updates
-// Claude Code, `check` peeks at the bridge's own availability.
-bot.command('update', async ctx => {
+// Claude Code, `check` peeks at the bridge's own availability. `/upgrade` is an alias.
+bot.command(['update', 'upgrade'], async ctx => {
   if (!dmCommandGate(ctx)) return
   const arg = (ctx.match ?? '').toString().trim().toLowerCase()
   const chat_id = String(ctx.chat!.id)
