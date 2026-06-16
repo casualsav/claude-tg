@@ -51,7 +51,7 @@ These commands are added by the bridge. Everything else is Claude Code's own —
 | `/stream` | Live-activity card style: `thoughts` · `actions` · `off` |
 | `/voice` | Voice-note replies on/off |
 | `/settings` | Channel settings panel — Claude.ai accounts, GitHub accounts, voice transcription, and more |
-| `/update` | Update the bridge (`/update claude` updates Claude itself) |
+| `/update` | Update menu with a button for each — `/update tg` updates the bridge, `/update claude` updates Claude itself |
 
 **Mode shortcuts:** `/mode` opens the permission-mode switcher; `/plan` `/auto` `/default` `/acceptedits` `/bypass` jump straight to one.
 
@@ -60,7 +60,7 @@ These commands are added by the bridge. Everything else is Claude Code's own —
 
 ## Upgrading
 
-Just run "/upgrade tg" from inside the bot to upgrade. Bonus: running "/upgrade claude" upgrades Claude.
+Just run `/update tg` from inside the bot to update the bridge. Bonus: `/update claude` updates Claude itself, and bare `/update` opens a menu with a button for each.
 
 ## Uninstalling
 
