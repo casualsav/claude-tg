@@ -41,27 +41,8 @@ function sh(cmd: string, args: string[], cwd?: string) {
   return spawnSync(cmd, args, { cwd, encoding: 'utf8' })
 }
 
-// A release must reach BOTH the dev repo (origin) AND every marketplace repo that end-user installs
-// pull from — these are SEPARATE GitHub repos, so a lone `git push` to origin strands users on the
-// old version (Claude Code only re-copies a version it can see in the marketplace it's linked to).
-// Each publish remote is ensured (added/repointed) then pushed, so no manual `git remote add` is
-// needed and a user can install/update from EITHER repo and still get every release. A failed
-// publish push warns loudly but never undoes the deploy — origin already has it; just re-run the
-// printed `git push <name> HEAD:main` to retry.
-const PUBLISH_REMOTES: Array<{ name: string; url: string }> = [
-  { name: 'marketplace', url: 'git@github.com:casualsav/claude-tg.git' },
-]
-function pushPublishRemotes(): void {
-  const branch = (sh('git', ['rev-parse', '--abbrev-ref', 'HEAD'], REPO).stdout || 'main').trim()
-  for (const r of PUBLISH_REMOTES) {
-    const got = sh('git', ['remote', 'get-url', r.name], REPO)
-    if (got.status !== 0) sh('git', ['remote', 'add', r.name, r.url], REPO)
-    else if (got.stdout.trim() !== r.url) sh('git', ['remote', 'set-url', r.name, r.url], REPO)
-    const pr = sh('git', ['push', r.name, `HEAD:refs/heads/${branch}`], REPO)
-    if (pr.status !== 0) console.error(`⚠ publish push to ${r.name} (${r.url}) failed — users may stay on the old version; retry:\n    git push ${r.name} HEAD:${branch}\n  ${(pr.stderr || pr.stdout).trim()}`)
-    else step(`pushed → ${r.name}`)
-  }
-}
+// `origin` (casualsav/claude-tg) is the single source of truth AND the marketplace end-user installs
+// pull from — so a plain `git push` to origin both ships the code and releases it. No mirror/dual-push.
 
 // ---- args ----
 const argv = process.argv.slice(2)
@@ -239,9 +220,8 @@ if (commitMsg) {
   const body = `${commitMsg}\n\nCo-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>`
   const c = sh('git', ['commit', '-q', '-m', body], REPO); if (c.status !== 0) die(`git commit failed: ${c.stderr || c.stdout}`)
   const p = sh('git', ['push'], REPO); if (p.status !== 0) die(`git push failed: ${p.stderr}`)
-  step('pushed → origin')
-  pushPublishRemotes()   // mirror the release to the marketplace repo(s) so installs actually see it
+  step('pushed → origin (releases to installs)')
 }
 
 console.log(`\n✓ deployed ${next}${commitMsg ? ' (committed + pushed)' : ''}`)
-if (!commitMsg) console.log(`  next: git add -A && git commit -m "…(v${next})" && git push  (then mirror: git push marketplace HEAD:main)`)
+if (!commitMsg) console.log(`  next: git add -A && git commit -m "…(v${next})" && git push`)
