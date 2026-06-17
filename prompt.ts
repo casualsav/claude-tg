@@ -449,41 +449,32 @@ export function detectModelUnavailable(paneText: string): string | null {
   return m ? m[1].trim() : null
 }
 
-// True when the LIVE compaction line is on the pane. Claude Code renders "Compacting conversation…"
-// (with a progress bar) in the footer region — the spinner slot just above the input box — while a
-// /compact runs, and it vanishes when compaction finishes. We look ONLY at the tail (the live
-// footer), never the whole capture: the word also appears up in scrolled output — assistant prose,
-// this repo's own code/tests, our chat about the feature, our own relayed status card — and matching
-// THOSE re-posted a card on every frame (the loop bug). The footer's live spinner/box/statusline is
-// ~6-8 non-empty lines, so the compaction line lands within the last ~10. Liveness (a turn actually
-// running, vs. an idle pane whose last reply merely mentions compaction) is enforced by the caller
-// via the transcript — this position check alone can't tell a finished reply from a live spinner.
-// The live compaction footer Claude Code renders during /compact:
-//     · Compacting conversation… (46s)
-//     ═══════════════════════════════════════════════════════════════════─────
-//     40%
-// followed by the input box + the (tall) custom statusline. That whole footer is ~12-15 non-empty
-// lines, so the "Compacting" line lands well above a last-10 cut — the first attempt missed it and
-// no card fired. We scan a deeper tail AND require a LIVE progress element beside the word: the ═/━
-// progress bar, or a standalone "NN%" line. Prose, this repo's own code/tests, our chat about the
-// feature, and our own relayed card all say "compacting" but render neither on the work pane — that
-// content-only match is exactly what looped, so the bar/% requirement is what makes this robust
-// (the input-box border is single-line ─, never the double ═, so it never counts as the bar).
-const FOOTER_TAIL = 16
+// True when the LIVE interactive /compact is running on the pane. Claude Code renders, in the footer
+// slot above the input box:
+//     · Compacting conversation…
+//       ▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 10%
+// — a "Compacting conversation…" line above a ▰/▱ (filled/empty parallelogram) progress bar that
+// carries an inline NN%. (An internal "compacting history (N tokens)" string exists in the CLI binary
+// but is a DIFFERENT, non-interactive code path — NOT what /compact shows, which is why keying on it
+// never fired. The original detector keyed on a ═/━ box-bar + a STANDALONE % — also wrong: the bar is
+// ▰/▱ and the % sits on the bar line.) We require BOTH the phrase AND the ▰/▱ bar within the footer
+// tail: the parallelogram bar never appears in prose, code, or our own chat, so pairing it with the
+// phrase is what makes this robust against the content-only matches that looped before. A finished
+// compaction shows "Compacted" (no bar), so the line is gone and the card self-resolves.
+const FOOTER_TAIL = 18
 export function detectCompacting(paneText: string): boolean {
   const tail = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-FOOTER_TAIL)
-  if (!tail.some(l => /compacting\b/i.test(l))) return false
-  return tail.some(l => /[═━]{3,}/.test(l) || /^\s*\d{1,3}\s*%\s*$/.test(l))
+  return tail.some(l => /compacting conversation/i.test(l)) && tail.some(l => /[▰▱]{3,}/.test(l))
 }
 
-// Claude Code's real compaction percentage — the standalone "NN%" line in that footer — so the card
-// mirrors genuine progress instead of a synthetic animation. The statusline's own percentages
-// (ctx 32%/1000k, 5h 14%, …) are embedded mid-line, never standalone, so they can't be misread.
-// null when no percentage line is present.
+// Claude Code's real compaction percentage — the NN% on the ▰/▱ bar line — so the card mirrors genuine
+// progress instead of a synthetic animation. Only the bar line is read, so the statusline's own
+// percentages (ctx 0%/1000k, 5h 1%, …) can't be misread. null when no bar line is present.
 export function compactPercent(paneText: string): number | null {
   const tail = stripAnsi(paneText).split('\n').filter(l => l.trim()).slice(-FOOTER_TAIL)
   for (const l of tail) {
-    const m = /^\s*(\d{1,3})\s*%\s*$/.exec(l)
+    if (!/[▰▱]/.test(l)) continue
+    const m = /(\d{1,3})\s*%/.exec(l)
     if (m) return Math.max(0, Math.min(100, parseInt(m[1], 10)))
   }
   return null

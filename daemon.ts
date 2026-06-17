@@ -2253,43 +2253,66 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
 // first detection, animate a progress bar while the spinner persists, then resolve it to a ✅
 // message when the spinner is gone. Compaction exposes no percentage, so the bar is a moving
 // indicator (cycling fill), not a real fraction. Keyed by pane so each session gets its own card.
-type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; step: number; timer: ReturnType<typeof setTimeout> }
+type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; step: number; timer: ReturnType<typeof setTimeout>; lastText: string; cooldownUntil: number }
 const compactWatches = new Map<string, CompactWatch>()
 
-// The card's progress bar in Claude Code's own ═/─ style (matching the bar it draws on the pane),
+// The card's progress bar in Claude Code's own ▰/▱ style (matching the bar it draws on the pane),
 // kept short so the whole card stays one line on Telegram. `filled` is 0..WIDTH.
 const COMPACT_BAR_WIDTH = 14
 function compactBarOf(filled: number): string {
   const f = Math.max(0, Math.min(COMPACT_BAR_WIDTH, filled))
-  return '═'.repeat(f) + '─'.repeat(COMPACT_BAR_WIDTH - f)
+  return '▰'.repeat(f) + '▱'.repeat(COMPACT_BAR_WIDTH - f)
 }
 
-// The card's progress line. Prefer Claude Code's REAL percentage (mirrored from the live pane) so
-// the bar tracks genuine progress; fall back to a synthetic cycling bar (same ═/─ style) when the
-// pane exposes no percentage. `pct` is null when there's nothing to mirror.
+// The card's progress line. Prefer Claude Code's REAL percentage (mirrored from the live ▰/▱ bar) so
+// the card tracks genuine progress; fall back to a synthetic cycling bar (same ▰/▱ style) when no
+// percentage is on the pane yet. `pct` is null when there's nothing to mirror.
 function compactProgress(pct: number | null, step: number): string {
   if (pct != null) return `${compactBarOf(Math.round((pct / 100) * COMPACT_BAR_WIDTH))} ${pct}%`
   return compactBarOf(step % (COMPACT_BAR_WIDTH + 1))
 }
+
+// One edit attempt at the card. Returns 0 on success (or on a 400 "message is not modified"/gone,
+// which needs no further action), the server's retry_after seconds on a 429 flood, or -1 otherwise.
+// Telegram flood-limits edits to a single message (group chats allow only ~20 message events/min),
+// so a long compaction's stream of edits eventually 429s — and if the *final* edit is the casualty
+// the card freezes mid-progress (the "stuck at 72%" bug). Callers back off using the returned
+// cooldown, and the terminal ✅ is retried through the window so the card always lands on its end state.
+async function tryEditCard(chat: string, msgId: number, text: string): Promise<number> {
+  try {
+    await bot.api.editMessageText(chat, msgId, text, { parse_mode: 'HTML' })
+    return 0
+  } catch (e: any) {
+    if (e?.error_code === 400) return 0
+    const ra = Number(e?.parameters?.retry_after)
+    return e?.error_code === 429 && Number.isFinite(ra) ? Math.max(1, ra) : -1
+  }
+}
+
+// Card refresh cadence. Group chats throttle to ~20 message events/min, so we pace edits at 3s
+// (~20/min) to stay under the flood limit in the first place; tryEditCard's cooldown is the backstop.
+const COMPACT_TICK_MS = 3000
 
 // Kick off (idempotently) the status card for a pane that just started compacting. Safe to call on
 // every pane frame: the map guard is set synchronously (no await before it), so repeated frames in
 // the same compaction never post a second card.
 async function startCompactionWatch(pane: string, initialText = ''): Promise<void> {
   if (compactWatches.has(pane)) return
-  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), step: 1, timer: setTimeout(() => {}, 0) }
+  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), step: 1, timer: setTimeout(() => {}, 0), lastText: '', cooldownUntil: 0 }
   clearTimeout(slot.timer)
   compactWatches.set(pane, slot)   // reserve the slot before any await so a concurrent frame can't duplicate it
   const [target] = await outboundTargetsFor(pane)
   if (!target) { compactWatches.delete(pane); return }
   slot.chat = target.chat
   slot.thread = target.thread
-  const msg = await bot.api.sendMessage(target.chat, `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(initialText), slot.step)}</code>`, {
+  const opening = `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(initialText), slot.step)}</code>`
+  const msg = await bot.api.sendMessage(target.chat, opening, {
     parse_mode: 'HTML',
     ...(target.thread ? { message_thread_id: target.thread } : {}),
   }).catch(() => null)
   if (!msg) { compactWatches.delete(pane); return }
   slot.msgId = msg.message_id
+  slot.lastText = opening
   const tick = async (): Promise<void> => {
     const w = compactWatches.get(pane)
     if (!w) return
@@ -2298,19 +2321,25 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
     const still = detectCompacting(cap)
     if (still && elapsed < 5 * 60_000) {
       w.step += 1
-      await bot.api.editMessageText(w.chat, w.msgId, `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(cap), w.step)}</code>`, {
-        parse_mode: 'HTML',
-      }).catch(() => {})
-      w.timer = setTimeout(() => void tick(), 2000)
+      const text = `🗜️ Compacting conversation…\n<code>${compactProgress(compactPercent(cap), w.step)}</code>`
+      if (text !== w.lastText && Date.now() >= w.cooldownUntil) {   // skip redundant edits; honour any 429 cooldown
+        const wait = await tryEditCard(w.chat, w.msgId, text)
+        if (wait === 0) w.lastText = text
+        else if (wait > 0) w.cooldownUntil = Date.now() + wait * 1000
+      }
+      w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
     } else {
       compactWatches.delete(pane)
       const secs = Math.round(elapsed / 1000)
-      await bot.api.editMessageText(w.chat, w.msgId, `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}`, {
-        parse_mode: 'HTML',
-      }).catch(() => {})
+      const done = `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}`
+      for (let i = 0; i < 6; i++) {            // the end state MUST land, even through a 429 flood window
+        const wait = await tryEditCard(w.chat, w.msgId, done)
+        if (wait <= 0) break
+        await sleep(Math.min(wait, 30) * 1000 + 250)
+      }
     }
   }
-  slot.timer = setTimeout(() => void tick(), 2000)
+  slot.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
 }
 
 function startPaneWatcher(paneId: string): void {
@@ -3094,11 +3123,11 @@ async function runReadout(t: CommandTarget, chatId: string, kind: 'cost' | 'cont
   const raw = t.isFocused && t.watcher ? await t.watcher.withInjection(drive) : await drive()
   const out = kind === 'cost' ? extractCostReadout(raw) : kind === 'usage' ? extractUsageReadout(raw) : extractContextReadout(raw)
   const extra = threadExtra(t, { parse_mode: 'HTML' })
-  if (!out) { await bot.api.sendMessage(chatId, `Could not read /${kind} output.`, threadExtra(t)).catch(() => {}); return }
+  if (!out) { await sendChunkRetrying(chatId, `Could not read /${kind} output.`, threadExtra(t)); return }
   const title = kind === 'cost' ? '📊 <b>Cost</b>' : kind === 'usage' ? '📈 <b>Usage</b>' : '📐 <b>Context</b>'
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-  for (const c of chunkHtml(`${title}\n<pre>${escapeHtml(out)}</pre>`, limit)) {
-    await bot.api.sendMessage(chatId, c, extra).catch(() => {})
+  for (const c of chunkHtml(`${title}\n<pre><code class="language-javascript">${escapeHtml(out)}</code></pre>`, limit)) {
+    await sendChunkRetrying(chatId, c, extra)
   }
 }
 
@@ -4024,7 +4053,7 @@ bot.command('terminal', async ctx => {
   const body = cleanPaneTail(raw, n)
   if (!body) { await ctx.reply('Nothing recent to show.'); return }
   const limit = Math.max(1, Math.min(loadAccess().textChunkLimit ?? MAX_CHUNK_LIMIT, MAX_CHUNK_LIMIT))
-  const chunks = chunkHtml(`📜 <b>Recent terminal (${body.split('\n').length} lines)</b>\n<pre>${escapeHtml(body)}</pre>`, limit)
+  const chunks = chunkHtml(`📜 <b>Recent terminal (${body.split('\n').length} lines)</b>\n<pre><code class="language-javascript">${escapeHtml(body)}</code></pre>`, limit)
   for (const c of chunks) await bot.api.sendMessage(String(ctx.chat!.id), c, threadExtra(t, { parse_mode: 'HTML' })).catch(() => {})
 })
 

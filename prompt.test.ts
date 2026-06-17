@@ -13,42 +13,51 @@ test('detectModelUnavailable extracts the offending model name', () => {
   expect(detectModelUnavailable('❯ /model opus')).toBe(null)
 })
 
-test('detectCompacting fires on Claude Code\'s real footer (bar + standalone %), not on scrollback', () => {
-  // The genuine /compact footer, mirrored from a live capture: the word, a ═/─ bar, a standalone
-  // "NN%", then the input box and the (tall) custom statusline below it.
+test('detectCompacting fires on Claude Code\'s real /compact footer (phrase + ▰/▱ bar), not on prose', () => {
+  // The genuine interactive /compact footer, exactly as Claude Code renders it: "· Compacting
+  // conversation…" above a ▰/▱ parallelogram bar carrying an inline NN%, then the input box + the
+  // (tall) custom statusline. We require BOTH the phrase and the ▰/▱ bar; the % is read off the bar.
   const live = [
-    '● Back up and healthy — running the new code.',
+    '● Implementing the fix now.',
     '',
-    '· Compacting conversation… (46s)',
-    '════════════════════════════════════════════════════════════─────',
-    '40%',
+    '· Compacting conversation…',
+    '  ▰▰▰▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱ 10%',
     '',
-    '────────────────────────────────────── outreach-phase-implementation ──',
+    '──────────────────────────────────────────────────────────── proj ──',
     '❯ ',
-    '───────────────────────────────────────────────────────────────────────',
-    '  user@host:/projects/websites (master) | casualsav/webagency-engine | Opus 4.8',
-    '  ε:max | ✻think | ctx ███░ 32%/1000k | ↑317.1k ↓1.0k | $154.24 | ⧗124h54m',
-    '  5h ██░ 14% ↻1h09m | 7d ██░ 12% ↻106h49m',
+    '────────────────────────────────────────────────────────────────────────',
+    '  user@host:/projects/proj (main) | casualsav/proj | Opus 4.8',
+    '  ε:max | ✻think | ctx ░░░░░░░░░░ 0%/1000k | ↑0 ↓0 | $19.08 | ⧗143h20m',
+    '  5h ░░ 1% ↻4h48m | 7d ██░ 13% ↻105h28m',
     '  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents',
   ].join('\n')
   expect(detectCompacting(live)).toBe(true)
-  expect(compactPercent(live)).toBe(40)
+  expect(compactPercent(live)).toBe(10)             // read off the ▰/▱ bar line, not the statusline
 
-  // Scrollback: the assistant merely talked ABOUT compaction; no live bar / standalone % in the
-  // footer, and the pane is idle at a normal prompt. Must NOT count (this was the loop bug).
-  const scrollback = [
-    'Yeah, that was my bug — the detector now requires the live "Compacting conversation…" line.',
-    'So me just talking about compaction here in chat will not fire a card anymore.',
+  // Prose that merely mentions compaction (the bare word) with NO ▰/▱ bar — must NOT fire. Matching
+  // the bare word was the loop bug (our own chat, rendered on the dev pane, re-posted a card every
+  // frame). The statusline's ░/█ ctx gauge is NOT the ▰/▱ bar, so it can't stand in for one.
+  const prose = [
+    'Yeah, that was the bug — the detector needs the real ▰/▱ progress bar, not the bare word.',
+    'So me just talking about compaction — or compacting in general — will not fire a card anymore.',
     'line', 'line', 'line', 'line', 'line', 'line',
     '───────────────────────────────',
     '❯ ',
     '───────────────────────────────',
     '  user@host:/projects (main) | Opus 4.8',
-    '  ε:max | ✻think | ctx ██░ 4%/1000k | $1.00',
+    '  ε:max | ✻think | ctx ██░░░░░░░░ 4%/1000k | $1.00',
     '  ⏵⏵ bypass permissions on (shift+tab to cycle)',
   ].join('\n')
-  expect(detectCompacting(scrollback)).toBe(false)
-  expect(compactPercent(scrollback)).toBe(null)
+  expect(detectCompacting(prose)).toBe(false)
+  expect(compactPercent(prose)).toBe(null)
+
+  // The two halves of the AND, each alone, must NOT fire: the phrase quoted in chat without a bar,
+  // and some OTHER progress bar without the compaction phrase.
+  expect(detectCompacting('· Compacting conversation… (me quoting the UI in chat)\n❯ \n  host | Opus')).toBe(false)
+  expect(detectCompacting('Downloading…\n  ▰▰▰▰▰▱▱▱▱▱ 50%\n❯ \n  host | Opus')).toBe(false)
+
+  // A FINISHED compaction shows "Compacted" (no bar) — must not count.
+  expect(detectCompacting('  ⎿  Compacted (ctrl+o to see full summary)\n❯ \n  host | Opus')).toBe(false)
   expect(detectCompacting('just normal output')).toBe(false)
 })
 
