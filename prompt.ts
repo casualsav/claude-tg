@@ -416,6 +416,16 @@ export function detectCurrentMode(paneText: string): CcMode {
   return 'default'
 }
 
+// The session is pinned to a model the account can't use — renamed, deprecated, or access pulled.
+// Claude Code prints "Claude <Model> is currently unavailable. Learn more: …" and then EVERY action
+// (resume, /compact, even /model) fails with it, wedging the session in an error loop. Returns the
+// offending model name so the daemon can alert the user (who must /model to a working one). Matched
+// loosely (the "Learn more" URL varies per model) but anchored on the exact Claude Code phrasing.
+export function detectModelUnavailable(paneText: string): string | null {
+  const m = stripAnsi(paneText).match(/Claude ([^\n]+?) is currently unavailable/i)
+  return m ? m[1].trim() : null
+}
+
 // True when the pane is at Claude Code's normal prompt (input box visible), where reading or
 // changing the mode is valid. A settings/config screen or another modal lacks this footer, so
 // detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and

@@ -23,7 +23,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, detectModelUnavailable, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1082,6 +1082,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // an aux-only limit hit would never schedule the reset ping. Dedup inside is account-global
   // (keyed on the reset minute), so several panes showing the same banner relay/schedule once.
   void handleUsageLimit(text, pane)
+  void handleModelUnavailable(text, pane)
 
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
@@ -1971,6 +1972,7 @@ async function handleUsageLimit(text: string, origin: string | null = focus.acti
 
 function onPaneEvent(text: string): void {
   void handleUsageLimit(text)
+  void handleModelUnavailable(text)
   // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
   // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
   // against the exact rendering. Off by default; no effect on normal operation.
@@ -2167,6 +2169,35 @@ async function relayAuthUrlToTelegram(url: string, paneId: string | null = focus
       replyTargets.set(`${chat}:${sent.message_id}`, { kind: 'authurl' })
     } catch (e) {
       process.stderr.write(`daemon: auth-url relay to ${chat} failed: ${e}\n`)
+    }
+  }
+}
+
+// Per-pane dedup for the model-unavailable alert (paneId → last model alerted). Cleared when the
+// error leaves the pane, so a later recurrence (or a different bad model) alerts again.
+const modelUnavailAlerted = new Map<string, string>()
+async function handleModelUnavailable(text: string, paneId: string | null = focus.activePaneId): Promise<void> {
+  const key = paneId ?? '∅'
+  const model = detectModelUnavailable(text)
+  if (!model) { modelUnavailAlerted.delete(key); return }
+  if (modelUnavailAlerted.get(key) === model.toLowerCase()) return   // already alerted; don't spam per-frame
+  modelUnavailAlerted.set(key, model.toLowerCase())
+  const targets = await outboundTargetsFor(paneId)
+  if (targets.length === 0) return
+  const msg =
+    `⚠️ <b>Model unavailable</b>\n\n` +
+    `This session is set to <b>${escapeHtml(model)}</b>, which your account can't use ` +
+    `(renamed, deprecated, or no access). Every action will fail until you switch.\n\n` +
+    `💬 Reply <code>/model opus</code> (or another model) to recover.`
+  for (const { chat, thread } of targets) {
+    try {
+      await bot.api.sendMessage(chat, msg, {
+        parse_mode: 'HTML',
+        link_preview_options: { is_disabled: true },
+        ...(thread ? { message_thread_id: thread } : {}),
+      })
+    } catch (e) {
+      process.stderr.write(`daemon: model-unavailable alert to ${chat} failed: ${e}\n`)
     }
   }
 }
