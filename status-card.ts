@@ -259,6 +259,15 @@ export function pinMessageGone(e: unknown): boolean {
   return /message to edit not found|message can'?t be edited|message to pin not found|MESSAGE_ID_INVALID/i.test(d)
 }
 
+// Telegram's "message is not modified" — the edit was a genuine no-op because the pin already shows
+// this exact text, so it's safe to mark the cache current. EVERY other edit error (429 rate-limit,
+// network blip, "thread not found") must NOT update the cache: if it does, the next cycle sees
+// cache === text and skips the edit forever, freezing the displayed pin at a stale value (this is
+// how an effort change to "max" kept showing "high" — the edit 429'd and the cache was poisoned).
+export function pinNotModified(e: unknown): boolean {
+  return /message is not modified/i.test(String((e as { description?: string })?.description ?? e))
+}
+
 // Delete every currently-pinned message in a DM chat. getChat only reports the topmost pinned
 // message, so delete that and re-fetch until none remain (bounded). deleteMessage also clears the
 // pin; if a message is too old to delete, unpin it so the loop still advances. Run right before
@@ -312,7 +321,8 @@ export async function updateTopicPins(): Promise<void> {
         try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text) }
         catch (e) {
           if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
-          else pinTextCache.set(key, text)   // "not modified" → already current
+          else if (pinNotModified(e)) pinTextCache.set(key, text)   // already current — safe to cache
+          // else: transient (429 / network / thread-not-found) — leave cache stale so next cycle retries
         }
       }
       if (!sessionPins.has(key)) {
@@ -337,7 +347,7 @@ export async function updateTopicPins(): Promise<void> {
       try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text); continue }
       catch (e) {
         if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
-        else { pinTextCache.set(key, text); continue }   // "not modified" → already current
+        else { if (pinNotModified(e)) pinTextCache.set(key, text); continue }   // current → cache; transient → retry next cycle
       }
     }
     try {
@@ -370,7 +380,8 @@ export async function updateSessionPin(): Promise<void> {
           // Deleted out from under us → drop the stale id and recreate below. Transient errors
           // ("message is not modified") leave it in place — the pin is still good.
           if (pinMessageGone(e)) { sessionPins.delete(chat); pinTextCache.delete(chat); persistSessionPins() }
-          else pinTextCache.set(chat, text)   // "not modified" → it already shows this text
+          else if (pinNotModified(e)) pinTextCache.set(chat, text)   // already current — safe to cache
+          // else: transient (429 / network) — leave cache stale so next cycle retries the edit
         }
         if (sessionPins.has(chat)) {
           // If the user unpinned it, re-pin on the next update (e.g. a mode change) so it returns.
