@@ -14,7 +14,7 @@ import { parseStatusline, pinBar, type StatuslineData } from './statusline.ts'
 import { capturePane, paneCwd } from './pane-io.ts'
 import { focus } from './state.ts'
 import { loadAccess } from './access.ts'
-import { isTopicMode, getGroupChatId, listTopics, getGeneralSession } from './topics.ts'
+import { isTopicMode, getGroupChatId, listTopics, getGeneralSession, removeTopic } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode } from './prompt.ts'
 
@@ -268,6 +268,14 @@ export function pinNotModified(e: unknown): boolean {
   return /message is not modified/i.test(String((e as { description?: string })?.description ?? e))
 }
 
+// Telegram says the forum topic itself is gone (deleted on their side) — every pin send/edit to its
+// thread 400s with "message thread not found". The topic store still lists it, so the 10s pin loop
+// retries forever and hammers the API into 429s (which then froze OTHER pins via the cache). Detect
+// it so the loop can drop the dead topic and stop retrying — the auto-heal analog of pinMessageGone.
+export function topicThreadGone(e: unknown): boolean {
+  return /message thread not found|thread not found|TOPIC_DELETED/i.test(String((e as { description?: string })?.description ?? e))
+}
+
 // Delete every currently-pinned message in a DM chat. getChat only reports the topmost pinned
 // message, so delete that and re-fetch until none remain (bounded). deleteMessage also clears the
 // pin; if a message is too old to delete, unpin it so the loop still advances. Run right before
@@ -305,6 +313,16 @@ export async function createSessionPin(chat: string, text: string, reply_markup:
 // as `topic:<threadId>` (distinct from DM mode's numeric chat keys, so the persisted map holds both).
 // A topic whose session isn't running keeps its existing pin untouched. No clearAllPins here — each
 // topic has its own single in-thread pin, so we never sweep the whole group's pins.
+// A forum topic whose Telegram thread is gone: forget it from the store and drop its pin bookkeeping
+// so the 10s loop stops retrying (and stops triggering 429s). Mirrors pinMessageGone's recovery.
+function dropDeadTopic(sessionId: string, key: string): void {
+  removeTopic(sessionId)
+  sessionPins.delete(key)
+  pinTextCache.delete(key)
+  persistSessionPins()
+  process.stderr.write(`daemon: dropped topic ${sessionId} — Telegram thread gone (stopped pin retries)\n`)
+}
+
 export async function updateTopicPins(): Promise<void> {
   const group = getGroupChatId()
   if (!group) return
@@ -346,6 +364,7 @@ export async function updateTopicPins(): Promise<void> {
     if (existing) {
       try { await deps.bot.api.editMessageText(group, existing, text, { parse_mode: 'HTML', reply_markup: statusKeyboard() }); pinTextCache.set(key, text); continue }
       catch (e) {
+        if (topicThreadGone(e)) { dropDeadTopic(t.sessionId, key); continue }   // tab deleted on Telegram → forget it, stop retrying
         if (pinMessageGone(e)) { sessionPins.delete(key); pinTextCache.delete(key); persistSessionPins() }
         else { if (pinNotModified(e)) pinTextCache.set(key, text); continue }   // current → cache; transient → retry next cycle
       }
@@ -355,7 +374,10 @@ export async function updateTopicPins(): Promise<void> {
       const m = await deps.bot.api.sendMessage(group, text, { parse_mode: 'HTML', message_thread_id: t.threadId, disable_notification: true, reply_markup: statusKeyboard() })
       await deps.bot.api.pinChatMessage(group, m.message_id, { disable_notification: true }).catch(() => {})
       sessionPins.set(key, m.message_id); pinTextCache.set(key, text); persistSessionPins()
-    } catch (e) { process.stderr.write(`daemon: topic pin create failed: ${e}\n`) }
+    } catch (e) {
+      if (topicThreadGone(e)) dropDeadTopic(t.sessionId, key)   // tab deleted on Telegram → forget it, stop retrying
+      else process.stderr.write(`daemon: topic pin create failed: ${e}\n`)
+    }
   }
 }
 
