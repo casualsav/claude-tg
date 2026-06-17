@@ -2480,6 +2480,28 @@ async function relaySlashCommand(
   ]).catch(() => {})
 }
 
+// /model <name> gets a confirmation MESSAGE (not just the 👍 ack) naming the model Claude Code
+// actually landed on — it normalises aliases ("opus" → "Opus 4.8"). Read back the "Set model to
+// <X>" line it prints. If instead a "Switch model?" confirm picker pops (mid-conversation), that's
+// relayed as buttons by the prompt watcher, so here we just fall back to the 👍 ack and stay quiet.
+async function relayModelSet(ctx: Context, paneId: string, watcher: PaneWatcher | null, arg: string): Promise<void> {
+  await injectSlash(paneId, watcher, `/model ${arg}`)
+  let name: string | null = null
+  for (let i = 0; i < 8 && !name; i++) {
+    await new Promise(r => setTimeout(r, 250))
+    const cap = stripAnsi(await capturePane(paneId).catch(() => ''))
+    const m = cap.match(/Set model to (.+?)(?:\s+and\b|\s+for\b|[.\n]|$)/i)
+    if (m && looksLikeModel(m[1].trim())) name = m[1].trim()
+  }
+  if (name) {
+    await ctx.reply(`🧠 Model set to <b>${escapeHtml(name)}</b>`, { parse_mode: 'HTML' }).catch(() => {})
+  } else {
+    void bot.api.setMessageReaction(String(ctx.chat!.id), ctx.message!.message_id, [
+      { type: 'emoji', emoji: '👍' },
+    ]).catch(() => {})
+  }
+}
+
 // Run a `!<cmd>` shell command on the host (in the focused pane's cwd) and relay stdout/stderr back.
 // Runs directly in the daemon — independent of any Claude turn — so it works even mid-task. Callers
 // must have passed the access gate; BANG_SHELL must be enabled.
@@ -3124,7 +3146,7 @@ bot.command('model', async ctx => {
   if (arg) {
     const t = await commandTarget(ctx)
     if (!t) return
-    void relaySlashCommand(t.paneId, t.watcher, `/model ${arg}`, String(ctx.chat!.id), ctx.message!.message_id)
+    void relayModelSet(ctx, t.paneId, t.watcher, arg)
     return
   }
   await doModelPicker(ctx)
