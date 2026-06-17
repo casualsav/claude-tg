@@ -23,7 +23,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, detectModelUnavailable, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -1073,6 +1073,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // (keyed on the reset minute), so several panes showing the same banner relay/schedule once.
   void handleUsageLimit(text, pane)
   void handleModelUnavailable(text, pane)
+  if (detectCompacting(text)) { void startCompactionWatch(pane); return }
 
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
@@ -1962,6 +1963,7 @@ async function handleUsageLimit(text: string, origin: string | null = focus.acti
 function onPaneEvent(text: string): void {
   void handleUsageLimit(text)
   void handleModelUnavailable(text)
+  if (focus.activePaneId && detectCompacting(text)) void startCompactionWatch(focus.activePaneId)
   // Diagnostic: when TELEGRAM_DEBUG_PANE=1, append each pane frame + the prompt
   // detection result to /tmp/tg-pane-debug.log, so a missed prompt can be traced
   // against the exact rendering. Off by default; no effect on normal operation.
@@ -2212,6 +2214,61 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
       process.stderr.write(`daemon: model-unavailable alert to ${chat} failed: ${e}\n`)
     }
   }
+}
+
+// ---- /compact live status card ----
+// A /compact (typed in the terminal OR relayed from chat) renders a live "Compacting…" spinner on
+// the pane that vanishes when it finishes. We surface ONE status card per compaction: post it on
+// first detection, animate a progress bar while the spinner persists, then resolve it to a ✅
+// message when the spinner is gone. Compaction exposes no percentage, so the bar is a moving
+// indicator (cycling fill), not a real fraction. Keyed by pane so each session gets its own card.
+type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; step: number; timer: ReturnType<typeof setTimeout> }
+const compactWatches = new Map<string, CompactWatch>()
+
+function compactBar(step: number): string {
+  const width = 12
+  const filled = step % (width + 1)
+  return '█'.repeat(filled) + '░'.repeat(width - filled)
+}
+
+// Kick off (idempotently) the status card for a pane that just started compacting. Safe to call on
+// every pane frame: the map guard is set synchronously (no await before it), so repeated frames in
+// the same compaction never post a second card.
+async function startCompactionWatch(pane: string): Promise<void> {
+  if (compactWatches.has(pane)) return
+  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), step: 1, timer: setTimeout(() => {}, 0) }
+  clearTimeout(slot.timer)
+  compactWatches.set(pane, slot)   // reserve the slot before any await so a concurrent frame can't duplicate it
+  const [target] = await outboundTargetsFor(pane)
+  if (!target) { compactWatches.delete(pane); return }
+  slot.chat = target.chat
+  slot.thread = target.thread
+  const msg = await bot.api.sendMessage(target.chat, `🗜️ Compacting conversation…\n<code>${compactBar(slot.step)}</code>`, {
+    parse_mode: 'HTML',
+    ...(target.thread ? { message_thread_id: target.thread } : {}),
+  }).catch(() => null)
+  if (!msg) { compactWatches.delete(pane); return }
+  slot.msgId = msg.message_id
+  const tick = async (): Promise<void> => {
+    const w = compactWatches.get(pane)
+    if (!w) return
+    const elapsed = Date.now() - w.startedAt
+    const still = detectCompacting(await capturePane(pane).catch(() => ''))
+    if (still && elapsed < 5 * 60_000) {
+      w.step += 1
+      await bot.api.editMessageText(w.chat, w.msgId, `🗜️ Compacting conversation…\n<code>${compactBar(w.step)}</code>`, {
+        parse_mode: 'HTML',
+      }).catch(() => {})
+      w.timer = setTimeout(() => void tick(), 2000)
+    } else {
+      compactWatches.delete(pane)
+      const secs = Math.round(elapsed / 1000)
+      await bot.api.editMessageText(w.chat, w.msgId, `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}`, {
+        parse_mode: 'HTML',
+      }).catch(() => {})
+    }
+  }
+  slot.timer = setTimeout(() => void tick(), 2000)
 }
 
 function startPaneWatcher(paneId: string): void {

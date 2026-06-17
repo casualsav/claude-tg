@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, detectEditorState, onNormalPrompt, detectModelUnavailable } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -11,6 +11,14 @@ test('detectModelUnavailable extracts the offending model name', () => {
   expect(detectModelUnavailable(pane)).toBe('Fable 5')
   expect(detectModelUnavailable('\x1b[1m● Claude Opus 9 is currently unavailable\x1b[0m')).toBe('Opus 9')
   expect(detectModelUnavailable('❯ /model opus')).toBe(null)
+})
+
+test('detectCompacting fires only on the live compaction spinner', () => {
+  expect(detectCompacting('✻ Compacting conversation… (esc to interrupt)')).toBe(true)
+  expect(detectCompacting('\x1b[1m● Compacting...\x1b[0m')).toBe(true)
+  expect(detectCompacting('we should run /compact later to free context')).toBe(false)
+  expect(detectCompacting('🗜️ Compacting conversation\n████░░░░')).toBe(false)
+  expect(detectCompacting('just normal output')).toBe(false)
 })
 
 test('detectUserPrompt relays the plan-approval prompt even with the statusline below it', () => {

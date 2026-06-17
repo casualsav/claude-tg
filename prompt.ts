@@ -449,6 +449,14 @@ export function detectModelUnavailable(paneText: string): string | null {
   return m ? m[1].trim() : null
 }
 
+// True while a /compact is actively running. Claude Code renders a live spinner line —
+// "✻ Compacting conversation… (esc to interrupt)" — that disappears when compaction finishes.
+// Require the ellipsis or the interrupt hint on the same line so a scrollback mention of the
+// word "compacting" (or our own relayed status text) can't trip it.
+export function detectCompacting(paneText: string): boolean {
+  return /compacting\b[^\n]*(?:…|\.\.\.|esc to interrupt)/i.test(stripAnsi(paneText))
+}
+
 // True when the pane is at Claude Code's normal prompt (input box visible), where reading or
 // changing the mode is valid. A settings/config screen or another modal lacks this footer, so
 // detectCurrentMode would there fall through to a false 'default' — mode ops guard on this and
