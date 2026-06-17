@@ -15,3 +15,7 @@ graphify-out/
 
 # local Claude Code project settings (never ship operator-specific config)
 .claude/settings.local.json
+
+# session handoff baton — a local, ephemeral working note (/handoff writes it,
+# /continue consumes + clears it); never commit it or it goes stale in the repo
+handoff.md
