@@ -17,7 +17,6 @@ import { loadAccess } from './access.ts'
 import { isTopicMode, getGroupChatId, listTopics, getGeneralSession, removeTopic } from './topics.ts'
 import { paneForSession } from './topic-runtime.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode } from './prompt.ts'
-import { isChatFlooded } from './throttle.ts'
 
 type StatusCardDeps = {
   bot: Bot
@@ -338,7 +337,10 @@ function dropDeadTopic(sessionId: string, key: string): void {
 export async function updateTopicPins(): Promise<void> {
   const group = getGroupChatId()
   if (!group) return
-  if (isChatFlooded(group)) return   // group is in a 429 window — skip this pin cycle, retry next tick (cosmetic)
+  // No flood-gate here: pins are low-frequency (10s, only on change) and already governor-paced, so a
+  // whole-cycle skip would needlessly freeze EVERY pin during any brief 429 window. A pin edit that
+  // 429s is just retried next cycle (the catch below leaves the cache stale). The high-frequency cards
+  // (mirror, compaction) keep their per-edit flood-gate; pins don't need it.
   // The General-anchored session gets a real pin in General (keyed `general`), with the quick-action
   // keyboard — its taps resolve via targetPaneOf, which maps General back to the anchored pane.
   const anchorSid = getGeneralSession()
@@ -405,7 +407,6 @@ export async function updateSessionPin(): Promise<void> {
     const reply_markup = statusKeyboard()
     const hasSession = !!(focus.activePaneId || focus.activeShim)   // off-MCP pane or MCP shim — either counts
     for (const chat of loadAccess().allowFrom) {
-      if (isChatFlooded(chat)) continue   // chat is in a 429 window — skip the cosmetic pin refresh this cycle
       const existing = sessionPins.get(chat)
       if (existing && pinTextCache.get(chat) === text) continue   // nothing changed — skip the no-op edit
       if (existing) {
