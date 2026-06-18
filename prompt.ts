@@ -172,12 +172,28 @@ export function isSubmitScreen(paneText: string): boolean {
   return paneLines(paneText).some(l => /ready to submit your answers/i.test(l))
 }
 
+// Two screens Claude Code renders while it is WORKING (not waiting on a decision) carry
+// numbered / ●-bulleted lines that the option-walk below mistakes for a select menu the moment a
+// stray nav footer ("↑/↓ …", or the plan-approval "shift+tab to approve") happens to sit beneath
+// them — producing a bogus "❓ …" card built from junk. Neither is ever a relayable
+// AskUserQuestion (a real menu appears only once Claude has STOPPED to ask — never with a live
+// spinner or queued input), so their presence vetoes detection outright:
+//  • the inline end-of-turn feedback survey ("How is Claude doing this session? · 1: Bad 2: Fine
+//    3: Good 0: Dismiss"), whose "● How is Claude…" line matches the ink-option pattern; and
+//  • the queued-messages display ("Press up to edit queued messages"), whose numbered queued user
+//    messages match the numbered-option pattern.
+const FEEDBACK_SURVEY = /how is claude doing this session/i
+const QUEUED_MESSAGES = /to edit queued message/i
+
 export function detectUserPrompt(paneText: string): PromptInfo | null {
   // The review/submit tab carries the same select-menu footer as a question, but
   // it's driven programmatically, not relayed — keep it out of detection entirely.
   if (isSubmitScreen(paneText)) return null
 
   const lines = paneLines(paneText)
+  // Bail on the two working-state screens that masquerade as menus (see above). Anchored on
+  // unmistakable phrases, so this can't suppress a genuine question.
+  if (lines.some(l => FEEDBACK_SURVEY.test(l) || QUEUED_MESSAGES.test(l))) return null
 
   // Find the live select-menu footer: the lowest line carrying the hint, which
   // must sit at the bottom of the pane. A footer with more than one non-blank

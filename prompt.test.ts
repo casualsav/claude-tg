@@ -143,6 +143,38 @@ test('detectUserPrompt relays the plan-approval prompt (shift+tab footer, no ↑
   expect(p!.multiSelect).toBe(false)
 })
 
+test('detectUserPrompt vetoes the feedback survey + queued-messages screen (false "❓" card)', () => {
+  // A busy session with two queued user messages and the end-of-turn "How is Claude doing this
+  // session?" survey. The "● How is Claude…" line matches the ink-option pattern and the queued
+  // messages match the numbered-option pattern, so with a stray nav footer at the bottom the
+  // option-walk WOULD build a bogus menu (this is the live "❓ work" false-call). The survey /
+  // queued markers must veto detection.
+  const queuedSurvey = [
+    '✽ Frolicking… (7m 32s · ↓ 15.8k tokens · almost done thinking with max effort)',
+    '',
+    '  1. Mechanize DBR / RBR (demand) and RBD / DBD (supply) zones: base = small-range candles',
+    '  2. STAGE 3 — Range mode (only after I approve Stage 2). Define range mode explicitly',
+    '● How is Claude doing this session? (optional)',
+    '  1: Bad    2: Fine   3: Good   0: Dismiss',
+    '  Press up to edit queued messages',
+    '  ↑/↓ to navigate · Enter to select',
+  ].join('\n')
+  expect(detectUserPrompt(queuedSurvey)).toBeNull()
+
+  // Control: strip ONLY the survey + queued markers — the very same shape is now a genuine 2-option
+  // menu and must still relay. Proves the veto is the survey/queued phrases, not a blanket break.
+  const realMenu = [
+    'Which zone model should I mechanize first?',
+    '',
+    '  1. Demand zones (DBR / RBR)',
+    '  2. Supply zones (RBD / DBD)',
+    '  ↑/↓ to navigate · Enter to select',
+  ].join('\n')
+  const p = detectUserPrompt(realMenu)
+  expect(p).not.toBeNull()
+  expect(p!.options.map(o => o.label)).toEqual(['Demand zones (DBR / RBR)', 'Supply zones (RBD / DBD)'])
+})
+
 test('detectUserPrompt returns null when there is no live select footer', () => {
   expect(detectUserPrompt('just some terminal output\n❯ \n')).toBeNull()
 })

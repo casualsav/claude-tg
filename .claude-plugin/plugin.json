@@ -1,7 +1,7 @@
 {
   "name": "telegram",
   "description": "claude-tg \u2014 drive Claude Code from Telegram. Built-in access control; manage pairing, allowlists, and policy via /telegram:access.",
-  "version": "0.2.27",
+  "version": "0.2.28",
   "keywords": [
     "telegram",
     "messaging",
