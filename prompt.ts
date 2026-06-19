@@ -408,7 +408,7 @@ export function isPluginInstallUserScope(paneText: string): boolean {
   return region.some(l => /^\s*[>❯●]\s*install for you \(user scope\)/i.test(l))
 }
 
-// ---- Post-update "Resume session" picker (auto-confirmed, never relayed) ----
+// ---- Post-update "Resume session" picker (relayed as buttons) ----
 // After a Claude Code update, resuming a large/old session pops a blocking picker BEFORE the REPL:
 //     This session is 2d 17h old and 222.2k tokens.
 //     Resuming the full session will consume a substantial portion of your usage limits. …
@@ -418,27 +418,36 @@ export function isPluginInstallUserScope(paneText: string): boolean {
 //     Enter to confirm · Esc to cancel
 // Its footer is "Enter to confirm" (not "Enter to select" / "· Tab to amend"), so neither prompt
 // detector matches it — and until it's cleared the session never reaches a prompt, so an inbound is
-// bounced as an unrecognised screen (3 bridge sessions wedged here after a Claude update). The
-// daemon auto-confirms the highlighted recommended default ("Resume from summary") with Enter, so
-// the session boots and any held message delivers. We only fire when the cursor (❯/>) actually sits
-// on the summary row, so a user who navigated to "full session as-is" in the terminal isn't
-// overridden. Shares the "Enter to confirm" footer with the usage-limit menu but is disjoint from
-// it (different anchor option), so the two never collide.
+// bounced as an unrecognised screen (3 bridge sessions wedged here after a Claude update). We parse
+// the numbered options so the daemon can relay them as buttons (the user picks summary vs full vs
+// don't-ask) and so the update health-check can count this screen as a successful bring-up. Anchored
+// on a "Resume from summary" option, which keeps it disjoint from the usage-limit menu that shares
+// the "Enter to confirm" footer.
 const RESUME_SUMMARY_OPT = /resume (?:from|with) summary/i
-export function isResumeSessionPrompt(paneText: string): boolean {
+const RESUME_OPT = /^\s*(?:[>❯►▶_]\s*)?(\d+)[.)]\s+(.+?)\s*$/
+export function detectResumeSessionPrompt(paneText: string): { options: PromptOption[] } | null {
   const lines = paneLines(paneText)
   let footerIdx = -1
   for (let i = lines.length - 1; i >= 0; i--) {
     if (/enter to confirm/i.test(lines[i])) { footerIdx = i; break }
   }
-  if (footerIdx === -1) return false
+  if (footerIdx === -1) return null
   let belowNonBlank = 0
   for (let i = footerIdx + 1; i < lines.length; i++) if (lines[i].trim()) belowNonBlank++
-  if (belowNonBlank > 1) return false   // scrolled-up past the live picker
-  const region = lines.slice(0, footerIdx)
-  if (!region.some(l => RESUME_SUMMARY_OPT.test(l))) return false
-  // Cursor must be ON the recommended summary row, so Enter resumes from summary (not full session).
-  return region.some(l => /^\s*[>❯►▶]\s*\d+[.)]\s*resume (?:from|with) summary/i.test(l))
+  if (belowNonBlank > 1) return null   // scrolled-up past the live picker
+  // Contiguous numbered options directly above the footer (a blank gap before them is fine).
+  const opts: PromptOption[] = []
+  for (let i = footerIdx - 1; i >= 0; i--) {
+    const m = lines[i].match(RESUME_OPT)
+    if (m) { opts.unshift({ label: m[2].replace(/\s*│\s*$/, '').trim() }); continue }
+    if (!lines[i].trim()) { if (opts.length) break; else continue }   // blank gap is fine until options start
+    if (opts.length) break                                            // a real non-option line ends the block
+  }
+  if (opts.length < 2 || !opts.some(o => RESUME_SUMMARY_OPT.test(o.label))) return null
+  return { options: opts }
+}
+export function isResumeSessionPrompt(paneText: string): boolean {
+  return !!detectResumeSessionPrompt(paneText)
 }
 
 // ---- External editor / pager detection ----

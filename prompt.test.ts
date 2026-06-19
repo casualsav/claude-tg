@@ -1,6 +1,6 @@
 // Prompt detection from pane captures — select menus vs permission dialogs. Pure functions.
 import { test, expect } from 'bun:test'
-import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent } from './prompt.ts'
+import { stripAnsi, isSubmitScreen, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isResumeSessionPrompt, detectResumeSessionPrompt, detectEditorState, onNormalPrompt, detectModelUnavailable, detectCompacting, compactPercent } from './prompt.ts'
 
 test('stripAnsi removes CSI escape sequences', () => {
   expect(stripAnsi('\x1b[1mbold\x1b[0m text')).toBe('bold text')
@@ -272,7 +272,7 @@ test('isUsageLimitChoice ignores a scrolled-up past menu and unrelated confirms'
   expect(isUsageLimitChoice('Save changes?\n  1. Yes\n  2. No\n  Enter to confirm')).toBe(false)
 })
 
-test('isResumeSessionPrompt matches the live post-update resume picker on the summary default', () => {
+test('detectResumeSessionPrompt parses the live post-update resume picker into options', () => {
   const pane = [
     '   This session is 2d 17h old and 222.2k tokens.',
     '   Resuming the full session will consume a substantial portion of your usage limits.',
@@ -283,25 +283,25 @@ test('isResumeSessionPrompt matches the live post-update resume picker on the su
     '',
     '   Enter to confirm · Esc to cancel',
   ].join('\n')
+  expect(detectResumeSessionPrompt(pane)?.options.map(o => o.label)).toEqual([
+    'Resume from summary (recommended)',
+    'Resume full session as-is',
+    'Don\'t ask me again',
+  ])
   expect(isResumeSessionPrompt(pane)).toBe(true)
 })
 
-test('isResumeSessionPrompt ignores it when the cursor is on full-session, scrolled up, or a plain confirm', () => {
-  const onFull = [
-    '   ❯ 1. Resume full session as-is',
-    '     2. Resume from summary (recommended)',
-    '   Enter to confirm · Esc to cancel',
-  ].join('\n')
-  expect(isResumeSessionPrompt(onFull)).toBe(false)   // cursor moved off the summary row
+test('detectResumeSessionPrompt ignores a scrolled-up picker and an unrelated confirm', () => {
   const scrolled = [
     '   ❯ 1. Resume from summary (recommended)',
+    '     2. Resume full session as-is',
     '   Enter to confirm · Esc to cancel',
     '',
     '● back to work, output here',
     '  and more output below',
   ].join('\n')
-  expect(isResumeSessionPrompt(scrolled)).toBe(false)
-  expect(isResumeSessionPrompt('Save changes?\n  1. Yes\n  2. No\n  Enter to confirm')).toBe(false)
+  expect(detectResumeSessionPrompt(scrolled)).toBeNull()
+  expect(detectResumeSessionPrompt('Save changes?\n  1. Yes\n  2. No\n  Enter to confirm')).toBeNull()
 })
 
 test('detectLoginPrompt needs the menu live at the bottom (not scrolled up)', () => {

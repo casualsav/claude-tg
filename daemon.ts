@@ -23,7 +23,7 @@ import {
 // replace a daemon left running stale code after a plugin upgrade.
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
+import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
 import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
@@ -361,19 +361,30 @@ async function confirmPluginInstall(paneId: string): Promise<void> {
   notifyChats('🧩 Installed the plugin for you (user scope).')
 }
 
-// Auto-confirm the post-update "Resume session" picker on "Resume from summary" (the highlighted
-// recommended default → Enter selects it). isResumeSessionPrompt already gated on the cursor sitting
-// on the summary row, so Enter resumes from summary. Until cleared, the session never reaches a
-// prompt and inbound is bounced as an unrecognised screen — so without this a Claude update wedges
-// every bridge session that's large/old enough to trigger the picker. Deduped via a short window so
-// the picker repainting each poll doesn't fire Enter twice. Driven through the watcher so the relay
-// loop doesn't misread the keystroke as activity.
-let resumeConfirmedAt = 0
-async function confirmResumeSession(paneId: string): Promise<void> {
-  if (Date.now() - resumeConfirmedAt < 4000) return   // same picker, just repainting
-  resumeConfirmedAt = Date.now()
-  process.stderr.write('daemon: auto-confirming resume-session picker (resume from summary)\n')
-  await withPaneInjection(paneId, async () => { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) })
+// Relay the post-update "Resume session" picker as buttons (summary / full / don't-ask) so the user
+// chooses how a large/old session comes back, rather than auto-picking for them. Routed to the
+// session's own topic (outboundTargetsFor), deduped per pane on the options hash so the picker
+// repainting each poll doesn't re-post. A `resumesel:N:pane` tap drives that pane (see the callback
+// handler), which then flushes any message held while the picker was up.
+const resumeRelayed = new Map<string, string>()   // pane → last-relayed options hash
+function resumeButtonLabel(label: string): string {
+  const emoji = /summary/i.test(label) ? '📝' : /full session/i.test(label) ? '📜' : /don.?t ask/i.test(label) ? '🚫' : '▫️'
+  const short = label.replace(/\s*\(recommended\)\s*$/i, '').trim() || label
+  return `${emoji} ${short.length > 28 ? short.slice(0, 27) + '…' : short}`
+}
+async function relayResumeChoice(paneId: string, options: PromptOption[]): Promise<void> {
+  const h = hashText(options.map(o => o.label).join('|'))
+  if (resumeRelayed.get(paneId) === h) return   // same picker, just repainting
+  resumeRelayed.set(paneId, h)
+  process.stderr.write(`daemon: relaying resume-session picker for pane ${paneId} (${options.length} options)\n`)
+  const kb = new InlineKeyboard()
+  options.forEach((o, i) => { kb.text(resumeButtonLabel(o.label), `resumesel:${i + 1}:${paneId}`).row() })
+  const body = ['🔄 <b>This session is resuming after a Claude update.</b> Pick how to bring it back:', '',
+    ...options.map((o, i) => `<b>${i + 1}.</b> ${escapeHtml(o.label)}`)].join('\n')
+  for (const t of await outboundTargetsFor(paneId)) {
+    await bot.api.sendMessage(t.chat, body,
+      { parse_mode: 'HTML', reply_markup: kb, ...(t.thread ? { message_thread_id: t.thread } : {}) }).catch(() => {})
+  }
 }
 
 // Pull the active model name out of a /model picker capture (see parseCurrentModel
@@ -1128,7 +1139,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   // System stalls auto-dismiss exactly like the focused path — they'd wedge queued injections.
   if (isUsageLimitChoice(text)) { void dismissUsageLimitChoice(pane); return }
   if (isPluginInstallUserScope(text)) { void confirmPluginInstall(pane); return }
-  if (isResumeSessionPrompt(text)) { void confirmResumeSession(pane); return }
+  { const resume = detectResumeSessionPrompt(text); if (resume) { void relayResumeChoice(pane, resume.options); return } }
 
   // Sign-in link printed as plain output (independent of menu detection).
   const authUrl = extractAuthUrl(text)
@@ -1638,7 +1649,6 @@ async function saveEditorAndQuit(paneId: string): Promise<boolean> {
 function recognizedScreen(cap: string): boolean {
   return onNormalPrompt(cap) || !!detectUserPrompt(cap) || !!detectPermissionPrompt(cap)
     || !!detectLoginPrompt(cap) || isUsageLimitChoice(cap) || isSubmitScreen(cap) || isPluginInstallUserScope(cap)
-    || isResumeSessionPrompt(cap)
 }
 
 // Inbound held back because its pane was on a captured screen (editor/pager or an unrecognised
@@ -2053,10 +2063,10 @@ function onPaneEvent(text: string): void {
   // the user already decided. Deduped so a repaint of the same menu doesn't fire Enter twice.
   if (focus.activePaneId && isPluginInstallUserScope(text)) { void confirmPluginInstall(focus.activePaneId); return }
 
-  // Post-update "Resume session" picker — auto-confirm "Resume from summary" (the highlighted
-  // recommended default) with Enter, so a Claude update doesn't wedge the session before the REPL
-  // and bounce every inbound as an unrecognised screen. Deduped so a repaint doesn't fire Enter twice.
-  if (focus.activePaneId && isResumeSessionPrompt(text)) { void confirmResumeSession(focus.activePaneId); return }
+  // Post-update "Resume session" picker — relay the choice (summary / full / don't-ask) as buttons so
+  // the user decides how the session comes back, instead of wedging before the REPL and bouncing every
+  // inbound as an unrecognised screen. Deduped per pane so a repaint doesn't re-post.
+  if (focus.activePaneId) { const resume = detectResumeSessionPrompt(text); if (resume) { void relayResumeChoice(focus.activePaneId, resume.options); return } }
 
   // /login method menu — relay the actual options as buttons. Its footer is just "Esc to cancel"
   // (no select/permission wording), so the generic detectors below miss it, and it fires for BOTH
@@ -3573,11 +3583,14 @@ async function sweepSessionVersions(): Promise<void> {
   }
 }
 
-// A restarted pane is healthy once it's back at Claude's normal prompt.
+// A restarted pane is healthy once it's back at Claude's normal prompt — OR sitting on the
+// post-update "Resume session" picker, which IS a successful bring-up: the session is alive and only
+// awaiting the user's resume choice (relayed as buttons), so reporting it as "didn't come back up"
+// is wrong (and made users tap Resume and double-spawn an already-live session).
 async function paneBackUp(pane: string): Promise<boolean> {
   if (!(await paneAlive(pane)) || (await paneCommand(pane)) !== 'claude') return false
   const cap = await capturePane(pane).catch(() => '')
-  return !!cap && onNormalPrompt(cap)
+  return !!cap && (onNormalPrompt(cap) || isResumeSessionPrompt(cap))
 }
 
 // "♻️ Restart all sessions" → restart every stale pane in place (sequentially — restarts type into
@@ -6435,6 +6448,32 @@ bot.on('callback_query:data', async ctx => {
     return
   }
 
+  // Post-update "Resume session" picker choice (detectResumeSessionPrompt / relayResumeChoice) —
+  // `resumesel:N:pane` drives the Nth option on that pane. The picker opens on option 1, so reaching
+  // option N is N-1 Down presses then Enter. After it settles, flush any message held while the
+  // picker was up (held in editorHeld by the inbound guard).
+  const resumeSelMatch = /^resumesel:(\d+):(.+)$/.exec(data)
+  if (resumeSelMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const idx = Number(resumeSelMatch[1]) - 1
+    const pane = resumeSelMatch[2]
+    await ctx.editMessageReplyMarkup().catch(() => {})   // drop the buttons
+    resumeRelayed.delete(pane)
+    if (!(await paneAlive(pane).catch(() => false))) {
+      await flushEditorHeld(pane)   // pane gone → let the held message buffer/route normally
+      await ctx.reply('⚠️ That session\'s pane is gone — couldn\'t drive the resume.').catch(() => {})
+      return
+    }
+    await withPaneInjection(pane, async () => { await navigateDown(pane, idx); await sendKeys(pane, ['Enter']); await waitForSettle(pane, 300, 8000) })
+    await flushEditorHeld(pane)
+    await ctx.reply('✅ Resuming — any message you sent meanwhile will be delivered once it\'s back.').catch(() => {})
+    return
+  }
+
   // Resume button from /resume → relaunch that session with `claude --resume` in a new pane.
   const resumeMatch = /^resume:([0-9a-fA-F-]+)$/.exec(data)
   if (resumeMatch) {
@@ -6862,6 +6901,18 @@ async function handleInbound(
   const effPane = targetPane ?? focus.activePaneId
   if (effPane) {
     let cap = await capturePane(effPane).catch(() => '')
+    // Post-update "Resume session" picker: never type the message into the menu — relay the choice as
+    // buttons (deduped) and hold the message in editorHeld; the resumesel tap flushes it once the
+    // session is back. Handled before the generic guard so its scary "unrecognised screen" card
+    // never fires for this known, actionable screen.
+    if (cap) {
+      const resume = detectResumeSessionPrompt(cap)
+      if (resume) {
+        void relayResumeChoice(effPane, resume.options)
+        editorHeld.set(effPane, [...(editorHeld.get(effPane) ?? []), params])
+        return
+      }
+    }
     if (cap && !recognizedScreen(cap)) {
       if (!detectEditorState(cap)) {   // re-confirm a non-editor screen is really stuck, not mid-repaint
         await sleep(450)
