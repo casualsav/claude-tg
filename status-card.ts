@@ -334,33 +334,9 @@ function dropDeadTopic(sessionId: string, key: string): void {
   process.stderr.write(`daemon: dropped topic ${sessionId} — Telegram thread gone (stopped pin retries)\n`)
 }
 
-// Forum pins STACK and the Bot API can't enumerate them (getChat reports only the topmost), so a
-// stale card the store forgot — a legacy <pre> card from an older bridge, or a duplicate left when
-// the create-path unpinAll lost a 429 — sits pinned beside the live one forever, since the steady
-// state only EDITS the tracked pin and never re-clears. Once per daemon run, reconcile each forum
-// pin to a single message: unpin everything in the thread, then re-pin ONLY our tracked card. Same
-// message id → no churn, no new history, no notification; the orphan is left unpinned in history.
-let pinsReconciled = false
-async function reconcileForumPinsOnce(group: string): Promise<void> {
-  if (pinsReconciled) return
-  pinsReconciled = true
-  const gid = sessionPins.get('general')
-  if (gid) {
-    await deps.bot.api.unpinAllGeneralForumTopicMessages(group).catch(() => {})
-    await deps.bot.api.pinChatMessage(group, gid, { disable_notification: true }).catch(() => {})
-  }
-  for (const t of listTopics()) {
-    const id = sessionPins.get(`topic:${t.threadId}`)
-    if (!id) continue
-    await deps.bot.api.unpinAllForumTopicMessages(group, t.threadId).catch(() => {})
-    await deps.bot.api.pinChatMessage(group, id, { disable_notification: true }).catch(() => {})
-  }
-}
-
 export async function updateTopicPins(): Promise<void> {
   const group = getGroupChatId()
   if (!group) return
-  await reconcileForumPinsOnce(group)   // clear any stale/duplicate pin beside the live card (once per run)
   // No flood-gate here: pins are low-frequency (10s, only on change) and already governor-paced, so a
   // whole-cycle skip would needlessly freeze EVERY pin during any brief 429 window. A pin edit that
   // 429s is just retried next cycle (the catch below leaves the cache stale). The high-frequency cards
