@@ -582,6 +582,28 @@ async function reapplyEffort(paneId: string, effort: string | null, watcher: Pan
   if (cap && isEffortConfirm(cap)) { await sendKeys(paneId, ['Enter']); await waitForSettle(paneId, 200, 3000) }
 }
 
+// After a resumed session clears the post-update "Resume session" picker, Claude Code brings it back
+// at DEFAULT mode + the model-default effort — it restores neither across --resume, and the picker
+// interrupts the normal restore paths (restartPaneSessionCore can't drive the dials into the menu,
+// and applyInheritedSettings' REPL wait sits on the picker). So once the picker is resolved and the
+// pane reaches the REPL, re-assert the session's OWN last-known mode + effort (falling back to the
+// standing preference). Called from the resumesel tap that drives the choice.
+async function restoreResumedDials(paneId: string, watcher: PaneWatcher | null): Promise<void> {
+  let ready = false
+  for (let i = 0; i < 45 && !ready; i++) {   // a full-session resume can repaint a while before the prompt settles
+    await sleep(1000)
+    if (!(await paneAlive(paneId).catch(() => false))) return
+    ready = onNormalPrompt(await capturePane(paneId).catch(() => ''))
+  }
+  if (!ready) return
+  const sid = await sessionForPane(paneId, false).catch(() => null)
+  const mode = (sid ? sessionModes.get(sid) : null) ?? lastFocusedMode
+  const effort = (sid ? sessionEfforts.get(sid) : null) ?? lastFocusedEffort
+  if (mode !== 'default') await switchToMode(paneId, mode, watcher)
+  await reapplyEffort(paneId, effort, watcher)
+  process.stderr.write(`daemon: restored dials on resumed pane ${paneId} (${mode} · ${effort ?? '—'})\n`)
+}
+
 // Prompt detection (pane-scrape → PromptInfo) lives in ./prompt.ts.
 
 // ---- Session management ----
@@ -3475,6 +3497,10 @@ async function restartPaneSessionCore(pane: string, id: string): Promise<string 
   const cwd = await paneCwd(pane).catch(() => null)
   const sid = await sessionForPane(pane, false).catch(() => null)
   const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+  // Persist what the pane is ON right now, so if the resume pops the post-update picker (which
+  // defers the restore to the resumesel tap) the saved dials are accurate even for a never-focused
+  // topic session whose mode/effort were last moved in the terminal.
+  if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
   setPaneRestarting(pane, true)
   try {
     const run = async () => {
@@ -3491,9 +3517,7 @@ async function restartPaneSessionCore(pane: string, id: string): Promise<string 
     await (watcher ? watcher.withInjection(run) : run())
     if (!(await paneAlive(pane))) {
       if (!cwd) return null
-      // Seed the respawn with the mode + effort we just OBSERVED on the pane — the per-session maps
-      // can be stale for never-focused topic sessions whose dials were moved in the terminal.
-      if (sid) { recordSessionMode(sid, mode); recordSessionEffort(sid, effort) }
+      // (mode + effort already persisted above, so the respawn's resume branch seeds from them.)
       const fresh = await spawnSession(cwd, `--resume ${id}`, sid ?? undefined, account)
       if (!fresh) return null
       // The session lives in `fresh` now — drop the dead pane's registry + session mapping so
@@ -3505,6 +3529,10 @@ async function restartPaneSessionCore(pane: string, id: string): Promise<string 
       process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
       return fresh   // mode + effort re-seeded by spawnSession's resume branch (sessionModes/sessionEfforts)
     }
+    // If the resume popped the post-update "Resume session" picker, the pane is sitting on the menu —
+    // don't drive mode/effort keystrokes into it. It's relayed as buttons; the resumesel tap restores
+    // both dials once the user picks (restoreResumedDials).
+    if (isResumeSessionPrompt(await capturePane(pane).catch(() => ''))) return pane
     if (mode !== 'default') await switchToMode(pane, mode, watcher)
     await reapplyEffort(pane, effort, watcher)   // the resumed pane came back at the model default — restore the dial
     return pane
@@ -6469,8 +6497,11 @@ bot.on('callback_query:data', async ctx => {
       return
     }
     await withPaneInjection(pane, async () => { await navigateDown(pane, idx); await sendKeys(pane, ['Enter']); await waitForSettle(pane, 300, 8000) })
-    await flushEditorHeld(pane)
-    await ctx.reply('✅ Resuming — any message you sent meanwhile will be delivered once it\'s back.').catch(() => {})
+    await ctx.reply('✅ Resuming — restoring its previous mode/effort, and any message you sent meanwhile will be delivered once it\'s back.').catch(() => {})
+    // Claude Code resumes at DEFAULT mode + the model-default effort, so re-assert the session's own
+    // last-known dials once it reaches the REPL, THEN deliver anything held while the picker was up.
+    const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+    void (async () => { await restoreResumedDials(pane, watcher); await flushEditorHeld(pane) })()
     return
   }
 
