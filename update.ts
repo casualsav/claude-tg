@@ -31,7 +31,7 @@ const BACKUP_BASE = join(HOME, '.claude', 'plugins', 'cache', MKT_ID, 'telegram-
 const SEMVER = /^\d+\.\d+\.\d+$/
 const HEALTH_TIMEOUT_MS = 45_000
 
-const [, , chatId, modeArg] = process.argv
+const [, , chatId, modeArg, seedMsgId] = process.argv
 const checkOnly = modeArg === 'check'
 let newSha = ''
 
@@ -64,18 +64,20 @@ async function tgCall(method: string, body: Record<string, unknown>): Promise<{ 
 // A SINGLE status line that edits ITSELF as the update moves through its stages
 // (checking → building → restarting) — one updating message instead of a pile of them.
 // First call sends; later calls edit it in place.
-let progressMsgId: number | null = null
+// Seeded by the daemon (it posts the "♻️ Updating…" bubble and passes its id): edit THAT message
+// in place so /update is a single message start-to-finish. Unseeded (legacy/other callers) → null,
+// and the first progress() sends a fresh one.
+let progressMsgId: number | null = Number(seedMsgId) || null
 async function progress(text: string): Promise<void> {
   log(text.replace(/\n/g, ' '))
   if (progressMsgId == null) progressMsgId = (await tgCall('sendMessage', { text }))?.message_id ?? null
   else await tgCall('editMessageText', { message_id: progressMsgId, text })
 }
 
-// The final outcome as its OWN message — a clean confirmation, distinct from the progress line.
-async function notify(text: string): Promise<void> {
-  log(text.replace(/\n/g, ' '))
-  await tgCall('sendMessage', { text })
-}
+// The final outcome folds INTO the single status line (edits it in place) instead of posting a
+// separate bubble — /update is ONE message that starts ♻️ and ends ✅/❌. progress() falls back to a
+// fresh send when there's no status line yet (no seed and nothing posted).
+async function notify(text: string): Promise<void> { await progress(text) }
 
 const git = (args: string[], cwd = MP) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
@@ -184,7 +186,7 @@ async function main(): Promise<void> {
   if (!existsSync(join(MP, '.git'))) { await notify('❌ Update: marketplace clone not found — is the plugin installed?'); return }
 
   // 1. Fetch + compare.
-  await progress(checkOnly ? '🔍 Checking for updates…' : '🔄 Update started…')
+  await progress(checkOnly ? '🔍 Checking for updates…' : '♻️ Updating the Telegram bridge — checking…')
   let localSha: string, remoteSha: string, branch: string
   try {
     git(['fetch', '--quiet', 'origin'])
@@ -209,7 +211,7 @@ async function main(): Promise<void> {
 
   const oldVer = newestSemverDir()
   const oldGitref = oldVer ? (() => { try { return readFileSync(join(CACHE_BASE, oldVer, '.gitref'), 'utf8').trim() } catch { return oldVer } })() : '(none)'
-  await progress(`⬇️ Building <b>v${newVer}</b> (<code>${shortVer(newSha)}</code>)…`)
+  await progress(`♻️ Building <b>v${newVer}</b> (<code>${shortVer(newSha)}</code>)…`)
 
   // 3. Build into a temp dir from the clone (everything except .git / node_modules / tests), install deps.
   mkdirSync(CACHE_BASE, { recursive: true })

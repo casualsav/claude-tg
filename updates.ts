@@ -21,15 +21,16 @@ export function initUpdates(d: UpdatesDeps): void { deps = d }
 // Kick off a self-update. update.ts rebuilds the cache dir we run from and restarts us, so it
 // must outlive this process: copy it to a stable spot outside the cache and spawn it DETACHED.
 // `mode` is 'apply' (pull + rebuild + restart, with rollback) or 'check' (report only). All
-// progress + the result are DM'd by update.ts to `chatId`.
-export function startUpdate(chatId: string, mode: 'apply' | 'check'): { ok: boolean; error?: string } {
+// progress + the result are DM'd by update.ts to `chatId`. Pass `progressMsgId` to have it EDIT that
+// existing message in place (single-bubble UX) instead of posting a fresh one.
+export function startUpdate(chatId: string, mode: 'apply' | 'check', progressMsgId?: number): { ok: boolean; error?: string } {
   try {
     const src = join(import.meta.dir, 'update.ts')
     if (!existsSync(src)) return { ok: false, error: 'update.ts not found in plugin cache' }
     const runner = join(STATE_DIR, 'update-run.ts')
     copyFileSync(src, runner)
     const log = openSync(DAEMON_LOG_FILE, 'a')
-    const child = spawn('bun', [runner, chatId, mode], { detached: true, stdio: ['ignore', log, log], env: process.env })
+    const child = spawn('bun', [runner, chatId, mode, progressMsgId != null ? String(progressMsgId) : ''], { detached: true, stdio: ['ignore', log, log], env: process.env })
     child.unref()
     process.stderr.write(`daemon: started self-update (${mode}) pid ${child.pid}\n`)
     return { ok: true }

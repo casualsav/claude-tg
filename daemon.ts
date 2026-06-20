@@ -3821,9 +3821,11 @@ async function showUpdateDashboard(ctx: Context): Promise<void> {
 
 // Kick off the bridge self-update (detached helper, with rollback) and report. Shared by the
 // `upd:bridge` button and `/update tg`.
-function runBridgeUpdate(chat: string): void {
-  void bot.api.sendMessage(chat, '🌉 Updating the Telegram bridge… progress will follow.', { parse_mode: 'HTML' }).catch(() => {})
-  const r = startUpdate(chat, 'apply')
+async function runBridgeUpdate(chat: string): Promise<void> {
+  // Post the ONE status bubble here and hand its id to the detached updater, so it edits this same
+  // message through building → restarting → ✅ instead of a 🌉-then-♻️-then-✅ pile of messages.
+  const m = await bot.api.sendMessage(chat, '♻️ Updating the Telegram bridge…', { parse_mode: 'HTML' }).catch(() => null)
+  const r = startUpdate(chat, 'apply', m?.message_id)
   if (!r.ok) void bot.api.sendMessage(chat, `❌ Couldn't start bridge update: ${escapeHtml(r.error ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
 }
 
@@ -3838,7 +3840,7 @@ bot.command(['update', 'upgrade'], async ctx => {
     if (!r.ok) await ctx.reply(`Couldn't check for updates: ${r.error}`)
     return
   }
-  if (arg === 'tg' || arg === 'bridge') { runBridgeUpdate(chat_id); return }
+  if (arg === 'tg' || arg === 'bridge') { void runBridgeUpdate(chat_id); return }
   if (arg === 'claude' || arg === 'cc') { void updateClaude(chat_id); return }
   await showUpdateDashboard(ctx)
 })
@@ -6133,8 +6135,10 @@ bot.on('callback_query:data', async ctx => {
   if (data === 'upd:bridge') {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) { await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {}); return }
     await ctx.answerCallbackQuery({ text: 'Updating bridge…' }).catch(() => {})
-    await ctx.editMessageText('🌉 Updating the Telegram bridge… progress will follow.', { parse_mode: 'HTML' }).catch(() => {})
-    const r = startUpdate(String(ctx.chat?.id), 'apply')
+    // The dashboard message itself becomes the single status line — hand its id to the updater so it
+    // edits in place through to ✅.
+    await ctx.editMessageText('♻️ Updating the Telegram bridge…', { parse_mode: 'HTML' }).catch(() => {})
+    const r = startUpdate(String(ctx.chat?.id), 'apply', ctx.callbackQuery.message?.message_id)
     if (!r.ok) await ctx.editMessageText(`❌ Couldn't start bridge update: ${escapeHtml(r.error ?? '')}`, { parse_mode: 'HTML' }).catch(() => {})
     return
   }
