@@ -3603,6 +3603,18 @@ async function restartPaneSessionCore(pane: string, id: string): Promise<string 
       // close-on-end can't resolve it back to the (live) session and close its topic.
       offMcpPanes.delete(pane)
       releasePaneSession(pane)
+      // Register the new pane + shield its sid until it's surely up. A non-focused topic respawn
+      // takes the `adoptPane` branch below only when it WAS the focused pane, so otherwise `fresh`
+      // is in nothing the topic sweep consults (reconcileTopics reads the live discovery scan, which
+      // won't list `fresh` until claude finishes booting in it). On a slow boot — e.g. a cwd whose
+      // first session also has to be marked trusted — that gap exceeds the sweep's 2-miss tolerance
+      // and the just-restored topic gets closed (this is exactly what closed "claude-tg" while
+      // faster-booting siblings in a `/restart all` survived). Treating `fresh` as a planned bounce
+      // (same flag the shell-backed path uses) exempts its sid from both sweep paths; the shield
+      // self-clears so a genuinely failed respawn can still close normally.
+      offMcpPanes.add(fresh)
+      setPaneRestarting(fresh, true)
+      setTimeout(() => setPaneRestarting(fresh, false), 30_000)   // boot window — discovery re-adopts `fresh` well within this
       if (sid) await reopenSessionTopic(sid)
       if (pane === focus.activePaneId) adoptPane(fresh)
       process.stderr.write(`daemon: restart: pane ${pane} died on /exit — respawned session in ${fresh} (${cwd})\n`)
@@ -5278,23 +5290,22 @@ bot.command('restart', async ctx => {
     await ctx.reply('⚠️ The terminal is on another screen (menu/prompt) — finish or /stop that first, then /restart.')
     return
   }
+  // Resolve the session id to resume (same lookup restartPaneSession uses), then hand off to the
+  // robust restart core — the SAME path /restart all and /update already use. It flags the pane
+  // mid-restart so death-detection leaves the topic alone, and (critically) respawns the session in
+  // a fresh pane stamped with the same id if /exit took the pane with it. A daemon-spawned topic pane
+  // runs claude DIRECTLY (no shell), so /exit destroys it; the old bare-/restart drive() assumed a
+  // shell was there to catch a `claude -c` relaunch, set no guard, and had no respawn — so /restart
+  // in a topic killed the session AND closed the topic. (Shell-backed bridge panes survive /exit too,
+  // so the core handles both.)
+  const cwd = await paneCwd(paneId).catch(() => null)
+  const file = cwd ? await transcriptForPane(paneId, cwd) : null
+  const id = file ? basename(file, '.jsonl') : null
+  if (!id) { await ctx.reply('⚠️ Couldn’t find this session’s id to resume — restart it manually.'); return }
   await ctx.reply('♻️ Restarting the session — <code>/exit</code> then resume…', { parse_mode: 'HTML' })
-  // Preserve bypass-on-demand: relaunch with the same flag the claude-tg alias uses. `-c` continues
-  // the most recent conversation in the cwd — i.e. the one we just exited. The relaunch is typed
-  // into the pane's SHELL (which doesn't export CLAUDE_CONFIG_DIR — claude-tg env-prefixes it),
-  // so an alt-account session must carry its config dir explicitly or it'd restart under main.
-  const acct = await paneAccount(paneId)
-  const envPrefix = acct.name === 'main' ? '' : `CLAUDE_CONFIG_DIR='${acct.configDir.replace(/'/g, `'\\''`)}' `
-  const relaunch = `${envPrefix}claude --allow-dangerously-skip-permissions -c`
-  const drive = async () => {
-    await sendKeys(paneId, ['/exit', 'Enter'])
-    await waitForSettle(paneId, 800, 12_000)   // Claude tears down → shell prompt returns
-    await sendKeysLiteral(paneId, relaunch)
-    await sendKeys(paneId, ['Enter'])
-    await waitForSettle(paneId, 800, 20_000)   // new process boots back to the REPL
-  }
-  await (t.isFocused && t.watcher ? t.watcher.withInjection(drive) : drive())
-  resetPromptDedup(paneId)   // re-baseline this pane's dedup so the resumed REPL's first prompt relays cleanly
+  const now = await restartPaneSessionCore(paneId, id)
+  if (!now) { await ctx.reply('⚠️ Restart failed — couldn’t bring the session back. Try again, or restart it manually.'); return }
+  resetPromptDedup(now)   // re-baseline the (possibly respawned) pane so the resumed REPL's first prompt relays cleanly
   await ctx.reply('✅ Session restarted and resumed.')
 })
 
