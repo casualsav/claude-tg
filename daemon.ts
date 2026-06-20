@@ -3442,6 +3442,29 @@ bot.command('effort', async ctx => {
     await ctx.reply(`⚡ Default effort set to <b>${escapeHtml(effortLabel(level))}</b> — new and resumed sessions without their own remembered level will start here.`, { parse_mode: 'HTML' })
     return
   }
+  // `/effort all <level>` applies the level to EVERY live session at once, auto-accepting Claude
+  // Code's "Change effort level?" / higher-usage confirm (via reapplyEffort) so a bulk bump doesn't
+  // pop a card per session. Useful after an update left sessions at the model default.
+  const allMatch = /^all(?:\s+(\w+))?$/.exec(arg)
+  if (allMatch) {
+    const level = allMatch[1]
+    if (!level || !EFFORT_LEVELS.includes(level)) { await ctx.reply('Usage: <code>/effort all max</code>  (low | medium | high | xhigh | max | auto)', { parse_mode: 'HTML' }); return }
+    const panes = [...offMcpPanes]
+    if (!panes.length) { await ctx.reply('No live sessions to change.'); return }
+    await ctx.reply(`⚡ Setting <b>${panes.length}</b> live session${panes.length === 1 ? '' : 's'} to <b>${escapeHtml(effortLabel(level))}</b> — auto-accepting the usage confirm…`, { parse_mode: 'HTML' })
+    let ok = 0, skipped = 0
+    for (const pane of panes) {
+      if (!(await paneAlive(pane).catch(() => false))) { skipped++; continue }
+      const watcher = pane === focus.activePaneId ? focus.paneWatcher : null
+      try {
+        await reapplyEffort(pane, level, watcher)
+        recordSessionEffort(await sessionForPane(pane, false).catch(() => null), level)
+        ok++
+      } catch { skipped++ }
+    }
+    await ctx.reply(`✅ Effort set to <b>${escapeHtml(effortLabel(level))}</b> on ${ok} session${ok === 1 ? '' : 's'}${skipped ? ` · ${skipped} skipped (busy/unreachable)` : ''}.`, { parse_mode: 'HTML' })
+    return
+  }
   if (arg) {
     if (!EFFORT_LEVELS.includes(arg)) { await ctx.reply('Usage: <code>/effort low | medium | high | xhigh | max | auto</code>  ·  <code>/effort default max</code>', { parse_mode: 'HTML' }); return }
     const t = await commandTarget(ctx)
