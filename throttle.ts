@@ -10,6 +10,7 @@
 // isChatFlooded lets the cosmetic editors stand down while a 429 window is open, leaving the budget for
 // user-facing sends.
 import type { Bot, Transformer } from 'grammy'
+import { AsyncLocalStorage } from 'node:async_hooks'
 
 const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
@@ -31,18 +32,49 @@ const buckets = new Map<string, Bucket>()
 function params(chat: string): { cap: number; refillMs: number } {
   return chat.startsWith('-') ? { cap: 4, refillMs: 3300 } : { cap: 8, refillMs: 1100 }
 }
-async function acquire(chat: string): Promise<void> {
+// Cosmetic sends (the live activity mirror's frame edits) run inside asLowPriority so the governor
+// lets them stand aside while higher-priority sends — a new session's setup messages, replies,
+// prompts — are waiting on the same per-chat budget. The mirror just resumes a beat later; the brief
+// structural burst gets the budget. The flag rides AsyncLocalStorage so it reaches the transformer
+// (which runs inside the wrapped bot.api call) without plumbing a param through every call site.
+const lowPrioCtx = new AsyncLocalStorage<true>()
+export function asLowPriority<T>(fn: () => Promise<T>): Promise<T> { return lowPrioCtx.run(true, fn) }
+
+// How many higher-priority sends are currently waiting on each chat's budget. A cosmetic send yields
+// its turn while this is non-zero (capped, so the mirror can't be starved indefinitely).
+const highWaiters = new Map<string, number>()
+function adjustHigh(chat: string, d: number): void {
+  const n = (highWaiters.get(chat) ?? 0) + d
+  if (n <= 0) highWaiters.delete(chat); else highWaiters.set(chat, n)
+}
+
+async function acquire(chat: string, method: string): Promise<void> {
+  const low = lowPrioCtx.getStore() === true
   const { cap, refillMs } = params(chat)
-  for (;;) {
-    const now = Date.now()
-    let b = buckets.get(chat)
-    if (!b) { b = { tokens: cap, last: now }; buckets.set(chat, b) }
-    const gained = Math.floor((now - b.last) / refillMs)
-    if (gained > 0) { b.tokens = Math.min(cap, b.tokens + gained); b.last += gained * refillMs }
-    // The check-and-take is synchronous (no await between them), so concurrent callers can't double-
-    // spend a token; only the empty-bucket branch awaits, then re-loops to re-check after the refill.
-    if (b.tokens > 0) { b.tokens -= 1; return }
-    await sleep(Math.max(50, b.last + refillMs - now))
+  const waitStart = Date.now()
+  if (!low) adjustHigh(chat, +1)
+  try {
+    for (;;) {
+      const now = Date.now()
+      let b = buckets.get(chat)
+      if (!b) { b = { tokens: cap, last: now }; buckets.set(chat, b) }
+      const gained = Math.floor((now - b.last) / refillMs)
+      if (gained > 0) { b.tokens = Math.min(cap, b.tokens + gained); b.last += gained * refillMs }
+      // A cosmetic send yields while any higher-priority send for this chat is queued, so structural /
+      // user-facing sends never wait behind decoration. An 8s ceiling releases it anyway so a chat
+      // that never goes quiet can't starve the mirror outright.
+      const yielding = low && (highWaiters.get(chat) ?? 0) > 0 && Date.now() - waitStart < 8000
+      // The check-and-take is synchronous (no await between the test and the decrement), so concurrent
+      // callers can't double-spend a token.
+      if (b.tokens > 0 && !yielding) {
+        b.tokens -= 1
+        if (!low) { const w = Date.now() - waitStart; if (w > 2000) process.stderr.write(`governor: ${method} to ${chat} waited ${w}ms (high-prio)\n`) }
+        return
+      }
+      await sleep(yielding ? 200 : Math.max(50, b.last + refillMs - now))
+    }
+  } finally {
+    if (!low) adjustHigh(chat, -1)
   }
 }
 
@@ -59,7 +91,7 @@ export function installSendGovernor(bot: Bot): void {
   const governor: Transformer = async (prev, method, payload, signal) => {
     const chat = (payload as { chat_id?: unknown }).chat_id
     const chatStr = chat == null ? null : String(chat)
-    if (chatStr && PACED_METHODS.has(method)) await acquire(chatStr)
+    if (chatStr && PACED_METHODS.has(method)) await acquire(chatStr, method)
     try {
       return await prev(method, payload, signal)
     } catch (e) {

@@ -23,7 +23,7 @@ import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { parseWorkingLine } from './statusline.ts'
 import { currentTurnFeed, turnAnchorUuid, type FeedItem } from './transcript.ts'
 import { isTopicMode } from './topics.ts'
-import { isChatFlooded } from './throttle.ts'
+import { isChatFlooded, asLowPriority } from './throttle.ts'
 import type { Access } from './types.ts'
 
 type MirrorDeps = {
@@ -510,7 +510,7 @@ const focusedCard = new MirrorCard({
   onCreated: () => deps.retriggerTyping(),   // the mirror send clears Telegram's typing state — re-assert it
 })
 
-export async function updateTerminalMirror(working: boolean): Promise<void> { await focusedCard.update(working) }
+export async function updateTerminalMirror(working: boolean): Promise<void> { await asLowPriority(() => focusedCard.update(working)) }
 export async function respawnTerminalMirror(): Promise<void> { await focusedCard.respawn() }
 export function abandonMirror(focusedPaneId?: string | null): void { focusedCard.abandon(focusedPaneId) }
 
@@ -538,7 +538,7 @@ function auxCardFor(paneId: string): MirrorCard {
 
 // Drive a non-focused pane's card from auxRelayTick (same `working` signal as its relay).
 export async function updateAuxMirror(paneId: string, working: boolean): Promise<void> {
-  await auxCardFor(paneId).update(working)
+  await asLowPriority(() => auxCardFor(paneId).update(working))
 }
 
 // The panes currently holding an aux card — for the daemon's cleanup sweep.

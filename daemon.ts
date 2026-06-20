@@ -5119,11 +5119,12 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     const mAlias = inherit?.model?.split(/\s+/)[0]?.toLowerCase()
     if (mAlias && MODEL_ALIASES.includes(mAlias)) launchFlags.push(`--model ${mAlias}`)
     if (inherit?.effort && inherit.effort !== 'auto' && EFFORT_LEVELS.includes(inherit.effort)) launchFlags.push(`--effort ${inherit.effort}`)
-    // Mode too: bypass is already the launch default (--allow-dangerously-skip-permissions), so pass
-    // --permission-mode only for a different inherited mode (plan/acceptEdits/auto). It composes
-    // cleanly with the bypass flag — the explicit mode wins the starting state, bypass stays
-    // switchable on demand — so the session boots in the right mode with no post-boot switch at all.
-    if (inherit?.mode && inherit.mode !== 'default' && inherit.mode !== 'bypassPermissions') launchFlags.push(`--permission-mode ${inherit.mode}`)
+    // Mode too: --allow-dangerously-skip-permissions only makes bypass AVAILABLE — on its own the
+    // session boots in NORMAL mode, NOT bypass — so pass --permission-mode for every non-default
+    // inherited mode, bypass INCLUDED. It composes cleanly with the dangerous flag (which satisfies
+    // bypass's safety gate, so no prompt), and bypass stays switchable on demand. 'default' is normal
+    // mode, so it needs no flag.
+    if (inherit?.mode && inherit.mode !== 'default') launchFlags.push(`--permission-mode ${inherit.mode}`)
     const cmd = `${envPrefix}claude --allow-dangerously-skip-permissions${extra ? ` ${extra}` : ''}${launchFlags.length ? ` ${launchFlags.join(' ')}` : ''}`
     const { stdout } = await exec('tmux', ['new-window', '-d', '-P', '-F', '#{pane_id}', ...target, '-c', dir, cmd], { timeout: 5000 })
     const newPane = stdout.trim()
