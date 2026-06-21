@@ -67,7 +67,7 @@ import {
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, toInputRichMessage } from './richmsg.ts'
+import { sendRichMessage, editRichMessage, toInputRichMessage } from './richmsg.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
@@ -2632,7 +2632,23 @@ async function handleCall(
         const chunks = msgText ? (render ? chunkHtml(mdToTelegramHtml(msgText), limit) : chunk(msgText, limit, mode)) : []
         const sentIds: number[] = []
 
-        for (let i = 0; i < chunks.length; i++) {
+        // Rich messages (Bot API 10.1): when enabled and the text is standard Markdown (not the
+        // `text`/`markdownv2` formats), send the whole reply as ONE native rich message — works in
+        // DM and topics. Any failure falls back to the HTML/chunk loop below, so behavior is
+        // byte-identical when the flag is off or 10.1 is unavailable.
+        let richSent = false
+        if (access.richMessages && render && msgText) {
+          try {
+            const sent = await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(msgText), {
+              messageThreadId: thread,
+              replyToMessageId: reply_to != null && replyMode !== 'off' ? reply_to : undefined,
+            })
+            sentIds.push(sent.message_id)
+            richSent = true
+          } catch (e) { process.stderr.write(`daemon: rich reply failed, falling back to HTML: ${e}\n`) }
+        }
+
+        if (!richSent) for (let i = 0; i < chunks.length; i++) {
           const shouldReplyTo = reply_to != null && replyMode !== 'off' && (replyMode === 'all' || i === 0)
           const sent = await bot.api.sendMessage(chat_id, chunks[i], {
             ...(shouldReplyTo ? { reply_parameters: { message_id: reply_to } } : {}),
@@ -2697,13 +2713,27 @@ async function handleCall(
         const editText = editRender
           ? chunkHtml(mdToTelegramHtml(args.text as string), MAX_CHUNK_LIMIT)[0]
           : args.text as string
-        const edited = await bot.api.editMessageText(
-          editChat,
-          Number(args.message_id),
-          editText,
-          ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
-        )
-        const msgId = typeof edited === 'object' ? edited.message_id : args.message_id
+        let msgId: number | string = args.message_id as number | string
+        // Rich messages (Bot API 10.1): edit standard-Markdown text into a native rich message so
+        // tables/headings/code survive the edit (DM and topics). Falls back to the HTML edit on any
+        // failure, so flag-off / pre-10.1 behavior is unchanged.
+        let richEdited = false
+        if (loadAccess().richMessages && editRender) {
+          try {
+            const e = await editRichMessage(TOKEN!, editChat, Number(args.message_id), toInputRichMessage(args.text as string))
+            msgId = e.message_id
+            richEdited = true
+          } catch (e) { process.stderr.write(`daemon: rich edit failed, falling back to HTML: ${e}\n`) }
+        }
+        if (!richEdited) {
+          const edited = await bot.api.editMessageText(
+            editChat,
+            Number(args.message_id),
+            editText,
+            ...(editParseMode ? [{ parse_mode: editParseMode }] : []),
+          )
+          if (typeof edited === 'object') msgId = edited.message_id
+        }
         text = `edited (id: ${msgId})`
         break
       }

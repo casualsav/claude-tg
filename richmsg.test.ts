@@ -24,6 +24,13 @@ test('buildSendPayload: message_thread_id is included only when set (topics)', (
   expect(buildSendPayload('123', { markdown: 'x' }, {})).not.toHaveProperty('message_thread_id')
 })
 
+test('buildSendPayload: reply_parameters carries reply-to message id only when set', () => {
+  expect(buildSendPayload('123', { markdown: 'x' }, { replyToMessageId: 99 })).toEqual({
+    chat_id: '123', rich_message: { markdown: 'x' }, reply_parameters: { message_id: 99 },
+  })
+  expect(buildSendPayload('123', { markdown: 'x' }, {})).not.toHaveProperty('reply_parameters')
+})
+
 test('buildSendPayload: disable_notification + business_connection_id only when provided', () => {
   expect(buildSendPayload('123', { markdown: 'x' }, { disableNotification: true, businessConnectionId: 'biz' })).toEqual({
     chat_id: '123', rich_message: { markdown: 'x' }, disable_notification: true, business_connection_id: 'biz',

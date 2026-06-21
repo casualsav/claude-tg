@@ -38,13 +38,22 @@ export async function callTelegram<T = unknown>(token: string, method: string, p
 // A grammy-ish Message; we only ever read message_id off the result.
 export type RichMessage = { message_id: number; [k: string]: unknown }
 
+// Options shared by sendRichMessage / buildSendPayload. replyToMessageId emits reply_parameters so
+// the rich path can honor reply-to (same chat) the way the HTML path does.
+export type SendRichOpts = {
+  messageThreadId?: number
+  replyToMessageId?: number
+  disableNotification?: boolean
+  businessConnectionId?: string
+}
+
 // sendRichMessage — works in DM AND in forum supergroups/channels (supports message_thread_id), so
 // it covers both DM and topic mode. Returns the sent Message.
 export function sendRichMessage(
   token: string,
   chatId: string | number,
   richMessage: InputRichMessage,
-  opts?: { messageThreadId?: number; disableNotification?: boolean; businessConnectionId?: string },
+  opts?: SendRichOpts,
 ): Promise<RichMessage> {
   return callTelegram<RichMessage>(token, 'sendRichMessage', buildSendPayload(chatId, richMessage, opts))
 }
@@ -53,12 +62,13 @@ export function sendRichMessage(
 export function buildSendPayload(
   chatId: string | number,
   richMessage: InputRichMessage,
-  opts?: { messageThreadId?: number; disableNotification?: boolean; businessConnectionId?: string },
+  opts?: SendRichOpts,
 ): Record<string, unknown> {
   return {
     chat_id: chatId,
     rich_message: richMessage,
     ...(opts?.messageThreadId !== undefined ? { message_thread_id: opts.messageThreadId } : {}),
+    ...(opts?.replyToMessageId !== undefined ? { reply_parameters: { message_id: opts.replyToMessageId } } : {}),
     ...(opts?.disableNotification ? { disable_notification: true } : {}),
     ...(opts?.businessConnectionId ? { business_connection_id: opts.businessConnectionId } : {}),
   }
