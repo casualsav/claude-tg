@@ -31,6 +31,7 @@ export type Access = {
   tts?: { mode: 'off' | 'all'; engine: 'piper' | 'openai' | 'elevenlabs'; voice?: string }   // voice replies (ROADMAP #15); voice = piper voice id
   updateChecks?: boolean  // daily update-available notification for bridge + Claude (default on)
   richMessages?: boolean  // outbound replies via Bot API 10.1 rich messages (native tables/headings/code); falls back to HTML on error (default off)
+  claudingDraft?: boolean  // DM-only live "Clauding…" status draft (Bot API 10.1) while a turn runs; default on when richMessages is on
   replyMode?: 'thoughts' | 'actions' | 'off' | 'tools' | 'hybrid' | 'all' | 'final' | 'stream' | 'live'   // tools/hybrid/all/final/stream/live are legacy aliases
 }
 

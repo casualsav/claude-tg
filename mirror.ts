@@ -20,7 +20,8 @@ import { exec } from './proc.ts'
 import { stripAnsi } from './prompt.ts'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
-import { parseWorkingLine } from './statusline.ts'
+import { parseWorkingLine, parseDoneLine } from './statusline.ts'
+import { claudingFrame } from './clauding.ts'
 import { currentTurnFeed, turnAnchorUuid, type FeedItem } from './transcript.ts'
 import { isTopicMode } from './topics.ts'
 import { isChatFlooded, asLowPriority } from './throttle.ts'
@@ -62,7 +63,7 @@ const MIRROR_THOUGHTS = 10   // thoughts mode: max thoughts shown (oldest falls 
 // (verb/token scraping off the spinner line is flaky). The whole machinery (the footer method,
 // fmtElapsed, the verb/token scrape in syncBody) is kept intact; flip this to re-enable it
 // once it can be made dependable. While false, compose renders the body only.
-const MIRROR_FOOTER_ENABLED = false
+const MIRROR_FOOTER_ENABLED = true   // bottom-pinned live status line (scraped verb + elapsed + tokens) under the card
 
 // ---- Card persistence across daemon restarts ----
 // Card message ids used to live ONLY in process memory, so every deploy/crash mid-turn orphaned
@@ -280,6 +281,7 @@ class MirrorCard {
   private body = ''              // last-synced card body (no footer)
   private verb = 'Working'       // last-scraped spinner verb (held between syncs so it doesn't flicker)
   private tokens: string | null = null   // last-scraped PER-TURN token count (spinner only — never the session total)
+  private footerTick = 0         // advances one spinner frame per real card edit (animates with activity, no extra edits)
   private lastSyncAt = 0         // last heavy sync; throttled to MIRROR_THROTTLE_MS
   private createCooldownUntil = 0   // after a create 429, hold off re-posting the card until this passes (stops the create-storm)
   // We edit the card ONLY when its CONTENT changes (body / verb / tokens) — never just because the
@@ -347,7 +349,7 @@ class MirrorCard {
   // total, which is what made it jump to ~270k).
   private footer(): string {
     const elapsed = this.startedAt ? fmtElapsed(Date.now() - this.startedAt) : null
-    const parts = [`⏳ <i>${escapeHtml(this.verb)}</i>`, elapsed, this.tokens].filter(Boolean)
+    const parts = [`${claudingFrame(this.footerTick)} ${escapeHtml(this.verb)}…`, elapsed, this.tokens].filter(Boolean)
     return parts.length > 1 ? parts.join(' · ') : ''
   }
 
@@ -391,8 +393,9 @@ class MirrorCard {
 
   // The card text = cached body + the live footer (omitted when done; the body already ends in ✅ Done).
   private compose(done: boolean): string {
-    if (done || !this.body || !MIRROR_FOOTER_ENABLED) return this.body
+    if (done || !MIRROR_FOOTER_ENABLED) return this.body
     const footer = this.footer()
+    if (!this.body) return footer                       // pre-tool thinking phase → footer-only card
     return footer ? `${this.body}\n\n${footer}` : this.body
   }
 
@@ -403,6 +406,7 @@ class MirrorCard {
       if (isChatFlooded(chat)) continue   // skip the cosmetic live edit while the chat is in a 429 window
       await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
     }
+    this.footerTick++   // advance the spinner one frame per real edit (no extra edits — gated on body change)
     this.opts.persist()   // keep the persisted body current so a restart's cap fallback shows the latest state
   }
 
@@ -431,12 +435,13 @@ class MirrorCard {
     const throttleMs = isTopicMode() ? MIRROR_THROTTLE_GROUP_MS : MIRROR_THROTTLE_MS
     if (now - this.lastSyncAt < throttleMs && this.msgIds.size > 0) return
     this.lastSyncAt = now
-    if (!(await this.syncBody(false))) return   // nothing to show yet (e.g. thoughts mode, no narration)
+    const hasBody = await this.syncBody(false)
+    if (!hasBody && !(MIRROR_FOOTER_ENABLED && this.startedAt)) return   // footer-only card still opens in the pre-tool thinking phase
 
     if (this.msgIds.size === 0) {
       if (Date.now() < this.createCooldownUntil) return   // a recent create 429'd — don't hammer a fresh post every tick
       // Open the card silently — it's the ambient mirror; the alerting message is the relayed reply.
-      this.contentKey = this.body
+      this.contentKey = this.body || this.compose(false)
       this.paneId = this.opts.resolvePane()   // remember which pane this card tracks (see abandon)
       const file = this.paneId ? await deps.resolveTranscriptForPane(this.paneId).catch(() => null) : null
       this.anchor = file ? turnAnchorUuid(file) : null   // the turn this card belongs to (restart resume check)
@@ -454,7 +459,7 @@ class MirrorCard {
       this.opts.persist()
       this.opts.onCreated?.()
     } else {
-      const key = this.body
+      const key = this.body || this.compose(false)   // bodyless thinking phase → fingerprint the footer so it ticks
       if (key !== this.contentKey) { this.contentKey = key; await this.pushCard(this.compose(false)) }   // edit only on real change
     }
   }
@@ -464,11 +469,26 @@ class MirrorCard {
   async finalize(): Promise<void> {
     if (this.msgIds.size === 0) return
     await this.syncBody(true)
-    const text = this.body || '🖥️ <b>Session</b> · idle'
+    let text = this.body || '🖥️ <b>Session</b> · idle'
+    if (MIRROR_FOOTER_ENABLED) {
+      const done = await this.doneFooter()   // "✻ Baked for 9m 59s" — Claude Code's real completion line
+      text = (this.body || '').replace(/✅ <b>Done<\/b>(?: · \d+ steps?)?/, done).trim() || done   // swap the renderer's ✅ Done marker
+    }
     for (const [chat, mid] of this.msgIds) {
       await deps.bot.api.editMessageText(chat, mid, text, { parse_mode: 'HTML' }).catch(() => {})
     }
     this.msgIds.clear(); this.reset(); this.opts.persist()
+  }
+
+  // The completed-turn summary, scraped from Claude Code's "✻ Baked for 9m 59s" line; falls back to
+  // the card's own elapsed (with the last working verb) when that line isn't on screen at cap time.
+  private async doneFooter(): Promise<string> {
+    const pane = this.opts.resolvePane()
+    const cap = pane ? await mirrorCapture(pane).catch(() => '') : ''
+    const d = cap ? parseDoneLine(cap) : null
+    if (d) return `✻ ${escapeHtml(d.verb)} for ${escapeHtml(d.duration)}`
+    const elapsed = this.startedAt ? fmtElapsed(Date.now() - this.startedAt) : null
+    return elapsed ? `✻ ${escapeHtml(this.verb)} for ${elapsed}` : '✅ <b>Done</b>'
   }
 
   // Cap with the CACHED body — no re-scrape. For orphans and dead panes, where the transcript /

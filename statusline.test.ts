@@ -1,5 +1,5 @@
 import { test, expect } from 'bun:test'
-import { parseStatusline, pinBar, parseWorkingLine } from './statusline.ts'
+import { parseStatusline, pinBar, parseWorkingLine, parseDoneLine } from './statusline.ts'
 
 // A realistic capture: regular output, a blank line, the statusline slot, then the footer hint.
 const STATUSLINE = 'ctx 45%  ↑1.2k ↓3.4k  $0.42 | 2h30m  api 1m30s  5h 60% ↻ 3h  7d 20% ↻ 12h  ε: high  ✻ think'
@@ -69,6 +69,13 @@ test('parseWorkingLine keeps the last (lowest) spinner line and tolerates no tok
 test('parseWorkingLine returns null without an active spinner line', () => {
   expect(parseWorkingLine('✻ Sautéed for 1m 17s\n❯ ')).toBeNull()   // past-tense line, no paren group
   expect(parseWorkingLine('just output\n❯ ')).toBeNull()
+})
+
+test('parseDoneLine lifts the past-tense verb + duration from the completed-turn line', () => {
+  expect(parseDoneLine('output\n✻ Baked for 9m 59s\n❯ ')).toEqual({ verb: 'Baked', duration: '9m 59s' })
+  expect(parseDoneLine('✻ Sautéed for 1m 17s')).toEqual({ verb: 'Sautéed', duration: '1m 17s' })
+  expect(parseDoneLine('· Churned for 45s')).toEqual({ verb: 'Churned', duration: '45s' })
+  expect(parseDoneLine('just output, no summary')).toBeNull()
 })
 
 test('pinBar renders a fixed-width filled/empty bar', () => {

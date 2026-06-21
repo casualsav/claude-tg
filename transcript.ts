@@ -12,7 +12,8 @@ import { join } from 'node:path'
 export const DEFAULT_PROJECTS_DIR = join(homedir(), '.claude', 'projects')
 const PROJECTS_DIR = DEFAULT_PROJECTS_DIR
 
-type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null } }
+type Usage = { input_tokens?: number; output_tokens?: number; cache_creation_input_tokens?: number; cache_read_input_tokens?: number }
+type Entry = { type?: string; uuid?: string; timestamp?: string; cwd?: string; isSidechain?: boolean; isMeta?: boolean; message?: { content?: unknown; stop_reason?: string | null; usage?: Usage } }
 
 // Text content of an entry: a bare string, or the joined `text` blocks of a content
 // array (tool_use / thinking blocks contribute nothing).
@@ -315,6 +316,31 @@ export function turnInProgress(file: string): boolean {
   }
   if (!lastAssistant) return false
   return lastAssistant.message?.stop_reason === 'tool_use'
+}
+
+// Live token counts for the current turn, summed from each assistant entry's `usage`. `output` is
+// the tokens generated across the turn's assistant steps — the count Claude Code's footer shows;
+// it steps up per tool-round (the transcript records usage per completed message, not per token, so
+// the in-flight message isn't counted until it lands). `context` is the latest step's prompt size
+// (input + cache read + cache write) ≈ the context-window fill. Both 0 before the turn's first
+// assistant entry — and 0 when there's no real-user anchor (don't sum a whole resumed transcript).
+export function currentTurnTokens(file: string): { output: number; context: number } {
+  const entries = readEntries(file)
+  let start = -1
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (isRealUserText(entries[i])) { start = i; break }
+  }
+  if (start === -1) return { output: 0, context: 0 }
+  let output = 0, context = 0
+  for (let i = start + 1; i < entries.length; i++) {
+    const e = entries[i]
+    if (e.isSidechain || e.type !== 'assistant') continue
+    const u = e.message?.usage
+    if (!u) continue
+    output += u.output_tokens ?? 0
+    context = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)
+  }
+  return { output, context }
 }
 
 // The current turn's chronological feed of what Claude said and did — text narration and tool

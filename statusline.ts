@@ -65,6 +65,19 @@ export function parseWorkingLine(paneText: string): { verb: string; tokens: stri
   return found
 }
 
+// Claude Code's completed-turn summary line, e.g. "✻ Baked for 9m 59s" / "✻ Churned for 1m 39s" —
+// the past-tense verb + total duration it prints when a turn ends. Scanned bottom-up (last wins);
+// the leading spinner glyph + " for <dur>" shape disambiguates it from ordinary "X for Ys" prose.
+const DONE_RE = /[·✶✳✻✽✺✷✸✹✢✣*]\s*([A-ZÀ-Þ][a-zà-ÿ'’-]{2,})\s+for\s+(\d[\dhms ]*\d?s)\b/
+export function parseDoneLine(paneText: string): { verb: string; duration: string } | null {
+  let found: { verb: string; duration: string } | null = null
+  for (const raw of paneText.split('\n')) {
+    const m = stripAnsi(raw).match(DONE_RE)
+    if (m) found = { verb: m[1], duration: m[2].replace(/\s+/g, ' ').trim() }
+  }
+  return found
+}
+
 export function parseStatusline(paneText: string): StatuslineData | null {
   const block = statuslineBlock(paneText)
   if (!block) return null

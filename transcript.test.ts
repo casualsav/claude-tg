@@ -3,7 +3,7 @@ import { test, expect } from 'bun:test'
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, finalReplyForInjected } from './transcript.ts'
+import { latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnActivity, currentTurnFeed, currentTurnTokens, finalReplyForInjected } from './transcript.ts'
 
 function fixture(entries: object[]): string {
   const f = join(mkdtempSync(join(tmpdir(), 'tg-transcript-')), 'session.jsonl')
@@ -148,6 +148,21 @@ test('currentTurnFeed: an injected meta user entry does not reset the feed', () 
   const meta = { type: 'user', uuid: 'm1', isMeta: true, message: { content: 'skill instructions' } }
   const f = fixture([user('go', 'u1'), narr('before skill', 'a1'), meta, narr('after skill', 'a2')])
   expect(currentTurnFeed(f).map(i => i.kind === 'text' ? i.text : i.tool)).toEqual(['before skill', 'after skill'])
+})
+
+test('currentTurnTokens sums output across the turn, takes latest context, skips sidechains', () => {
+  const wu = (out: number, ctxRead: number, uuid: string, stop = 'tool_use') => ({
+    type: 'assistant', uuid, message: { stop_reason: stop, content: [{ type: 'text', text: 'x' }], usage: { input_tokens: 2, output_tokens: out, cache_read_input_tokens: ctxRead, cache_creation_input_tokens: 0 } },
+  })
+  const subUsage = { type: 'assistant', uuid: 's1', isSidechain: true, message: { stop_reason: 'tool_use', content: [{ type: 'text', text: 'sub' }], usage: { output_tokens: 999, cache_read_input_tokens: 99999 } } }
+  const f = fixture([user('hi', 'u1'), wu(100, 5000, 'a1'), subUsage, wu(250, 8000, 'a2', 'end_turn')])
+  expect(currentTurnTokens(f)).toEqual({ output: 350, context: 8002 })   // 100+250 output; latest 2+8000 ctx; sidechain's 999 excluded
+})
+
+test('currentTurnTokens scopes to the latest turn and is 0 with no user anchor', () => {
+  const wu = (out: number, uuid: string) => ({ type: 'assistant', uuid, message: { stop_reason: 'tool_use', content: [{ type: 'text', text: 'x' }], usage: { output_tokens: out } } })
+  expect(currentTurnTokens(fixture([user('old', 'u1'), wu(500, 'a1'), user('new', 'u2'), wu(40, 'a2'), wu(60, 'a3')])).output).toBe(100)  // only the 2nd turn
+  expect(currentTurnTokens(fixture([wu(77, 'a1')]))).toEqual({ output: 0, context: 0 })   // no real-user anchor → don't sum
 })
 
 test('multi-root: resolveTranscript picks the newest across roots; find/list carry the root', () => {

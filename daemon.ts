@@ -24,7 +24,7 @@ import {
 const CODE_FINGERPRINT = computeCodeFingerprint(import.meta.dir)
 import { mdToTelegramHtml, chunkHtml, escapeHtml } from './markdown.ts'
 import { detectCurrentMode, onNormalPrompt, type CcMode, detectUserPrompt, detectPermissionPrompt, detectLoginPrompt, isUsageLimitChoice, isPluginInstallUserScope, isResumeSessionPrompt, detectResumeSessionPrompt, isSubmitScreen, detectEditorState, detectModelUnavailable, detectCompacting, compactPercent, stripAnsi, paneLines, type PromptInfo, type PromptOption, type PermissionPrompt } from './prompt.ts'
-import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
+import { resolveTranscript, latestFinalReply, finalRepliesAfter, turnInProgress, currentTurnFeed, currentTurnActivity, currentTurnTokens, listRecentSessions, findSessionCwd, searchTranscripts } from './transcript.ts'
 import {
   initAccounts, listAccounts, accountByName, accountForTranscript, accountForProjectsDir,
   allProjectsDirs, addAccount, removeAccount, accountLoggedIn, healAccountConfigs,
@@ -67,7 +67,8 @@ import {
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
-import { sendRichMessage, editRichMessage, toInputRichMessage } from './richmsg.ts'
+import { sendRichMessage, sendRichMessageDraft, editRichMessage, toInputRichMessage } from './richmsg.ts'
+import { claudingStatus } from './clauding.ts'
 import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
@@ -971,6 +972,45 @@ function replyMode(): 'thoughts' | 'actions' | 'off' {
   return 'thoughts'   // thoughts/all/stream/hybrid/live, or unset (the default)
 }
 
+// ---- DM-only live "Clauding…" draft (Bot API 10.1) ───────────────────────────────────────────
+// A streamed rich-message draft mirroring Claude Code's terminal footer (pulsing spinner + elapsed
+// + tokens-this-turn + recent activity) while a turn runs. DM-ONLY: sendRichMessageDraft is
+// rejected in supergroups/channels (TEXTDRAFT_PEER_INVALID), so it only fires for private-chat
+// targets (positive id, no thread) — i.e. non-topic mode. Best-effort + ephemeral: the draft
+// auto-expires (~30s) and the turn's reply still ships via the normal relay path, so any failure
+// here is silent. Animated on its own ~700ms timer (the 1.5s relay tick is too slow for the
+// pulse); the relay loop only opens/closes it on the turn's working→idle edges.
+const CLAUDING_TICK_MS = 700
+const CLAUDING_DRAFT_ID = 0x7c1d           // stable non-zero draft id, reused across turns
+let claudingTimer: ReturnType<typeof setInterval> | null = null
+let claudingChats: number[] = []
+
+// DM chats among a session's outbound targets — the only peers where drafts are accepted.
+function dmDraftChats(targets: Array<{ chat: string; thread?: number }>): number[] {
+  return targets.filter(t => t.thread == null && Number(t.chat) > 0).map(t => Number(t.chat))
+}
+
+function startClaudingDraft(file: string, chats: number[]): void {
+  if (claudingTimer || !TOKEN || !chats.length) return
+  claudingChats = chats
+  const startedAt = Date.now()
+  let tick = 0
+  const paint = async () => {
+    const tok = currentTurnTokens(file)
+    const activity = currentTurnActivity(file).slice(-4).map(a => a.detail ? `${a.tool} — ${a.detail}` : a.tool)
+    const md = claudingStatus({ tick: tick++, elapsedSec: (Date.now() - startedAt) / 1000, output: tok.output, context: tok.context, activity })
+    for (const chat of claudingChats) await sendRichMessageDraft(TOKEN!, chat, CLAUDING_DRAFT_ID, { markdown: md }).catch(() => {})
+  }
+  void paint()                                       // first frame immediately
+  claudingTimer = setInterval(() => void paint(), CLAUDING_TICK_MS)
+}
+
+function stopClaudingDraft(): void {
+  if (!claudingTimer) return
+  clearInterval(claudingTimer); claudingTimer = null; claudingChats = []
+  // No finalize: the draft auto-expires and the turn's reply ships via the normal relay path.
+}
+
 
 async function relayLoopTick(gen: number): Promise<void> {
   if (gen !== relayLoopGen || !focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
@@ -994,6 +1034,17 @@ async function relayLoopTick(gen: number): Promise<void> {
   if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
   else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
   await updateTerminalMirror(working).catch(() => {})
+
+  // DM-only "Clauding…" live draft: open while the turn runs, close when it concludes. Gated on
+  // richMessages + the claudingDraft pref; dormant in topic mode (only private-chat targets pass
+  // dmDraftChats, and drafts are group-rejected anyway).
+  {
+    const acc = loadAccess()
+    const wantDraft = !!file && working && acc.richMessages === true && acc.claudingDraft !== false
+    if (wantDraft) {
+      if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
+    } else stopClaudingDraft()
+  }
 
   // A select/permission/login menu sitting on the pane is a question the user must answer. Any
   // assistant text Claude wrote just before it is the CONTEXT for that question, so flush it now —
@@ -1068,6 +1119,7 @@ function startRelayLoop(): void {
   relayCursorPrimed = false
   relayIdleStreak = 0
   relayConcludeTicks = 0
+  stopClaudingDraft()   // a pane switch / relay restart drops any in-flight DM status draft
   abandonMirror(focus.activePaneId)   // keep the card if this is a relay restart on the same pane; abandon only on a real pane switch
   void primeRelayCursor().finally(() => {
     if (gen === relayLoopGen) setTimeout(() => void relayLoopTick(gen), RELAY_POLL_MS)
