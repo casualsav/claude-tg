@@ -854,7 +854,7 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
     // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
     // failure (older Telegram, malformed markdown, network) falls back to the HTML/chunk path so the
     // reply still lands; flag-off behavior is the HTML path unchanged.
-    if (access.richMessages && access.renderMarkdown !== false) {
+    if (access.richMessages !== false && access.renderMarkdown !== false) {
       try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
       catch (e) { process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`) }
     }
@@ -1040,7 +1040,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   // dmDraftChats, and drafts are group-rejected anyway).
   {
     const acc = loadAccess()
-    const wantDraft = !!file && working && acc.richMessages === true && acc.claudingDraft !== false
+    const wantDraft = !!file && working && acc.richMessages !== false && acc.claudingDraft !== false
     if (wantDraft) {
       if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
     } else stopClaudingDraft()
@@ -2689,7 +2689,7 @@ async function handleCall(
         // DM and topics. Any failure falls back to the HTML/chunk loop below, so behavior is
         // byte-identical when the flag is off or 10.1 is unavailable.
         let richSent = false
-        if (access.richMessages && render && msgText) {
+        if (access.richMessages !== false && render && msgText) {
           try {
             const sent = await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(msgText), {
               messageThreadId: thread,
@@ -2770,7 +2770,7 @@ async function handleCall(
         // tables/headings/code survive the edit (DM and topics). Falls back to the HTML edit on any
         // failure, so flag-off / pre-10.1 behavior is unchanged.
         let richEdited = false
-        if (loadAccess().richMessages && editRender) {
+        if (loadAccess().richMessages !== false && editRender) {
           try {
             const e = await editRichMessage(TOKEN!, editChat, Number(args.message_id), toInputRichMessage(args.text as string))
             msgId = e.message_id
@@ -8007,7 +8007,7 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       sessionPin: { value: a.sessionPin !== false, editable: true },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
-      richMessages: { value: a.richMessages === true, editable: true, label: 'native tables / code / headings (Bot API 10.1)' },
+      richMessages: { value: a.richMessages !== false, editable: true, label: 'native tables / code / headings (Bot API 10.1)' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },

@@ -199,7 +199,7 @@ TELEGRAM_WEBAPP_PUBLIC_URL=https://files.example.com   # custom-domain option on
 use pairing instead if they didn't give an ID):
 ```json
 { "dmPolicy": "allowlist", "allowFrom": ["<their-telegram-id>"], "groups": {}, "pending": {},
-  "renderMarkdown": true }
+  "renderMarkdown": true, "richMessages": true }
 ```
 
 **If they registered extra accounts**, also write `~/.claude/channels/telegram/accounts.json`
