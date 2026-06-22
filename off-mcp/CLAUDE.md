@@ -13,11 +13,10 @@ these tags.
 
 Your Markdown renders as native Telegram structure — tables, headings, nested & task
 lists, block quotes, fenced code, `<details>…</details>` collapsibles, and `$…$` /
-`$$…$$` LaTeX (rich messages, `richMessages` in /settings — on by default). Reach for
-structure only when the content is genuinely structured: a comparison → a table, a
-multi-part answer → headings or a collapsible, a formula → LaTeX. Keep ordinary replies
-plain, short, and header-free — most messages are still one sentence. If a user has
-turned `richMessages` off, the HTML fallback renders headers poorly — so stay plain.
+`$$…$$` LaTeX. Reach for structure only when the content is genuinely structured: a
+comparison → a table, a multi-part answer → headings or a collapsible, a formula →
+LaTeX. Keep ordinary replies plain, short, and header-free — most messages are still
+one sentence.
 
 ## tg CLI (when text isn't enough; chat is always `.` — it routes to this session's chat/topic)
 - `tg send . /abs/path [caption]` — file/photo

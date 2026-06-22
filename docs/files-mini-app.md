@@ -164,10 +164,10 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
   `/api/diff`) call daemon-injected deps (`webappReadSettings`/`webappSetSetting`/`webappReadUsage`/
   `webappReadDiff`) that reuse `loadAccess`/`parseStatusline`/budget/`sendDiff` logic. Reads inherit the
   initData+allowlist auth; settings mutations also gate on `WEBAPP_WRITE`. Writable toggles: voice, mcp,
-  sessionPin, stream/replyMode, richMessages (mode/model/effort are read-only — they drive the pane).
+  sessionPin, stream/replyMode (mode/model/effort are read-only — they drive the pane).
 - **Rich Messages (Bot API 10.1)** — outbound replies can render natively (tables/headings/code) via
-  `sendRichMessage` (`richmsg.ts`, raw HTTP — grammy 1.41.1 has no 10.1 types). Behind the `richMessages`
-  pref (default on; toggle in the Settings tab). Flag-off path is the unchanged markdown→HTML; the rich
+  `sendRichMessage` (`richmsg.ts`, raw HTTP — grammy 1.41.1 has no 10.1 types). Always on (no toggle),
+  honored whenever markdown rendering is enabled. The markdown→HTML/chunk path is the fallback; the rich
   path falls back to HTML on any error (a reply never drops) and honors `renderMarkdown:false`. Works in DM
   AND topics (`sendRichMessage` supports `message_thread_id`). **Deferred:** live draft-streaming via
   `sendRichMessageDraft` — it's private-chat-only (can't stream into supergroup topics), so the helper

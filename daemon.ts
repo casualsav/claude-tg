@@ -853,8 +853,8 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
     // Rich messages (Bot API 10.1) render Claude's markdown natively (tables/headings/code/collapsible)
     // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
     // failure (older Telegram, malformed markdown, network) falls back to the HTML/chunk path so the
-    // reply still lands; flag-off behavior is the HTML path unchanged.
-    if (access.richMessages !== false && access.renderMarkdown !== false) {
+    // reply still lands. Always on when markdown rendering is enabled (renderMarkdown !== false).
+    if (access.renderMarkdown !== false) {
       try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
       catch (e) { process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`) }
     }
@@ -1036,11 +1036,11 @@ async function relayLoopTick(gen: number): Promise<void> {
   await updateTerminalMirror(working).catch(() => {})
 
   // DM-only "Clauding…" live draft: open while the turn runs, close when it concludes. Gated on
-  // richMessages + the claudingDraft pref; dormant in topic mode (only private-chat targets pass
-  // dmDraftChats, and drafts are group-rejected anyway).
+  // the claudingDraft pref; dormant in topic mode (only private-chat targets pass dmDraftChats,
+  // and drafts are group-rejected anyway).
   {
     const acc = loadAccess()
-    const wantDraft = !!file && working && acc.richMessages !== false && acc.claudingDraft !== false
+    const wantDraft = !!file && working && acc.claudingDraft !== false
     if (wantDraft) {
       if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
     } else stopClaudingDraft()
@@ -2684,12 +2684,12 @@ async function handleCall(
         const chunks = msgText ? (render ? chunkHtml(mdToTelegramHtml(msgText), limit) : chunk(msgText, limit, mode)) : []
         const sentIds: number[] = []
 
-        // Rich messages (Bot API 10.1): when enabled and the text is standard Markdown (not the
+        // Rich messages (Bot API 10.1): when the text is standard Markdown (not the
         // `text`/`markdownv2` formats), send the whole reply as ONE native rich message — works in
         // DM and topics. Any failure falls back to the HTML/chunk loop below, so behavior is
-        // byte-identical when the flag is off or 10.1 is unavailable.
+        // byte-identical when 10.1 is unavailable or the send errors.
         let richSent = false
-        if (access.richMessages !== false && render && msgText) {
+        if (render && msgText) {
           try {
             const sent = await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(msgText), {
               messageThreadId: thread,
@@ -2768,9 +2768,9 @@ async function handleCall(
         let msgId: number | string = args.message_id as number | string
         // Rich messages (Bot API 10.1): edit standard-Markdown text into a native rich message so
         // tables/headings/code survive the edit (DM and topics). Falls back to the HTML edit on any
-        // failure, so flag-off / pre-10.1 behavior is unchanged.
+        // failure, so pre-10.1 / error behavior is unchanged.
         let richEdited = false
-        if (loadAccess().richMessages !== false && editRender) {
+        if (editRender) {
           try {
             const e = await editRichMessage(TOKEN!, editChat, Number(args.message_id), toInputRichMessage(args.text as string))
             msgId = e.message_id
@@ -8007,7 +8007,6 @@ async function webappReadSettings(): Promise<WebappSettingsView> {
       mcp: { value: mcpEnabled(), editable: true, label: 'new sessions only' },
       sessionPin: { value: a.sessionPin !== false, editable: true },
       stream: { value: replyMode(), editable: true, options: [...STREAM_ORDER] },
-      richMessages: { value: a.richMessages !== false, editable: true, label: 'native tables / code / headings (Bot API 10.1)' },
       mode: { value: cap ? detectCurrentMode(cap) : null, editable: false, label: 'drives the pane (chat-side)' },
       model: { value: sl?.model ?? null, editable: false },
       effort: { value: sl?.effort ?? null, editable: false },
@@ -8021,7 +8020,6 @@ function webappSetSetting(userId: string, key: string, value: unknown): string |
   switch (key) {
     case 'voice': setVoiceMode(truthy(value), userId); return null   // notice DMs the toggling user (not the group)
     case 'mcp': { if (truthy(value) !== mcpEnabled()) toggleMcp(); return null }
-    case 'richMessages': { const a = loadAccess(); a.richMessages = truthy(value); saveAccess(a); return null }
     case 'sessionPin': {
       const a = loadAccess(); a.sessionPin = truthy(value); saveAccess(a)
       if (a.sessionPin) void updateSessionPin(); else void removeSessionPins()

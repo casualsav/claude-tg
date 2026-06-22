@@ -33,7 +33,7 @@ export function defaultAccess(): Access {
 const PREF_KEYS = [
   'mentionPatterns', 'ackReaction', 'replyToMode', 'textChunkLimit', 'chunkMode',
   'renderMarkdown', 'terminalMirror', 'sessionPin', 'replyMode', 'shipButtons', 'budgetDaily',
-  'topicOnEnd', 'scheduleTz', 'batchAllow', 'tts', 'updateChecks', 'richMessages', 'claudingDraft',
+  'topicOnEnd', 'scheduleTz', 'batchAllow', 'tts', 'updateChecks', 'claudingDraft',
 ] as const satisfies readonly (keyof Access)[]
 
 // Parse a JSON access/prefs file into a partial; {} on missing, moved-aside + {} on corrupt.

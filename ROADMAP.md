@@ -84,7 +84,7 @@ the per-topic status card — see what a working session is grinding through mid
 ## 17. Native rich messages (Bot API 10.1) — ✅ P1+P2 DONE (v0.2.48 / v0.2.49) · P3 PLANNED
 Render Claude's markdown as native Telegram structure (tables / headings / nested lists /
 collapsible / code) instead of the HTML-subset approximation, behind the `richMessages` pref
-(default on; /settings toggle). `richmsg.ts` owns the raw 10.1 HTTP calls (grammy 1.41.1 has no
+(always on — no toggle; HTML fallback on any error). `richmsg.ts` owns the raw 10.1 HTTP calls (grammy 1.41.1 has no
 types/methods yet); every call falls back to the existing HTML/chunk path on any error, so
 flag-off behavior is byte-identical.
 

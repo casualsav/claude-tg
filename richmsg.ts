@@ -1,4 +1,4 @@
-// richmsg.ts — Bot API 10.1 "Rich Messages" outbound, behind the `richMessages` pref (default on — opt out with false).
+// richmsg.ts — Bot API 10.1 "Rich Messages" outbound. Always on when markdown rendering is enabled; falls back to HTML on any error.
 //
 // Telegram 10.1 renders native tables / headings / code / collapsible sections from a single
 // `rich_message` field of type InputRichMessage = { markdown? | html?, … } — no block tree to send;
