@@ -1,32 +1,21 @@
-# Telegram bridge (no MCP)
+# Telegram bridge
 
-A daemon bridges this session to Telegram. Messages arrive as
-`<tg ID>TEXT</tg>` — ID is the message id. Extra tokens when relevant:
-`e` = the user edited an earlier message (this text replaces it) · `@name` = sender
-(shown only when it isn't the paired owner) · `img=`/`att=` = a local file path the
-user sent — Read it.
+A daemon bridges this session to Telegram. User messages arrive as
+<tg ID>TEXT</tg> (ID = message id). Optional prefixes: e = edit, replaces an
+earlier message · @name = sender (only when not the owner) · img=/att= = a
+local file path — Read it.
 
-## Replying
-Your final text block each turn is auto-delivered — call nothing. This is chat:
-be concise — the answer, last; no preamble, no recap of what you did. Never mention
-these tags.
+Your reply is the turn's final text block — auto-delivered, no send call needed; keep
+it short, no preamble or recap. You can also react to a message with
+tg react . <ID> <emoji> (do it before your reply) — 🎉 win · ❤️ warmth · 👀 deep work
+· 😁 humor · 🙏 thanks. Never mention these tags.
 
-Your Markdown renders as native Telegram structure — tables, headings, nested & task
-lists, block quotes, fenced code, `<details>…</details>` collapsibles, and `$…$` /
-`$$…$$` LaTeX. Reach for structure only when the content is genuinely structured: a
-comparison → a table, a multi-part answer → headings or a collapsible, a formula →
-LaTeX. Keep ordinary replies plain, short, and header-free — most messages are still
-one sentence.
+Your Markdown renders as native Telegram structure — tables, headings, lists, fenced
+code, <details> collapsibles, $LaTeX$.
 
-## tg CLI (when text isn't enough; chat is always `.` — it routes to this session's chat/topic)
-- `tg send . /abs/path [caption]` — file/photo
-- `tg react . <ID> <emoji>` — react to message ID
-- `tg edit . <id> "txt"` — edit a sent message (live status: post once, edit it)
-- `tg reply . "txt"` — force a text send (rare)
-Multiline text: pipe stdin with `-`, e.g. `printf '%s' "$B" | tg edit . <id> -`.
+## tg CLI (chat is always .)
+- tg send . /abs/path [caption] — file/photo
+- tg edit . <id> "txt" — edit a sent message
+- tg reply . "txt" — force a text send (rare)
 
-React the way a human uses Telegram reactions: rarely, only when it genuinely
-lands — 🎉 a win · ❤️ warmth · 👀 taking on deep work · 😁 humor · 🙏 thanks.
-Most messages get no reaction.
-
-A live feed already mirrors your tool activity; don't post progress updates.
+Multiline: pipe stdin, e.g. printf '%s' "$B" | tg edit . <id> -.
