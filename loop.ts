@@ -18,6 +18,7 @@ import { unlinkSync } from 'node:fs'
 import { exec } from './proc.ts'
 import { STATE_DIR, readJsonFile, writeJsonFile } from './common.ts'
 import { escapeHtml } from './markdown.ts'
+import { scheduleEdit } from './edit-scheduler.ts'
 import { capturePane, paneCwd, paneAlive } from './pane-io.ts'
 import { focus } from './state.ts'
 import { paneForSession } from './topic-runtime.ts'
@@ -205,7 +206,7 @@ async function renderCard(sid: string, rec: LoopRecord): Promise<void> {
   const extra = { parse_mode: 'HTML' as const, ...(kb ? { reply_markup: kb } : {}) }
   if (rec.cardMsg) {
     if (lastCardHtml.get(sid) === html + rec.status) return
-    await deps.bot.api.editMessageText(rec.chat, rec.cardMsg, html, extra).catch(() => {})
+    scheduleEdit({ chat: rec.chat, mid: rec.cardMsg, thread: rec.thread, source: 'loop', render: () => html, extra })
   } else {
     const sent = await deps.bot.api.sendMessage(rec.chat, html, { ...extra, ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => null)
     if (sent) rec.cardMsg = sent.message_id
@@ -279,7 +280,7 @@ export async function loopCancel(sid: string): Promise<string> {
   if (!rec) return 'No loop here.'
   delete map[sid]
   writeLoops(map)
-  if (rec.cardMsg) await deps.bot.api.editMessageText(rec.chat, rec.cardMsg, `✖️ Loop setup cancelled.`).catch(() => {})
+  if (rec.cardMsg) scheduleEdit({ chat: rec.chat, mid: rec.cardMsg, thread: rec.thread, source: 'loop', render: () => '✖️ Loop setup cancelled.' })
   return 'Cancelled.'
 }
 
@@ -395,7 +396,7 @@ async function finishLoop(sid: string, rec: LoopRecord, map: Record<string, Loop
   const summary = `${icon} <b>Loop ${kind === 'done' ? 'finished' : 'stopped'}</b> — ${reason}\n` +
     `🔁 ${rec.iter} iteration${rec.iter === 1 ? '' : 's'} · 💸 $${rec.spent.toFixed(2)} · 🕐 ${fmtDur(Date.now() - rec.startedAt)}\n` +
     `<i>${escapeHtml(rec.goal.slice(0, 200))}</i>`
-  if (rec.cardMsg) await deps.bot.api.editMessageText(rec.chat, rec.cardMsg, summary, { parse_mode: 'HTML' }).catch(() => {})
+  if (rec.cardMsg) scheduleEdit({ chat: rec.chat, mid: rec.cardMsg, thread: rec.thread, source: 'loop', parseMode: 'HTML', render: () => summary })
   await deps.bot.api.sendMessage(rec.chat, summary, { parse_mode: 'HTML', ...(rec.thread ? { message_thread_id: rec.thread } : {}) }).catch(() => {})
 }
 

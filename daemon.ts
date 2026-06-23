@@ -73,7 +73,7 @@ import {
   MAX_CHUNK_LIMIT, MAX_ATTACHMENT_BYTES, assertAllowedChat, resolveChatId, resolveTarget,
   assertSendable, chunk, coerceReaction,
 } from './calls.ts'
-import { installSendGovernor, isChatFlooded, asLowPriority } from './throttle.ts'
+import { installSendGovernor, asLowPriority } from './throttle.ts'
 import { startEditScheduler, scheduleEdit, scheduleDelete, cancelEdit, touchActiveView } from './edit-scheduler.ts'
 import { initUpdates, startUpdate, bridgeVersion, claudeBin, claudeVersion, sweepUpdateChecks } from './updates.ts'
 import { formatChannelBlock } from './inbound.ts'
@@ -2420,7 +2420,7 @@ async function handleModelUnavailable(text: string, paneId: string | null = focu
 // first detection, animate a progress bar while the spinner persists, then resolve it to a ✅
 // message when the spinner is gone. Compaction exposes no percentage, so the bar is a moving
 // indicator (cycling fill), not a real fraction. Keyed by pane so each session gets its own card.
-type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; lastFilled: number; timer: ReturnType<typeof setTimeout>; cooldownUntil: number }
+type CompactWatch = { chat: string; thread?: number; msgId: number; startedAt: number; lastFilled: number; timer: ReturnType<typeof setTimeout> }
 const compactWatches = new Map<string, CompactWatch>()
 
 // The card's progress bar in Claude Code's own ▰/▱ style (matching the bar it draws on the pane).
@@ -2448,27 +2448,12 @@ function compactProgress(pct: number | null): string {
   return `${compactBarOf(compactCells(pct))} ${pct}%`
 }
 
-// One edit attempt at the card. Returns 0 on success (or on a 400 "message is not modified"/gone,
-// which needs no further action), the server's retry_after seconds on a 429 flood, or -1 otherwise.
-// Telegram flood-limits edits to a single message (group chats allow only ~20 message events/min),
-// so a long compaction's stream of edits eventually 429s — and if the *final* edit is the casualty
-// the card freezes mid-progress (the "stuck at 72%" bug). Callers back off using the returned
-// cooldown, and the terminal ✅ is retried through the window so the card always lands on its end state.
-async function tryEditCard(chat: string, msgId: number, text: string): Promise<number> {
-  try {
-    await bot.api.editMessageText(chat, msgId, text, { parse_mode: 'HTML' })
-    return 0
-  } catch (e: any) {
-    if (e?.error_code === 400) return 0
-    const ra = Number(e?.parameters?.retry_after)
-    return e?.error_code === 429 && Number.isFinite(ra) ? Math.max(1, ra) : -1
-  }
-}
-
 // Poll cadence: how often we re-capture the pane to read progress and detect completion. Edits are
 // gated on 5% bucket crossings (compactCells), NOT on this tick — so a fast poll costs only local
-// captures, while the throttled Telegram edit fires at most ~20 times per compaction. 3s keeps the
-// bar responsive and the ✅ prompt; tryEditCard's cooldown is the 429 backstop.
+// captures. The Telegram edits go through the global edit scheduler (source 'compact'), which paces
+// them, skips flooded chats, coalesces superseded frames, and lands the terminal ✅ once the budget
+// frees — so the card no longer needs its own 429 cooldown / retry plumbing (the old "stuck at 72%"
+// bug, where a 429'd final edit froze the card, is now the scheduler's job to flush).
 const COMPACT_TICK_MS = 3000
 
 // Kick off (idempotently) the status card for a pane that just started compacting. Safe to call on
@@ -2476,7 +2461,7 @@ const COMPACT_TICK_MS = 3000
 // the same compaction never post a second card.
 async function startCompactionWatch(pane: string, initialText = ''): Promise<void> {
   if (compactWatches.has(pane)) return
-  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), lastFilled: 0, timer: setTimeout(() => {}, 0), cooldownUntil: 0 }
+  const slot: CompactWatch = { chat: '', thread: undefined, msgId: 0, startedAt: Date.now(), lastFilled: 0, timer: setTimeout(() => {}, 0) }
   clearTimeout(slot.timer)
   compactWatches.set(pane, slot)   // reserve the slot before any await so a concurrent frame can't duplicate it
   const [target] = await outboundTargetsFor(pane)
@@ -2499,26 +2484,22 @@ async function startCompactionWatch(pane: string, initialText = ''): Promise<voi
     const cap = await capturePane(pane).catch(() => '')
     const still = detectCompacting(cap)
     if (still && elapsed < 5 * 60_000) {
-      // Edit ONLY when compaction crosses a 5% cell boundary (and never on a null reading) — so the
-      // card reports ≤20 times across the whole run, not once per 3s tick. capturePane is local; the
-      // Telegram edit is the throttled resource, so gating it on the bucket is what tames the flood.
+      // Register a new frame ONLY when compaction crosses a 5% cell boundary (never on a null reading)
+      // — so the card reports ≤20 times across the whole run, not once per 3s tick. capturePane is
+      // local; the scheduler paces/coalesces the Telegram edit and skips flooded chats.
       const pct = compactPercent(cap)
       const filled = pct == null ? w.lastFilled : compactCells(pct)
-      if (filled !== w.lastFilled && Date.now() >= w.cooldownUntil && !isChatFlooded(w.chat)) {   // 5% boundary crossed; honour 429 cooldown + flood window
-        const wait = await tryEditCard(w.chat, w.msgId, `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>`)
-        if (wait === 0) w.lastFilled = filled
-        else if (wait > 0) w.cooldownUntil = Date.now() + wait * 1000
+      if (filled !== w.lastFilled) {   // 5% boundary crossed
+        w.lastFilled = filled
+        scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', parseMode: 'HTML',
+          render: () => `🗜️ Compacting conversation…\n<code>${compactProgress(pct)}</code>` })
       }
       w.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
     } else {
       compactWatches.delete(pane)
       const secs = Math.round(elapsed / 1000)
       const done = `✅ Compacted${secs >= 2 ? ` · ${secs}s` : ''}`
-      for (let i = 0; i < 6; i++) {            // the end state MUST land, even through a 429 flood window
-        const wait = await tryEditCard(w.chat, w.msgId, done)
-        if (wait <= 0) break
-        await sleep(Math.min(wait, 30) * 1000 + 250)
-      }
+      scheduleEdit({ chat: w.chat, mid: w.msgId, thread: w.thread, source: 'compact', parseMode: 'HTML', render: () => done })   // scheduler lands the end state once the budget frees
     }
   }
   slot.timer = setTimeout(() => void tick(), COMPACT_TICK_MS)
