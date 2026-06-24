@@ -428,6 +428,15 @@ export function armTopicTyping(chat: string, thread: number | 'general'): void {
   ensureTopicTypingTimer()
 }
 
+// Re-assert typing for every thread still inside its keep-alive window — called right after the
+// daemon sends a card (mirror/pin) into a topic, since Telegram clears the typing action on every
+// send and the 2.5s timer would otherwise leave a visible gap. Topic analogue of
+// TypingPresence.retrigger().
+export function retriggerTopicTyping(): void {
+  const now = Date.now()
+  for (const [key, until] of topicTypingPending) if (now <= until) pingTopicTyping(key)
+}
+
 // Work observed for a thread: extend its rolling keep-alive window. The timer does the actual
 // pinging — this is TypingPresence.observe() for topics. Ping immediately only when the window
 // was closed (turn start / re-light after a reply), so typing shows without waiting a tick.

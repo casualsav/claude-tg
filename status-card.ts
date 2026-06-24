@@ -61,6 +61,23 @@ export const pinTextCache = new Map<string, string>()   // last rendered text pe
 // working) yields a null/partial statusline, which would make the pin briefly drop effort/usage/ctx.
 // We reuse the cached good parse on a degraded read so the card stays stable. Keyed by pane id.
 const lastGoodStatus = new Map<string, StatuslineData>()
+// Mode is scraped from the pane footer, where detectCurrentMode returns 'default' BOTH for the real
+// default mode AND when the mode line just isn't in the captured tail (a mid-repaint miss) — which
+// made a bypass session flicker to "🛡ask". stableMode trusts a non-default read immediately, requires
+// two consecutive 'default' reads before believing it, and reuses the last good mode on a
+// non-normal-prompt capture instead of blanking the badge.
+const lastGoodMode = new Map<string, CcMode>()
+const modeDefaultStreak = new Map<string, number>()
+function stableMode(paneId: string, cap: string): string {
+  if (!onNormalPrompt(cap)) { const prev = lastGoodMode.get(paneId); return prev ? modeBadge(prev) : '—' }
+  const m = detectCurrentMode(cap)
+  if (m !== 'default') { lastGoodMode.set(paneId, m); modeDefaultStreak.delete(paneId); return modeBadge(m) }
+  const streak = (modeDefaultStreak.get(paneId) ?? 0) + 1
+  modeDefaultStreak.set(paneId, streak)
+  const prev = lastGoodMode.get(paneId)
+  if (streak >= 2 || !prev) { lastGoodMode.set(paneId, 'default'); return modeBadge('default') }
+  return modeBadge(prev)   // single 'default' after a known mode — likely a missed capture, hold the last
+}
 for (const [c, m] of Object.entries(readJsonFile<Record<string, number>>(SESSION_PIN_FILE, {}))) sessionPins.set(c, m)
 export function persistSessionPins(): void {
   writeJsonFile(SESSION_PIN_FILE, Object.fromEntries(sessionPins))
@@ -184,8 +201,9 @@ export async function statusCardText(paneId: string | null): Promise<string> {
   try {
     const cap = await capturePane(paneId)
     // Emoji + a SHORT lowercase word (🚨 bypass), matching the "⚡ high" badge grammar — the full
-    // modeLabel name made the collapsed pin preview truncate.
-    if (onNormalPrompt(cap)) mode = modeBadge(detectCurrentMode(cap))
+    // modeLabel name made the collapsed pin preview truncate. stableMode guards against a mid-repaint
+    // capture misreading bypass/plan as 'default' (see its definition).
+    mode = stableMode(paneId, cap)
     status = parseStatusline(cap)
     // Cache a complete parse (effort present ⇒ the statusline block rendered fully); on a degraded
     // read (mid-repaint while working) reuse the last good one so the pin doesn't lose effort/usage.

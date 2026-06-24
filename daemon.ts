@@ -64,6 +64,7 @@ import {
   reconcileTopics, refreshTopicTitles, topicThreadFor, emitTopicTyping, armTopicTyping, stopTopicTyping, outboundTargetsFor,
   stampPaneSession, topicBranchCache, generalAnchorLost,
   setPaneRestarting, isPaneRestarting, releasePaneSession, reopenSessionTopic,
+  retriggerTopicTyping,
 } from './topic-runtime.ts'
 import { startWebapp, type SettingsView as WebappSettingsView, type UsageView as WebappUsageView, type DiffView as WebappDiffView } from './webapp.ts'
 import { startTunnel, ensureCloudflared, tailscaleFunnelUrl, type Tunnel } from './tunnel.ts'
@@ -1043,12 +1044,12 @@ async function relayLoopTick(gen: number): Promise<void> {
   else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
   await updateTerminalMirror(working).catch(() => {})
 
-  // DM-only "Clauding…" live draft: open while the turn runs, close when it concludes. Gated on
-  // the claudingDraft pref; dormant in topic mode (only private-chat targets pass dmDraftChats,
-  // and drafts are group-rejected anyway).
+  // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
+  // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
+  // to revisit later. Dormant in topic mode anyway (drafts are group-rejected).
   {
     const acc = loadAccess()
-    const wantDraft = !!file && working && acc.claudingDraft !== false
+    const wantDraft = !!file && working && acc.claudingDraft === true
     if (wantDraft) {
       if (!claudingTimer) { const c = dmDraftChats(await outboundTargetsFor(paneId)); if (c.length) startClaudingDraft(file!, c) }
     } else stopClaudingDraft()
@@ -2334,6 +2335,12 @@ async function handleTabbedAdvance(chat_id: string, paneId: string | null = focu
   }
   // Never observed an advance (the form wedged, or a screen we can't parse) — clear this pane's dedup
   // so the scanner relays whatever lands, and tell the user instead of leaving the form hung.
+  // Diagnostic (this warning is false-alarm-prone): log WHY we couldn't classify the advance so a
+  // recurrence pins the cause — next tab not flagged `tabbed` (TABBED_HINT footer-wording miss)? hash
+  // still the prev tab (form hadn't advanced)? no prompt at all? — instead of guessing.
+  const dbgText = await capturePane(paneId).catch(() => '')
+  const dbgPrompt = detectUserPrompt(dbgText)
+  process.stderr.write(`tabbed-advance timeout: ${dbgPrompt ? `prompt(tabbed=${dbgPrompt.tabbed}, hashMatchesPrev=${promptHash(dbgPrompt) === prevHash})` : 'no-prompt'} submitScreen=${isSubmitScreen(dbgText)}\n`)
   resetPromptDedup(paneId)
   await bot.api.sendMessage(chat_id, '⚠️ Couldn’t read the next question automatically — open the session to continue it.', { ...(thread ? { message_thread_id: thread } : {}) }).catch(() => {})
 }
@@ -8100,7 +8107,7 @@ initMirror({
   loadAccess,
   replyMode,
   getActivePaneId: () => focus.activePaneId,
-  retriggerTyping: () => typingPresence.retrigger(),
+  retriggerTyping: () => { typingPresence.retrigger(); retriggerTopicTyping() },
   resolveTranscriptForPane: async pane => transcriptForPane(pane, await paneCwd(pane)),
   outboundTargets: () => outboundTargetsFor(focus.activePaneId),   // focused session's topic in forum mode, else DM
   auxOutboundTargets: pane => outboundTargetsFor(pane),            // a non-focused session's own topic
