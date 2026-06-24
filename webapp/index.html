@@ -87,6 +87,7 @@
   </header>
   <ul id="list"></ul>
 </div>
+<input type="file" id="upload-input" multiple style="display:none">
 
 <div class="tab panel" id="tab-settings"></div>
 <div class="tab panel" id="tab-usage"></div>
@@ -161,7 +162,7 @@ async function ls(path) {
   const list = $("list");
   list.innerHTML = "";
   if (data.parent) list.appendChild(row("⬆️", "..", "", () => ls(data.parent)));
-  if (WRITE) { list.appendChild(row("📝", "New file…", "", newFile)); list.appendChild(row("➕", "New folder…", "", newFolder)); }
+  if (WRITE) { list.appendChild(row("📝", "New file…", "", newFile)); list.appendChild(row("📤", "Upload from device…", "", pickUpload)); list.appendChild(row("➕", "New folder…", "", newFolder)); }
   for (const e of data.entries) {
     const ico = e.type === "dir" ? "📁" : e.type === "symlink" ? "🔗" : "📄";
     const meta = e.type === "dir" ? "" : fmtSize(e.size);
@@ -261,6 +262,29 @@ async function newFile() {
   await openFile(path);
   if (WRITE && vEditable) $("vedit").click();   // jump into edit mode
 }
+
+// Upload from device: a hidden <input type=file> opens the native picker; each chosen file is POSTed
+// as multipart to /api/upload (into the folder open when picked), then the folder refreshes. Collisions
+// auto-dedup server-side, so re-uploading never clobbers. FormData sets its own content-type → AUTH only.
+const uploadInput = $("upload-input");
+function pickUpload() { uploadInput.value = ""; uploadInput.click(); }
+uploadInput.onchange = async () => {
+  const files = [...uploadInput.files];
+  if (!files.length) return;
+  const dir = cur;   // capture now — the user could navigate before uploads finish
+  let okN = 0;
+  for (const f of files) {
+    const fd = new FormData();
+    fd.append("dir", dir); fd.append("file", f, f.name);
+    try {
+      const r = await fetch(new URL("/api/upload", location.origin), { method: "POST", headers: AUTH, body: fd });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) { showErr((f.name) + ": " + (d.reason || d.error || ("HTTP " + r.status))); continue; }
+      okN++;
+    } catch { showErr("upload failed: " + f.name); }
+  }
+  if (okN) { showOk("Uploaded " + okN + " file" + (okN === 1 ? "" : "s")); if (cur === dir) ls(dir); }
+};
 
 async function download(path) {
   try {

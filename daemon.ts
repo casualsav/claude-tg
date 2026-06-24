@@ -8171,7 +8171,8 @@ const WEBAPP_ENABLED = /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_ENA
 const WEBAPP_PORT = Number(process.env.TELEGRAM_WEBAPP_PORT) || (8787 + (Number.isFinite(+INSTANCE_ID) ? Number(INSTANCE_ID) : 0))
 const WEBAPP_TUNNEL = (process.env.TELEGRAM_WEBAPP_TUNNEL ?? 'cloudflared').toLowerCase()
 const WEBAPP_PUBLIC_URL = (process.env.TELEGRAM_WEBAPP_PUBLIC_URL ?? '').replace(/\/+$/, '')
-const WEBAPP_WRITE = /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_WRITE ?? '')   // edit/delete/rename in the Mini App (default off → read-only)
+const WEBAPP_WRITE = /^(1|true|yes|on)$/i.test(process.env.TELEGRAM_WEBAPP_WRITE ?? '')   // edit/delete/rename/upload in the Mini App (default off → read-only)
+const WEBAPP_MAX_UPLOAD_MB = Number(process.env.TELEGRAM_WEBAPP_MAX_UPLOAD_MB) || 50      // /api/upload size cap (device → folder)
 const WEBAPP_TRASH = join(homedir(), '.tg-trash')                                         // /api/rm moves deletions here (recoverable)
 let filesTunnel: Tunnel | null = null
 let filesFixedUrl: string | null = WEBAPP_PUBLIC_URL || null   // custom domain, or a resolved tailscale-funnel URL — both stable
@@ -8286,7 +8287,7 @@ async function startFilesWebapp(): Promise<void> {
   try {
     startWebapp({ token: TOKEN!, port: WEBAPP_PORT, staticDir: join(import.meta.dir, 'webapp'),
       isAllowed: uid => loadAccess().allowFrom.includes(uid), log: wlog, resolveStart: resolveStartToken,
-      canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH,
+      canWrite: WEBAPP_WRITE, trashDir: WEBAPP_TRASH, maxUploadBytes: WEBAPP_MAX_UPLOAD_MB * 1024 * 1024,
       readSettings: webappReadSettings, setSetting: webappSetSetting, readUsage: webappReadUsage, readDiff: webappReadDiff })
   } catch (e) { wlog(`webapp: failed to start: ${e}`); return }
   if (WEBAPP_PUBLIC_URL) { wlog(`webapp: public url ${WEBAPP_PUBLIC_URL}`); return }

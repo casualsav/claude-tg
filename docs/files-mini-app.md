@@ -92,6 +92,10 @@ All endpoints require valid initData; all resolve+canonicalize paths and refuse 
     a hard delete.
   - `POST /api/mkdir` `{ path, name }` → create a subfolder (`name` may not be `.`/`..` or contain `/`).
   - `POST /api/rename` `{ path, newName }` → rename in place (same name rules; refuses to overwrite).
+  - `POST /api/upload` (**multipart**: `dir` field + `file` blob) → write an uploaded file into `dir`;
+    the filename is reduced to a basename + validated, collisions auto-dedup (`foo (1).png`) so an upload
+    never clobbers; capped at `TELEGRAM_WEBAPP_MAX_UPLOAD_MB` (default 50). The SPA's **Upload from
+    device…** row opens the native file picker (multi-select) and posts each file here.
 
 ## 6. Config (opt-in; off by default)
 In `~/.claude/channels/telegram/.env` / `access.json`:
@@ -103,8 +107,9 @@ In `~/.claude/channels/telegram/.env` / `access.json`:
 - `WEBAPP_PUBLIC_URL=https://…` (stable domain / named tunnel; overrides cloudflared).
 - `WEBAPP_PORT=…` (localhost bind port; default e.g. 8787).
 - `WEBAPP_WRITE=true|false` (default false → read-only). When on, the Mini App gains in-app **edit /
-  delete-to-trash / new-folder / rename**; deletions go to `~/.tg-trash` (recoverable), overwrites keep
-  a `.bak`, every mutation is audited to `daemon.log`.
+  delete-to-trash / new-folder / rename / upload-from-device**; deletions go to `~/.tg-trash`
+  (recoverable), overwrites keep a `.bak`, every mutation is audited to `daemon.log`.
+- `WEBAPP_MAX_UPLOAD_MB=…` (default 50) — size cap for **Upload from device…** (device → folder).
 
 ## 7. Phasing
 - **Phase 0 — inline baseline:** ~~inline-keyboard explorer~~ **skipped** (decided 2026-06-15). Mini App only.

@@ -23,6 +23,7 @@ export interface WebappDeps {
   canWrite?: boolean                       // enable write endpoints (TELEGRAM_WEBAPP_WRITE); default false → read-only
   trashDir?: string                        // /api/rm moves deletions here (recoverable); required when canWrite
   maxWriteBytes?: number                   // /api/write size cap (default 2 MiB)
+  maxUploadBytes?: number                  // /api/upload size cap (default 50 MiB)
   // ---- Console tabs (Settings / Usage / Diff). Injected by the daemon so this stays a thin HTTP
   // layer (no daemon internals imported); each wraps a reused daemon function. All optional —
   // missing dep ⇒ the endpoint 404s and that tab just stays empty. settings WRITES gate on canWrite.
@@ -91,6 +92,21 @@ const isProbablyBinary = (buf: Uint8Array): boolean => {
 }
 
 const SKIP_FIND = new Set(['.git', 'node_modules', '.cache', '.next', 'dist', 'build'])
+
+// Pick a non-colliding path for an upload: foo.png → "foo (1).png", "foo (2).png", … so dropping a
+// file into a folder never silently clobbers an existing one (uploads are additive by intent).
+async function uniquePath(p: string): Promise<string> {
+  if (!(await stat(p).catch(() => null))) return p
+  const dir = dirname(p), base = basename(p)
+  const dot = base.lastIndexOf('.')
+  const stem = dot > 0 ? base.slice(0, dot) : base
+  const ext = dot > 0 ? base.slice(dot) : ''
+  for (let i = 1; i < 1000; i++) {
+    const cand = join(dir, `${stem} (${i})${ext}`)
+    if (!(await stat(cand).catch(() => null))) return cand
+  }
+  return join(dir, `${stem}-${Date.now()}${ext}`)
+}
 
 // matches a simple glob (*, ?) OR a case-insensitive substring against a basename
 function makeMatcher(q: string): (name: string) => boolean {
@@ -192,6 +208,28 @@ async function handleApi(req: Request, url: URL, deps: WebappDeps, userId: strin
     deps.log(`webapp: setting ${body.key}=${JSON.stringify(body.value)} user=${userId}`)
     const err = await deps.setSetting(userId, body.key, body.value)
     return err ? json({ error: err }, 400) : json({ ok: true })
+  }
+
+  // ---- Upload from device (POST multipart; gated by canWrite). Separate from the JSON write group
+  // below because the body is multipart/form-data (a `dir` field + the `file` blob), not JSON. The
+  // filename is reduced to a basename and validated; collisions auto-dedup so an upload never clobbers. ----
+  if (url.pathname === '/api/upload') {
+    if (!deps.canWrite) return json({ error: 'read-only', reason: 'editing disabled (set TELEGRAM_WEBAPP_WRITE=1)' }, 403)
+    if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405)
+    const form = await req.formData().catch(() => null)
+    const file = form?.get('file')
+    if (!form || !(file instanceof File)) return json({ error: 'no file' }, 400)
+    const dir = await canon(String(form.get('dir') || ''))
+    const dst = await stat(dir).catch(() => null)
+    if (!dst || !dst.isDirectory()) return json({ error: 'not a directory' }, 404)
+    const name = basename(file.name || 'upload')
+    if (!name || name === '.' || name === '..' || /[\/\0]/.test(name)) return json({ error: 'bad name' }, 400)
+    const max = deps.maxUploadBytes ?? 50 * 1024 * 1024
+    if (file.size > max) return json({ error: 'too large', reason: `max ${Math.floor(max / 1048576)} MiB` }, 413)
+    const target = await uniquePath(join(dir, name))
+    await writeFile(target, Buffer.from(await file.arrayBuffer()))
+    deps.log(`webapp: upload path=${target} bytes=${file.size} user=${userId}`)
+    return json({ ok: true, path: target, name: basename(target), size: file.size })
   }
 
   // ---- Write endpoints (POST; gated by canWrite = TELEGRAM_WEBAPP_WRITE, default off) ----
