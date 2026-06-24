@@ -1279,7 +1279,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
     if (!st.outstanding && ph !== st.permHash) {
       st.permHash = ph
       st.outstanding = true
-      void relayPermissionToTelegram(perm, pane)
+      void relayAuxMenuAfterPreamble(pane, () => relayPermissionToTelegram(perm, pane))
     }
     return
   }
@@ -1291,7 +1291,7 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
   if (h === st.promptHash) return
   st.promptHash = h
   st.outstanding = true
-  void relayPromptToTelegram(prompt, pane)
+  void relayAuxMenuAfterPreamble(pane, () => relayPromptToTelegram(prompt, pane))
 }
 
 // ---- Off-MCP pane auto-discovery ----
@@ -2281,6 +2281,36 @@ async function flushPendingText(): Promise<void> {
 // is not a turn boundary) and it's lost for good. Flushing on this path removes that race.
 async function relayMenuAfterPreamble(relay: () => unknown): Promise<void> {
   await flushPendingText().catch(() => {})
+  await relay()
+}
+
+// Aux-pane variant of flushPendingText: relay any not-yet-sent assistant text for a SPECIFIC
+// non-focused pane (using that pane's own relay cursor, lastRelayedByFile) before its menu. The
+// focused pane flushes via flushPendingText (its relay loop + the watcher both do); aux panes had
+// NO preamble flush at all — and the aux loop skips relaying entirely while the turn is "working"
+// (a menu keeps it working) — so the question arrived before the paragraph Claude wrote just above
+// it, which then only surfaced after the answer. Guarded on a primed cursor so it can't dump a
+// transcript's whole backlog. Returns whether it sent anything.
+async function flushPendingTextFor(pane: string): Promise<boolean> {
+  if (!TRANSCRIPT_OUTBOUND || !pane) return false
+  const cwd = await paneCwd(pane).catch(() => null)
+  const file = await transcriptForPane(pane, cwd)
+  if (!file || !lastRelayedByFile.has(file)) return false   // unprimed cursor → don't dump backlog
+  const targets = await outboundTargetsFor(pane)
+  let sent = false
+  for (const r of finalRepliesAfter(file, lastRelayedByFile.get(file) ?? '')) {
+    if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
+    lastRelayedByFile.set(file, r.uuid)   // advance before the await so the conclude-relay can't double-send
+    if (/\b(hit your|used \d+% of your) [\w-]+ limit\b/i.test(r.text)) continue   // daemon sends its own ⛔
+    for (const t of targets) await sendAgentText([t.chat], r.text, t.thread).catch(e => process.stderr.write(`daemon: aux prompt pre-flush send failed: ${e}\n`))
+    sent = true
+  }
+  return sent
+}
+
+// Aux analogue of relayMenuAfterPreamble — flush the pane's preamble, THEN relay its menu.
+async function relayAuxMenuAfterPreamble(pane: string, relay: () => unknown): Promise<void> {
+  await flushPendingTextFor(pane).catch(() => {})
   await relay()
 }
 
