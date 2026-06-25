@@ -1044,6 +1044,26 @@ function stopClaudingDraft(): void {
 }
 
 
+// "Thinking…" presence for the live mirror card — the reliable replacement for the typing dot.
+// Telegram renders only ONE bot-typing per chat, so a busy parallel session steals the indicator
+// from the topic you just messaged (proven: both threads pinged, only one renders). Instead we open
+// the mirror card (a real message, immune to that competition) the instant a message lands.
+// turnInProgress only flips true once the model makes its first tool call, so it can't carry the
+// pre-first-token thinking phase — this daemon-side window does: set on inbound, OR-ed into the
+// mirror's `working` signal, cleared when the reply relays. The grace is a safety cap so a stuck or
+// dead turn can't pin the placeholder on forever.
+const THINKING_PENDING_MS = 180_000
+const thinkingPendingUntil = new Map<string, number>()   // paneId → deadline
+function thinkingPending(pane: string | null): boolean { return !!pane && Date.now() < (thinkingPendingUntil.get(pane) ?? 0) }
+function clearThinkingPending(pane: string | null): void { if (pane) thinkingPendingUntil.delete(pane) }
+// Open the live card immediately for a freshly-messaged pane — don't wait for the next relay tick.
+async function kickThinkingMirror(pane: string): Promise<void> {
+  if (!TRANSCRIPT_OUTBOUND) return
+  thinkingPendingUntil.set(pane, Date.now() + THINKING_PENDING_MS)
+  if (pane === focus.activePaneId) await updateTerminalMirror(true).catch(() => {})
+  else if (isTopicMode()) await updateAuxMirror(pane, true).catch(() => {})
+}
+
 async function relayLoopTick(gen: number): Promise<void> {
   if (gen !== relayLoopGen || !focus.activePaneId || !TRANSCRIPT_OUTBOUND) return
   const paneId = focus.activePaneId
@@ -1065,7 +1085,7 @@ async function relayLoopTick(gen: number): Promise<void> {
   relayConcludeTicks = working ? 0 : relayConcludeTicks + 1
   if (isTopicMode()) { if (working) void emitTopicTyping(paneId) }   // topic mode → typing in the session's own topic
   else typingPresence.observe(working)   // reliable working signal — this bridged pane never shows the spinner
-  await updateTerminalMirror(working).catch(() => {})
+  await updateTerminalMirror(working || thinkingPending(paneId)).catch(() => {})   // thinkingPending opens the card on receipt, before turnInProgress flips
 
   // DM-only "Clauding…" live draft. DISABLED by default (the indicator was unreliable): gated to
   // require an explicit claudingDraft:true opt-in (was default-on). All the machinery is kept intact
@@ -1109,6 +1129,7 @@ async function relayLoopTick(gen: number): Promise<void> {
           else if (isTopicMode() && t.chat === getGroupChatId()) stopTopicTyping(t.chat, 'general')   // General-anchored reply — same latch release
         }
       }
+      clearThinkingPending(paneId)   // reply landed → drop the thinking-pending crutch so the card caps/deletes promptly
       typingPresence.stop()   // reply delivered (or banner suppressed) → clean stop, no tail
       if (!isBanner(r.text) && paneId) void maybeShipFooter(paneId)   // opt-in ship buttons when the turn dirtied the tree
     }
@@ -1201,7 +1222,7 @@ async function auxRelayTick(): Promise<void> {
         const working = turnInProgress(file)
         // The session's own live card in its own topic — same lifecycle as the focused card,
         // driven by the same transcript turn signal this loop already computes.
-        await updateAuxMirror(pane, working).catch(() => {})
+        await updateAuxMirror(pane, working || thinkingPending(pane)).catch(() => {})   // open on receipt, before turnInProgress flips
         if (!auxRelayPrimed.has(file)) {
           // A restored (persisted) cursor survives restarts — keep it, so a reply written during
           // the restart window still relays. Only a never-seen transcript skips its existing tail.
@@ -1215,6 +1236,7 @@ async function auxRelayTick(): Promise<void> {
         const ticks = (auxConcludeTicks.get(file) ?? 0) + 1
         auxConcludeTicks.set(file, ticks)
         if (ticks < RELAY_CONCLUDE_TICKS) continue
+        clearThinkingPending(pane)   // turn concluded → drop the thinking-pending crutch so the card caps/deletes promptly
         const cursor = lastRelayedByFile.get(file) ?? ''
         for (const r of finalRepliesAfter(file, cursor)) {
           if (!r.uuid || r.uuid === (lastRelayedByFile.get(file) ?? '')) continue
@@ -7424,6 +7446,10 @@ async function handleInbound(
       }
     }
   }
+  // Open the live mirror card immediately for the destination session — the reliable "received,
+  // thinking…" signal. The typing dot loses Telegram's one-per-chat slot to busy parallel sessions
+  // (proven), so a real-message card is what actually tells you the message landed.
+  if (effPane) void kickThinkingMirror(effPane)
   // Long prompts Telegram split client-side re-merge into one injection (see deliverInbound).
   const mergeKey = `${chat_id}:${typeof threadId === 'number' ? threadId : 'dm'}:${from.id}`
   deliverInbound(mergeKey, params, targetPane, imagePath || attachmentPath || attach ? null : content.length)

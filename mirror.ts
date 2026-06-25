@@ -298,6 +298,11 @@ class MirrorCard {
   // body + the footer's verb/tokens on the throttled relay tick; the cached values carry across
   // ticks so a re-render doesn't re-scrape.
   private body = ''              // last-synced card body (no footer)
+  // Whether this card has ever shown REAL content (thoughts / tools), vs only the "💭 Thinking…"
+  // placeholder that opens the instant a message lands. A card that never upgraded past the
+  // placeholder (a no-tool / pure-thinking turn, whose reply relays as its own message) is DELETED
+  // on conclude rather than capped — so quick Q&A turns don't leave a "Thinking → Done" stub.
+  private sawRealBody = false
   private verb = 'Working'       // last-scraped spinner verb (held between syncs so it doesn't flicker)
   private tokens: string | null = null   // last-scraped PER-TURN token count (spinner only — never the session total)
   private footerTick = 0         // advances one spinner frame per real card edit (animates with activity, no extra edits)
@@ -360,10 +365,16 @@ class MirrorCard {
   }
 
   private reset(): void {
-    this.body = ''; this.verb = 'Working'; this.tokens = null
+    this.body = ''; this.verb = 'Working'; this.tokens = null; this.sawRealBody = false
     this.contentKey = ''; this.idleTicks = 0; this.startedAt = 0; this.lastSyncAt = 0
     this.paneId = null; this.anchor = null; this.cardThread.clear()
   }
+
+  // The placeholder body shown from the instant a message lands until the turn produces real content.
+  // It's the reliable "your message landed, Claude is on it" signal — a real message, immune to
+  // Telegram's per-chat typing competition (only one bot-typing renders per chat, so a busy parallel
+  // session steals the indicator). Topic mode only: in DM the footer-only card already covers this.
+  private thinkingBody(): string { return '💭 <b>Thinking…</b>' }
 
   // The status line pinned to the bottom of a live card: the whimsical working verb + the live
   // elapsed + the PER-TURN token count (from Claude's spinner line only — never the session
@@ -407,8 +418,16 @@ class MirrorCard {
         body = tools.length ? renderActionsMirror(tools, done) : null
       }
     }
-    if (body == null) return false
+    if (body == null) {
+      // Bodyless phase of a live turn — this is only reached when the card should be open (working,
+      // or the daemon's thinking-pending signal is set). In topic mode there's no footer to signal
+      // the turn started, so fill it with the Thinking… placeholder so the card opens immediately on
+      // receipt. DM keeps its footer-only card (footerOn), unchanged.
+      if (!done && !footerOn()) { this.body = this.thinkingBody(); return true }
+      return false
+    }
     this.body = body
+    this.sawRealBody = true
     return true
   }
 
@@ -503,6 +522,14 @@ class MirrorCard {
   // a fresh message. No-op if no mirror is open.
   async finalize(): Promise<void> {
     if (this.msgIds.size === 0) return
+    if (!this.sawRealBody) {
+      // The card never upgraded past the "💭 Thinking…" placeholder — a no-tool / pure-thinking turn
+      // whose reply relayed as its own message. Drop the stub rather than cap it to a redundant
+      // "✅ Done" sitting next to the answer.
+      for (const [chat, mid] of this.msgIds) scheduleDelete(chat, mid)
+      this.msgIds.clear(); this.reset(); this.opts.persist()
+      return
+    }
     await this.syncBody(true)
     let text = this.body || '🖥️ <b>Session</b> · idle'
     if (footerOn()) {
