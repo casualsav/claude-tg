@@ -99,6 +99,8 @@ Configure outbound behavior with `/telegram:access set <key> <value>`.
 
 **`sessionPin`** (default `true`) controls the pinned status message — a self-updating pin with the live model · mode · context · usage metrics (no session identity; the topic tab / single DM session covers that). Toggle from Telegram with `/pin on` | `off`.
 
+**`autoDeleteCommands`** (default `false`) deletes your own message for a few noisy, transient commands right after they're handled — the bot's reply stays. Deliberately scoped to **`/terminal`** · **`/t`** and **`/update tg`** · **`/update claude`** (not bare `/update`, whose dashboard you'd want to keep). Toggle it in `/settings` → 🗑️ Auto-delete. In a group/forum the bot needs the **Delete messages** admin permission; the first time it can't delete, it tells you once how to grant it.
+
 ## Voice transcription
 
 Voice notes and audio files can be transcribed to text before they reach the session, so you can talk to Claude instead of typing. Transcription runs entirely outside Claude — a local model or a hosted API — so it never consumes Claude usage; only the resulting text enters the conversation (the same cost as if you had typed it). If transcription is disabled or fails, the message falls back to a placeholder plus the `attachment_file_id`.
