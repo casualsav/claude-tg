@@ -162,7 +162,7 @@ async function ls(path) {
   const list = $("list");
   list.innerHTML = "";
   if (data.parent) list.appendChild(row("⬆️", "..", "", () => ls(data.parent)));
-  if (WRITE) { list.appendChild(row("📝", "New file…", "", newFile)); list.appendChild(row("📤", "Upload from device…", "", pickUpload)); list.appendChild(row("➕", "New folder…", "", newFolder)); }
+  if (WRITE) { list.appendChild(row("📤", "Upload file", "", pickUpload)); list.appendChild(row("➕", "New folder…", "", newFolder)); }
   for (const e of data.entries) {
     const ico = e.type === "dir" ? "📁" : e.type === "symlink" ? "🔗" : "📄";
     const meta = e.type === "dir" ? "" : fmtSize(e.size);
@@ -259,20 +259,6 @@ async function newFolder() {
   const d = await writeOp("/api/mkdir", { path: cur, name: n });
   if (d) { showOk("Folder created"); ls(cur); }
 }
-// New file: create it empty in the current folder, then open it straight into the editor to type contents.
-async function newFile() {
-  const n = prompt("New file name (e.g. notes.md):");
-  if (!n) return;
-  if (n === "." || n === ".." || /[\/\0]/.test(n)) { showErr("invalid name"); return; }
-  const path = (cur === "/" ? "" : cur) + "/" + n;
-  const d = await writeOp("/api/write", { path, content: "" });
-  if (!d) return;
-  showOk("Created");
-  await ls(cur);
-  await openFile(path);
-  if (WRITE && vEditable) $("vedit").click();   // jump into edit mode
-}
-
 // Upload from device: a hidden <input type=file> opens the native picker; each chosen file is POSTed
 // as multipart to /api/upload (into the folder open when picked), then the folder refreshes. Collisions
 // auto-dedup server-side, so re-uploading never clobbers. FormData sets its own content-type → AUTH only.

@@ -169,7 +169,8 @@ keep `access.json`'s pairing/group/prefs state, only adding the interviewed Tele
      tunnel. Also opens in-group.
    - **off** — no file explorer.
 
-   The explorer is read-only (browse / preview / download); edits are done chat-side. The Funnel and
+   When enabled the explorer is **read-write by default** — browse / preview / download, plus upload,
+   edit, delete, and rename (set `TELEGRAM_WEBAPP_WRITE=0` for read-only). The Funnel and
    custom-domain options need one extra step — registering the URL as the bot's **Main Mini App** in
    BotFather — handled in "If the Files Mini App is enabled" below.
 
@@ -191,6 +192,7 @@ GROQ_API_KEY=<key>                          # groq only
 OPENAI_API_KEY=<key>                        # openai only
 # Files Mini App — only if enabled (Q6):
 TELEGRAM_WEBAPP_ENABLED=1                    # turns the file explorer on
+TELEGRAM_WEBAPP_WRITE=1                      # read-write by default (upload/edit/delete/rename); set 0 for read-only
 TELEGRAM_WEBAPP_TUNNEL=tailscale            # tailscale = in-group · cloudflared = DM-only (default) · none = use PUBLIC_URL
 TELEGRAM_WEBAPP_PUBLIC_URL=https://files.example.com   # custom-domain option only (overrides the tunnel)
 ```
