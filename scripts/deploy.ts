@@ -37,8 +37,17 @@ const MARKET_JSON = join('.claude-plugin', 'marketplace.json')
 function die(msg: string): never { console.error(`\n✗ ${msg}`); process.exit(1) }
 function step(msg: string) { console.log(`• ${msg}`) }
 
-function sh(cmd: string, args: string[], cwd?: string) {
-  return spawnSync(cmd, args, { cwd, encoding: 'utf8' })
+// spawnSync, normalized so a failed spawn can't crash a caller. On ENOENT (command not found, e.g.
+// `bunx` absent) or a signal kill, raw spawnSync returns a null status AND null stdout/stderr — so any
+// `.slice`/`.split`/`.trim` on its output throws a bare TypeError instead of failing usefully. Here that
+// becomes a nonzero status with the spawn error surfaced as stderr, making every call site below safe
+// and every `die()` message real.
+function sh(cmd: string, args: string[], cwd?: string): { status: number; stdout: string; stderr: string } {
+  const r = spawnSync(cmd, args, { cwd, encoding: 'utf8' })
+  const stdout = r.stdout ?? ''
+  const stderr = r.stderr ?? (r.error ? `${cmd}: ${r.error.message}` : '')
+  const status = r.status ?? (r.error ? 127 : 1)   // null status ⇒ spawn failed / signal-killed ⇒ treat as failure
+  return { status, stdout, stderr }
 }
 
 // `origin` (casualsav/claude-tg) is the single source of truth AND the marketplace end-user installs
@@ -93,10 +102,10 @@ function syncTrackedInto(dest: string) {
   const listFile = join(tmpdir(), `bct-deploy-${process.pid}-${Date.now()}.list`)
   writeFileSync(listFile, tracked.join('\0'))
   try {
-    const r = spawnSync('bash', ['-c',
+    const r = sh('bash', ['-c',
       'set -o pipefail; tar -C "$1" --null -T "$2" -cf - | tar -C "$3" -xf -',
-      'bash', REPO, listFile, dest], { encoding: 'utf8' })
-    if (r.status !== 0) die(`tar sync into ${dest} failed: ${r.stderr || r.stdout}`)
+      'bash', REPO, listFile, dest])
+    if (r.status !== 0) die(`tar sync into ${dest} failed: ${r.stderr || r.stdout || '(no output)'}`)
   } finally {
     try { rmSync(listFile, { force: true }) } catch {}
   }
@@ -148,12 +157,20 @@ if (build.status !== 0) {
   die(`type-check failed — checkout left untouched:\n${build.stderr || build.stdout}`)
 }
 // bun build only transpiles — it has shipped unimported identifiers before. The real typecheck
-// runs in the CHECKOUT (same files just synced; typescript + @types/bun are devDeps there).
+// runs in the CHECKOUT (same files just synced; typescript + @types/bun are devDeps there). A
+// fresh checkout (e.g. the other user's, or CI) may have no node_modules yet, so self-heal the
+// devDeps first (mirrors the cache-deps step above) — otherwise tsc fails to resolve @types/bun
+// and the gate trips for the wrong reason.
+if (!existsSync(join(REPO, 'node_modules', 'typescript'))) {
+  step('installing checkout devDeps (typescript + @types/bun)')
+  const r = sh('bun', ['install', '--no-summary'], REPO)
+  if (r.status !== 0) die(`bun install in checkout failed:\n${r.stderr || r.stdout || '(no output)'}`)
+}
 step('type-checking (tsc --noEmit)')
-const tsc = sh('bunx', ['tsc', '--noEmit'], REPO)
+const tsc = sh('bun', ['x', 'tsc', '--noEmit'], REPO)   // `bun x`, not `bunx` (the latter isn't always on PATH)
 if (tsc.status !== 0) {
   if (freshCache) rmSync(newCache, { recursive: true, force: true })
-  die(`tsc failed — checkout left untouched:\n${(tsc.stdout || tsc.stderr).slice(0, 4000)}`)
+  die(`tsc failed — checkout left untouched:\n${(tsc.stdout || tsc.stderr || '(tsc produced no output)').slice(0, 4000)}`)
 }
 step('type-check OK')
 // Unit tests gate the ship too — they're fast (<1s) and cover the extracted domains.
@@ -161,7 +178,7 @@ step('running unit tests (bun test)')
 const tests = sh('bun', ['test'], REPO)
 if (tests.status !== 0) {
   if (freshCache) rmSync(newCache, { recursive: true, force: true })
-  die(`tests failed — checkout left untouched:\n${(tests.stderr || tests.stdout).slice(-4000)}`)
+  die(`tests failed — checkout left untouched:\n${(tests.stderr || tests.stdout || '(no output)').slice(-4000)}`)
 }
 step('tests OK')
 
