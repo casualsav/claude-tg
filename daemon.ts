@@ -898,12 +898,18 @@ async function sendAgentText(chats: string[], text: string, threadId?: number): 
     const extra = threadId ? { ...base, message_thread_id: threadId } : base
     for (const c of chunks) await sendChunkRetrying(chat_id, c, extra)
   }
+  // Rich messages render code as RichBlockPreformatted, which (on current clients) wraps off-screen
+  // and drops the copy button the classic <pre> entity had — so a reply carrying a fenced code block
+  // is worse under rich. Route any such reply through the classic HTML/<pre> path to keep copy +
+  // contained horizontal scroll; a code-bearing reply forgoes native tables/headings (rare to mix).
+  const hasFencedCode = /(^|\n)[ \t]{0,3}```/.test(text)
   for (const chat_id of chats) {
     // Rich messages (Bot API 10.1) render Claude's markdown natively (tables/headings/code/collapsible)
     // and work in DM + topics. One raw call per chat — no chunking (no documented length cap). ANY
     // failure (older Telegram, malformed markdown, network) falls back to the HTML/chunk path so the
-    // reply still lands. Always on when markdown rendering is enabled (renderMarkdown !== false).
-    if (access.renderMarkdown !== false) {
+    // reply still lands. On when markdown rendering is enabled (renderMarkdown !== false) AND the reply
+    // has no fenced code block (see above).
+    if (access.renderMarkdown !== false && !hasFencedCode) {
       try { await sendRichMessage(TOKEN!, chat_id, toInputRichMessage(text), { messageThreadId: threadId }); continue }
       catch (e) { process.stderr.write(`daemon: rich message send failed, falling back to HTML: ${e}\n`) }
     }
