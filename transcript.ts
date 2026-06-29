@@ -79,9 +79,24 @@ function isCommandNoise(text: string): boolean {
 // /resume picker.
 export type RecentSession = { sessionId: string; cwd: string; mtime: number; title: string; root: string }
 
+// The cwd a transcript ran in (first entry carrying one). Cheap peek used to scope a project dir.
+function firstCwd(path: string): string {
+  try {
+    for (const l of readFileSync(path, 'utf8').split('\n')) {
+      if (!l.trim()) continue
+      let e: Entry
+      try { e = JSON.parse(l) } catch { continue }
+      if (e.cwd) return e.cwd
+    }
+  } catch {}
+  return ''
+}
+
 // The most-recently-active sessions across every project (across all `roots`), newest first.
 // Stat is cheap, so we stat them all to sort, then read only the top `limit` for cwd + title.
-export function listRecentSessions(limit: number, roots: string[] = [PROJECTS_DIR]): RecentSession[] {
+// `cwdFilter` scopes to one folder: every session in a project dir shares one cwd, so we peek a
+// single file per dir to gate the whole dir (used by /resume inside a topic).
+export function listRecentSessions(limit: number, roots: string[] = [PROJECTS_DIR], cwdFilter?: string): RecentSession[] {
   const files: { path: string; sessionId: string; mtime: number; root: string }[] = []
   for (const root of roots) {
     let projectDirs: string[]
@@ -89,8 +104,11 @@ export function listRecentSessions(limit: number, roots: string[] = [PROJECTS_DI
     for (const d of projectDirs) {
       let names: string[]
       try { names = readdirSync(join(root, d)) } catch { continue }
-      for (const n of names) {
-        if (!n.endsWith('.jsonl')) continue
+      const jsonls = names.filter(n => n.endsWith('.jsonl'))
+      if (cwdFilter) {
+        if (!jsonls.length || firstCwd(join(root, d, jsonls[0])) !== cwdFilter) continue
+      }
+      for (const n of jsonls) {
         const path = join(root, d, n)
         try { files.push({ path, sessionId: n.slice(0, -6), mtime: statSync(path).mtimeMs, root }) } catch {}
       }

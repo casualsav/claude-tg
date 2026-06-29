@@ -5514,20 +5514,28 @@ bot.command('resume', async ctx => {
     await ctx.reply('A session is already running, and this DM drives a single session. /exit it first, or /bind a forum group to run several.')
     return
   }
-  const recents = listRecentSessions(10, allProjectsDirs())
-  if (recents.length === 0) { await ctx.reply('No recent sessions found.'); return }
+  // Inside a topic: scope the list to THAT topic's folder and resume in-place (same pane), so the
+  // conversation switches without spawning a new topic. General / DM: all folders, new pane.
+  const thread = ctx.message?.message_thread_id
+  const topicSid = isTopicMode() && typeof thread === 'number' ? getSessionByThread(thread) : undefined
+  const topicCwd = topicSid ? getTopicBySession(topicSid)?.cwd : undefined
+  const inTopic = !!topicCwd && typeof thread === 'number'
+  const recents = listRecentSessions(10, allProjectsDirs(), inTopic ? topicCwd : undefined)
+  if (recents.length === 0) { await ctx.reply(inTopic ? 'No recent sessions found for this folder.' : 'No recent sessions found.'); return }
   const kb = new InlineKeyboard()
   const lines = recents.map((s, i) => {
     const folder = s.cwd.split('/').filter(Boolean).pop() || s.cwd || '—'
     const acct = accountForProjectsDir(s.root)
     const who = acct.name === 'main' ? '' : ` · 👤 ${escapeHtml(acct.name)}`
     const title = s.title ? ` — <i>${escapeHtml(s.title)}</i>` : ''
-    kb.text(`${i + 1}`, `resume:${s.sessionId}`)
+    kb.text(`${i + 1}`, inTopic ? `resumehere:${s.sessionId}:${thread}` : `resume:${s.sessionId}`)
     if ((i + 1) % 5 === 0) kb.row()
     return `${i + 1}. <b>${escapeHtml(folder)}</b> · ${fmtAgo(s.mtime)}${who}${title}`
   })
   await ctx.reply(
-    `🕘 <b>Recent sessions</b>\n${lines.join('\n')}\n\nTap a number to resume it in a new pane.`,
+    inTopic
+      ? `🕘 <b>Recent sessions in this folder</b>\n${lines.join('\n')}\n\nTap a number to resume it in this topic's pane.`
+      : `🕘 <b>Recent sessions</b>\n${lines.join('\n')}\n\nTap a number to resume it in a new pane.`,
     { parse_mode: 'HTML', reply_markup: kb })
 })
 
@@ -7006,6 +7014,40 @@ bot.on('callback_query:data', async ctx => {
   }
 
   // Resume button from /resume → relaunch that session with `claude --resume` in a new pane.
+  // /resume tapped INSIDE a topic → resume the chosen session in THAT topic's pane (same pane keeps
+  // the bridge pointed at it; restartPaneSessionCore preserves the pane's @tg_session stamp, so the
+  // topic + routing survive — only the Claude conversation swaps). Falls back to a spawn pinned to
+  // the topic if its pane is already gone.
+  const resumeHereMatch = /^resumehere:([0-9a-fA-F-]+):(\d+)$/.exec(data)
+  if (resumeHereMatch) {
+    if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
+      await ctx.answerCallbackQuery({ text: 'Not authorized.' }).catch(() => {})
+      return
+    }
+    await ctx.answerCallbackQuery().catch(() => {})
+    const id = resumeHereMatch[1]
+    const thread = Number(resumeHereMatch[2])
+    const chat = String(ctx.chat?.id)
+    const topicSid = getSessionByThread(thread)
+    const pane = topicSid ? await paneForSession(topicSid).catch(() => null) : null
+    if (pane) {
+      await ctx.editMessageText('🔄 Resuming that session in this topic — reconnecting…', { parse_mode: 'HTML' }).catch(() => {})
+      if (!(await restartPaneSessionCore(pane, id)))
+        await bot.api.sendMessage(chat, '❌ Couldn’t resume that session here.', { message_thread_id: thread }).catch(() => {})
+      return
+    }
+    // Topic's pane is gone → spawn the chosen session pinned to this topic (reopen the tab).
+    const hit = findSessionCwd(id, allProjectsDirs())
+    const dir = hit?.cwd ?? homedir()
+    const ok = await spawnSession(dir, `--resume ${id}`, topicSid, hit ? accountForProjectsDir(hit.root) : MAIN_ACCOUNT)
+    if (ok && topicSid) await reopenSessionTopic(topicSid)
+    await ctx.editMessageText(ok
+      ? `🔄 Resuming in <code>${escapeHtml(dir)}</code> — reconnecting…`
+      : `❌ Couldn't resume that session in <code>${escapeHtml(dir)}</code>.`,
+      { parse_mode: 'HTML' }).catch(() => {})
+    return
+  }
+
   const resumeMatch = /^resume:([0-9a-fA-F-]+)$/.exec(data)
   if (resumeMatch) {
     if (!loadAccess().allowFrom.includes(String(ctx.from.id))) {
