@@ -67,7 +67,8 @@ test('renderThoughtsMirror leads with 💭, folds tools into a summary, appends 
     { kind: 'tool', tool: 'Bash', detail: 'ls' },
   ]
   const out = renderThoughtsMirror(feed, true)
-  expect(out.startsWith('<blockquote>💭')).toBe(true)   // thoughts render shaded in a blockquote
+  expect(out.startsWith('💭')).toBe(true)   // thoughts render as plain 💭-led text, no blockquote
+  expect(out).not.toContain('<blockquote>')
   expect(out).toContain('thinking hard')
   expect(out).toContain('Ran 1 shell command')   // the tool call folds into the aggregate line
   expect(out).not.toContain('Bash')
