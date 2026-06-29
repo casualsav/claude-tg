@@ -72,7 +72,19 @@ export async function sessionForPane(pane: string, stampIfMissing = true): Promi
   if (!stampIfMissing) return null
   const cwd = await paneCwd(pane).catch(() => null)
   const cand = cwd ? findTopicByCwd(cwd) : undefined
-  const claimed = cand && [...paneSessionCache.entries()].some(([p, s]) => s === cand.sessionId && p !== pane)
+  // Is cand's session still held by ANOTHER pane? paneSessionCache deliberately keeps entries for
+  // DEAD panes (close-on-end needs them), so a plain .some() false-positives on a stale dead holder:
+  // a fresh pane in a cwd whose only topic is closed would be denied adoption, mint a new id, and
+  // ensureTopicFor would spawn a BRAND-NEW topic instead of reviving the closed one. Count only a
+  // LIVE holder as a claim, and evict dead holders so they never block adoption again.
+  let claimed = false
+  if (cand) {
+    for (const [p, s] of [...paneSessionCache.entries()]) {
+      if (s !== cand.sessionId || p === pane) continue
+      if (await paneAlive(p)) { claimed = true; break }
+      releasePaneSession(p)   // dead holder — forget it so the closed topic can be revived
+    }
+  }
   const sid = cand && !claimed ? cand.sessionId : genSessionId()
   try { await exec('tmux', ['set-option', '-p', '-t', pane, SESSION_PANE_OPT, sid], { timeout: 2000 }) } catch { return null }
   paneSessionCache.set(pane, sid)
