@@ -384,6 +384,20 @@ async function driveOnboarding(paneId: string, stage: 'theme' | 'trust' | 'enter
   else await sendKeys(paneId, ['Enter'])
 }
 
+// Same as driveOnboarding, but for a NON-focused topic/aux pane. A spawned or /resume'd topic
+// session can land on the folder-trust (or theme/enter) screen here — where it used to be filtered
+// out and left wedged forever. Accept the highlighted default (option 1 "Yes, I trust this folder")
+// through the pane's OWN injection lock (focus.paneWatcher belongs to a different pane). Per-pane
+// dedup so the menu repainting each poll doesn't fire Enter repeatedly.
+const auxOnboardAt = new Map<string, { stage: string; at: number }>()
+async function driveAuxOnboarding(pane: string, stage: 'theme' | 'trust' | 'enter'): Promise<void> {
+  const prev = auxOnboardAt.get(pane)
+  if (prev && prev.stage === stage && Date.now() - prev.at < 4000) return
+  auxOnboardAt.set(pane, { stage, at: Date.now() })
+  process.stderr.write(`daemon: aux onboarding auto-advance (${stage}) on pane ${pane}\n`)
+  await withPaneInjection(pane, async () => { await sendKeys(pane, ['Enter']); await waitForSettle(pane, 200, 3000) })
+}
+
 // Auto-confirm the usage-limit "What do you want to do?" menu on option 1 ("Stop and wait for limit
 // to reset", which is the highlighted default → Enter selects it). Without this the terminal wedges
 // on the menu and a scheduled/queued message can never inject. Deduped via a short window so the
@@ -1336,11 +1350,13 @@ async function scanAuxPanePrompts(pane: string): Promise<void> {
     if (h !== st.authUrl) { st.authUrl = h; void relayAuthUrlToTelegram(authUrl, pane) }
   }
 
-  // Pre-REPL screens (theme/trust) are select menus too — never relay them as questions. Driving
-  // them stays an adoption-flow (focused) concern; here they're just filtered out.
+  // Pre-REPL screens (theme/trust/enter) are select menus too — never relay them as questions. A
+  // spawned/resumed topic session can land here (e.g. an untrusted folder), so AUTO-ADVANCE them on
+  // this non-focused pane (accept the highlighted default — option 1 "trust") instead of leaving it
+  // wedged on the prompt forever.
   if (!onboardedPanes.has(pane)) {
     if (onNormalPrompt(text)) onboardedPanes.add(pane)
-    else if (classifyOnboarding(text)) return
+    else { const stage = classifyOnboarding(text); if (stage) { void driveAuxOnboarding(pane, stage); return } }
   }
 
   const perm = detectPermissionPrompt(text)
