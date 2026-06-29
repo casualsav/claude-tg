@@ -34,6 +34,7 @@ export function renderPromptHtml(prompt: PromptInfo): string {
   else if (prompt.multiSelect) lines.push('<i>Pick one or more, then tap ✅ Submit.</i>')
   lines.push('')
   prompt.options.forEach((opt, i) => {
+    if (i > 0) lines.push('')   // blank line between options so they read as separate items
     lines.push(`<b>${i + 1}.</b> ${escapeHtml(opt.label)}`)
     if (opt.description) lines.push(`<i>${escapeHtml(opt.description)}</i>`)
   })
