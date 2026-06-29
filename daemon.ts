@@ -5479,13 +5479,17 @@ async function spawnSession(dir: string, extra = '', presetSessionId?: string, a
     }
     // The adopt marker is a tmux pane option set below — NOT a claude flag. We keep
     // --allow-dangerously-skip-permissions purely for the bypass-on-demand UX (switchable from
-    // /mode), which is unrelated to adoption. extra e.g. "--resume <id>". ALWAYS pin the session to
-    // its account's config dir — including main — so a bridge spawn runs under the SAME config the
-    // daemon lists/reads sessions from. Critical when the daemon's home differs from the launching
-    // shell's (e.g. a remapped HOME): otherwise a --resume can't find a transcript the daemon just
-    // listed, and lands a fresh session instead. On a normal install configDir == the default
-    // ~/.claude, so this is a no-op there. tmux runs the command through sh -c, so the prefix works.
-    const envPrefix = `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
+    // /mode), which is unrelated to adoption. extra e.g. "--resume <id>".
+    // Pin the MAIN session to the daemon's HOME so the spawn uses the SAME config the daemon
+    // lists/reads sessions from (its $HOME/.claude.json + $HOME/.claude/projects). Without this a
+    // spawn inherits the launching SHELL's HOME, which differs when the daemon runs under a remapped
+    // HOME (e.g. a hermes profile) — so a --resume couldn't find the transcript the daemon listed.
+    // It MUST be HOME, not CLAUDE_CONFIG_DIR: the latter relocates .claude.json INTO the config dir
+    // (a blank file), which resets onboarding/auth and forces a re-login. No-op on a normal install
+    // (shell HOME == daemon home). Alt accounts still pin CLAUDE_CONFIG_DIR. tmux runs through sh -c.
+    const envPrefix = account.name === 'main'
+      ? `HOME='${homedir().replace(/'/g, `'\\''`)}' `
+      : `CLAUDE_CONFIG_DIR='${account.configDir.replace(/'/g, `'\\''`)}' `
     // Set the inherited model + effort as LAUNCH FLAGS so the session boots already correct — no
     // typing /model + /effort into a freshly-booting pane (that post-boot injection was the 10-20s
     // slow-spawn lag and it raced the user's first keystrokes). Claude Code restores neither on
