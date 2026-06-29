@@ -266,7 +266,7 @@ async function main(): Promise<void> {
   if (await waitHealthy(offset)) {
     const synced = syncInstalledCopies()
     const extra = synced.length ? `\n\nAlso ${synced.join('; ')}. Start a new session to pick up convention changes.` : ''
-    await sendFresh(`✅ Updated <code>${shortVer(oldGitref)}</code> → <code>${shortVer(newSha)}</code> (<b>v${newVer}</b>). Reopen the chat / tap "/" to refresh the command menu.${extra}`)
+    await sendFresh(`✅ Updated <code>${shortVer(oldGitref)}</code> → <code>${shortVer(newSha)}</code> (<b>v${newVer}</b>).${extra}`)
     // Prune build/backups, keep the immediate predecessor as a manual fallback.
     if (preBackup) { try { rmSync(preBackup, { recursive: true, force: true }) } catch {} }
     return
