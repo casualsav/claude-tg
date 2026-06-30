@@ -131,6 +131,23 @@ export function findTopicByCwd(cwd: string): { sessionId: string; entry: TopicEn
   return closedHit
 }
 
+// Same-cwd ambiguity guard (Track B). True when ≥2 OPEN topics share this cwd — in which case the
+// cwd-keyed resolvers (findTopicByCwd adoption in sessionForPane, paneForSession's cwd fallback)
+// MUST NOT silently pick "the first". When pane stamps are wiped — a tmux-SERVER restart strips
+// @tg_session off every pane — picking the first cross-wires the siblings, so closing one topic
+// resolves onto another's pane and exits it, taking both down. Closed siblings don't count: they
+// have no live pane to cross-wire onto, and counting them would wrongly block re-resolving the one
+// open topic. On true, the resolvers refuse (mint a fresh id / return null) — trading a possible
+// duplicate-on-restart for never killing a live sibling.
+export function cwdAmbiguous(cwd: string): boolean {
+  ensureLoaded()
+  let open = 0
+  for (const e of Object.values(store.topics)) {
+    if (e.cwd === cwd && !e.closed && ++open > 1) return true
+  }
+  return false
+}
+
 export function setTopic(sessionId: string, entry: TopicEntry): void { ensureLoaded(); store.topics[sessionId] = entry; save() }
 
 export function updateTopic(sessionId: string, patch: Partial<TopicEntry>): void {

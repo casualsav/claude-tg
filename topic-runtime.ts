@@ -10,7 +10,7 @@ import { paneCwd, paneAlive } from './pane-io.ts'
 import { escapeHtml } from './markdown.ts'
 import { loadAccess } from './access.ts'
 import {
-  genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd,
+  genSessionId, isTopicMode, getGroupChatId, getTopicBySession, findTopicByCwd, cwdAmbiguous,
   setTopic, updateTopic, removeTopic, listTopics, getGeneralSession, setGeneralSession,
 } from './topics.ts'
 import { focus, offMcpPanes, sessions } from './state.ts'
@@ -83,7 +83,10 @@ export async function sessionForPane(pane: string, stampIfMissing = true): Promi
     const cached = paneSessionCache.get(pane)
     if (cached) return cached   // an in-flight mint just stamped+cached this pane
     const cwd = await paneCwd(pane).catch(() => null)
-    const cand = cwd ? findTopicByCwd(cwd) : undefined
+    // Same-cwd siblings (Track B): if >1 OPEN topic shares this cwd, adopting "the first" can bind
+    // this pane to the wrong session (after a tmux-server restart wipes every stamp) — refuse and
+    // mint a fresh id instead. A lone duplicate beats silently cross-wiring two live sessions.
+    const cand = cwd && !cwdAmbiguous(cwd) ? findTopicByCwd(cwd) : undefined
     // Is cand's session still held by ANOTHER pane? paneSessionCache deliberately keeps entries for
     // DEAD panes (close-on-end needs them), so a plain .some() false-positives on a stale dead holder:
     // a fresh pane in a cwd whose only topic is closed would be denied adoption, mint a new id, and
@@ -120,7 +123,11 @@ export async function paneForSession(sessionId: string): Promise<string | null> 
     if ((await sessionForPane(p, false)) === sessionId) return p
   }
   const t = getTopicBySession(sessionId)
-  if (t) {
+  // Cwd fallback only when the cwd unambiguously maps to one open topic. With same-cwd siblings it
+  // could grab a sibling's (stamp-wiped) pane and — on a close/teardown that resolves through here —
+  // exit it, closing both topics. Refusing (→ null) treats the session as unresolved instead, which
+  // every caller handles safely; it never cross-wires.
+  if (t && !cwdAmbiguous(t.cwd)) {
     const p = await paneForCwd(t.cwd)
     if (p && !(await sessionForPane(p, false))) {
       try { await exec('tmux', ['set-option', '-p', '-t', p, SESSION_PANE_OPT, sessionId], { timeout: 2000 }) } catch {}
